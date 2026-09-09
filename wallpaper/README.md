@@ -58,6 +58,16 @@ installed at all — a real deployment rather than a dev/test setup —
 self-contained AppImage. That file runs on its own; nothing needs
 installing on the target machine beforehand.
 
+## Font
+
+The weather overlay (temperature, condition, city, clock) uses Apercu,
+loaded from `assets/fonts/Apercu.otf` via an `@font-face` rule in
+`index.html`. It only applies to text this app directly controls — the
+overlay text, not the browser wall's four search panels, since those load
+actual DuckDuckGo pages (someone else's HTML/CSS) rather than content this
+project renders itself. There's no way to force a font onto a separate
+website's own page content.
+
 ## Location and weather
 
 - Location comes from IP geolocation (`ip-api.com`), not the browser's
