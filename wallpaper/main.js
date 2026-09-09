@@ -1,19 +1,19 @@
 const { app, BrowserWindow, screen } = require('electron');
 const path = require('path');
-const { attachBrowserWall } = require('./browser-wall');
+const { createKioskWindow } = require('./kiosk-browsers');
 
 // ---- Tunables -----------------------------------------------------------
-// The 5-panel live-search browser wall only attaches to the primary
-// display. Attaching it per-monitor would multiply outbound search
-// traffic per extra screen for no real benefit.
-const ENABLE_BROWSER_WALL = true;
+// The 5-panel kiosk browser cluster only appears on the primary display.
+// Putting one on every monitor would multiply outbound search traffic per
+// extra screen, and a customer can only sit at one screen at a time anyway.
+const ENABLE_KIOSK_BROWSERS = true;
 // ---------------------------------------------------------------------------
 
 let wallpaperWindows = [];
+let kioskWindow = null;
 
 function createWallpaperWindows() {
   const displays = screen.getAllDisplays();
-  const primaryDisplayId = screen.getPrimaryDisplay().id;
 
   wallpaperWindows = displays.map((display) => {
     const win = new BrowserWindow({
@@ -51,17 +51,22 @@ function createWallpaperWindows() {
 
     win.loadFile('index.html');
 
-    if (ENABLE_BROWSER_WALL && display.id === primaryDisplayId) {
-      win.webContents.once('did-finish-load', () => {
-        attachBrowserWall(win);
-      });
-    }
-
     return win;
   });
 }
 
-app.whenReady().then(createWallpaperWindows);
+app.whenReady().then(() => {
+  createWallpaperWindows();
+
+  if (ENABLE_KIOSK_BROWSERS) {
+    // A separate, normal, focusable window — unlike the wallpaper windows
+    // above, this one is deliberately interactive, since it's what
+    // customers actually click into and browse with. It sits on top of
+    // the wallpaper automatically (any ordinary window sits above the
+    // desktop-background layer), no special z-order code needed.
+    kioskWindow = createKioskWindow();
+  }
+});
 
 app.on('window-all-closed', () => {
   // A background/wallpaper app has no "all windows closed" quit moment in

@@ -108,42 +108,51 @@ its build dependencies and `xdotool` first — see the comments at the top
 of `linux/xwinwrap-launch.sh` for the exact `apt` packages and the
 build-from-source steps.
 
-## Browser wall (5-panel search cluster)
+## Kiosk browsers (5-panel interactive cluster)
 
-`browser-wall.js` overlays five independent `BrowserView` panels on top of
-the video, arranged in a cross/bracket cluster centered on screen: one
-larger center panel, and four smaller panels above/below/left/right of it.
-The video still shows through everywhere outside that cluster. It's only
-attached to the primary display (`ENABLE_BROWSER_WALL` in `main.js`) —
-attaching it per-monitor would multiply live search traffic for no real
-benefit.
+`kiosk-browsers.js` creates five real, usable browser panels arranged in a
+cross/bracket cluster: one larger center panel, and four smaller panels
+above/below/left/right of it. **This is a separate, ordinary, focusable
+window from the wallpaper** — not embedded in it — because a true
+wallpaper window (`main.js`, `type: 'desktop'`, `focusable: false`)
+fundamentally cannot receive clicks or keyboard input; that's not a
+limitation of this code, it's how window managers treat that layer. The
+kiosk window is sized to exactly the cluster's bounding box and uses
+`transparent: true` so the video wallpaper shows through its four corner
+gaps (the cross shape doesn't fill its own bounding rectangle) — this
+needs a compositor running on the guest, which Cinnamon has by default via
+Muffin; on a non-compositing window manager the gaps would show solid
+black instead, a cosmetic downgrade rather than a broken app. It only
+appears on the primary display (`ENABLE_KIOSK_BROWSERS` in `main.js`).
 
-**The four side panels run live search queries**, cycling through
-`SEARCH_TERMS` in `browser-wall.js` on staggered timers. They hit
-DuckDuckGo's plain HTML endpoint (`html.duckduckgo.com/html/?q=...`)
-rather than Google or a JS-heavy results page, since that endpoint
-tolerates repeated automated requests noticeably better — though
-"tolerates better" isn't "immune." Push `SIDE_REFRESH_MS` much below a few
-minutes and expect CAPTCHAs or blocks eventually. The center panel rotates
-through `MAIN_URLS` on a slower timer.
-
-Since this now runs continuously rather than only while idle, that live
-search traffic is also continuous for as long as the app is running —
-worth keeping in mind if you're on a metered or unusual connection.
+**All 5 panels behave identically, and the behavior is idle vs. active,
+not decorative vs. interactive:** left alone, each one auto-searches
+through `SEARCH_TERMS` on its own staggered timer (`REFRESH_MS` between
+jumps), hitting DuckDuckGo's plain HTML endpoint
+(`html.duckduckgo.com/html/?q=...`) rather than Google or a JS-heavy
+results page, since that endpoint tolerates repeated automated requests
+noticeably better — though "tolerates better" isn't "immune," so don't
+push `REFRESH_MS` much below a few minutes. The moment a customer clicks
+or types into any panel (detected via `kiosk-preload.js`, attached
+regardless of what page is loaded), that panel's rotation stops and it
+becomes a normal browser for them — clicking search results navigates
+like any real browser, since it's a genuine, isolated `BrowserView`, not a
+simulation. After `INACTIVITY_TIMEOUT_MS` (2.5 minutes by default) with no
+further clicks or typing in that panel, it automatically goes back to
+auto-searching on its own, ready for the next customer.
 
 Other things worth knowing:
 
-- **Panels are opaque, not blended.** `BrowserView` renders as a solid
-  native layer, so these tiles fully cover the video where they sit — no
-  CSS transparency across that boundary. The alternative is the
-  `<webview>` tag instead of `BrowserView`, which lives in the DOM and can
-  take CSS opacity, at some cost to isolation/performance.
-- **Layout is fraction-based** — `LAYOUT_FRACTIONS` in `browser-wall.js`
-  controls cluster size and how much bare video shows around it.
-- **The panels don't need focus or clicks** to work, since navigation is
-  driven entirely by the timers in `browser-wall.js`, not by anyone
-  interacting with them — which fits a background wallpaper that
-  generally shouldn't be grabbing input anyway.
+- **Panel sizes are pixel-based**, not fractions of the screen —
+  `PANEL_SIZES` in `kiosk-browsers.js` controls the cluster's dimensions
+  directly, and the window is sized to match automatically.
+- **No address bar or browser chrome yet** — panels show whatever page
+  they're on with no navigation controls of their own; customers browse by
+  clicking links within the page. Worth adding if that's a problem in
+  practice.
+- Since idle panels are now making network requests continuously
+  whenever the app is running (not just during customer use), that's
+  worth keeping in mind on a metered or unusual connection.
 
 ## Recommended workflow
 
