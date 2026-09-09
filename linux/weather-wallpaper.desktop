@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Weather Wallpaper
+Comment=Always-on live desktop background: video, live weather, and a search-panel wall
+Exec=/path/to/weather-wallpaper/node_modules/.bin/electron /path/to/weather-wallpaper
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
+Terminal=false

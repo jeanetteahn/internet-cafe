@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Weather Wallpaper</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+
+  video#bg {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+  }
+
+  .overlay {
+    position: fixed;
+    bottom: 48px;
+    left: 48px;
+    color: #fff;
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.6);
+  }
+
+  .temp { font-size: 64px; font-weight: 300; line-height: 1; }
+  .condition { font-size: 22px; font-weight: 400; margin-top: 8px; opacity: 0.9; }
+  .place { font-size: 16px; font-weight: 400; margin-top: 4px; opacity: 0.7; }
+  .clock { font-size: 16px; font-weight: 400; margin-top: 14px; opacity: 0.6; letter-spacing: 0.5px; }
+</style>
+</head>
+<body>
+
+  <!-- Point this at your own local video file, e.g. "assets/loop.mp4" -->
+  <video id="bg" autoplay muted loop playsinline>
+    <source src="assets/loop.mp4" type="video/mp4">
+  </video>
+
+  <div class="overlay">
+    <div class="temp" id="temp">--°</div>
+    <div class="condition" id="condition">Loading weather…</div>
+    <div class="place" id="place"></div>
+    <div class="clock" id="clock"></div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

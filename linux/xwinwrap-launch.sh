@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Fallback launcher for window managers that ignore Electron's native
+# `type: 'desktop'` hint (main.js tries that first). xwinwrap creates a
+# placeholder window pinned to the desktop layer and reparents an
+# arbitrary app's window into it — the same trick most existing "live
+# wallpaper on Linux" tools (mpv-based ones especially) use.
+#
+# xwinwrap isn't packaged in every distro's repos. On Debian/Ubuntu-based
+# systems it's often unavailable via apt and needs building from source:
+#   git clone https://github.com/ujjwal96/xwinwrap
+#   cd xwinwrap && make && sudo make install
+# (search your distro's package manager first — some do carry it)
+#
+# This only manipulates X11 windows. Under Wayland it generally only has
+# a chance of working through XWayland, and even then depends on how
+# tolerant your compositor is of X11 clients requesting background
+# placement — it is not guaranteed, unlike on a real X11 session.
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Use the project's own local Electron (installed by `npm install` into
+# node_modules) rather than assuming a global `electron` command is on
+# PATH — a plain `npm install` never puts one there.
+ELECTRON_BIN="$PROJECT_DIR/node_modules/.bin/electron"
+if [ ! -x "$ELECTRON_BIN" ]; then
+  echo "Electron not found at $ELECTRON_BIN — run 'npm install' in $PROJECT_DIR first." >&2
+  exit 1
+fi
+
+# Full virtual screen geometry (all monitors combined). Adjust to a
+# specific monitor's geometry (from `xrandr`) if you only want the
+# wallpaper on one screen.
+GEOMETRY=$(xdotool getdisplaygeometry 2>/dev/null || echo "1920 1080")
+WIDTH=$(echo "$GEOMETRY" | awk '{print $1}')
+HEIGHT=$(echo "$GEOMETRY" | awk '{print $2}')
+
+exec xwinwrap -ov -fs -s -st -sp -nf -b -un -g "${WIDTH}x${HEIGHT}+0+0" -- \
+  "$ELECTRON_BIN" "$PROJECT_DIR" &
