@@ -83,9 +83,20 @@ Wayland it depends on XWayland tolerance and isn't guaranteed.
 
 **Autostart at login:** `bash linux/install-autostart.sh` installs an XDG
 autostart entry (`~/.config/autostart/weather-wallpaper.desktop`), which
-works the same across GNOME, KDE, XFCE, etc. Edit that `.desktop` file's
-`Exec=` line first if you want it to launch via the `xwinwrap` script
-instead of Electron directly.
+works the same across GNOME, KDE, XFCE, etc. Pass `--xwinwrap` to have it
+launch through `xwinwrap-launch.sh` instead of Electron directly:
+
+```bash
+bash linux/install-autostart.sh --xwinwrap
+```
+
+**On Mint Cinnamon with X11** (confirmed via `grep EDITION
+/etc/linuxmint/info` and `echo $XDG_SESSION_TYPE`): use the `--xwinwrap`
+flag above. Cinnamon's compositor generally ignores the native `type:
+'desktop'` hint, but X11 means `xwinwrap` itself is fully usable. Install
+its build dependencies and `xdotool` first — see the comments at the top
+of `linux/xwinwrap-launch.sh` for the exact `apt` packages and the
+build-from-source steps.
 
 ## Browser wall (5-panel search cluster)
 

@@ -6,10 +6,16 @@
 # wallpaper on Linux" tools (mpv-based ones especially) use.
 #
 # xwinwrap isn't packaged in every distro's repos. On Debian/Ubuntu-based
-# systems it's often unavailable via apt and needs building from source:
+# systems (Mint included) it's usually unavailable via apt and needs
+# building from source:
+#   sudo apt install build-essential libx11-dev libxext-dev libxrender-dev
 #   git clone https://github.com/ujjwal96/xwinwrap
 #   cd xwinwrap && make && sudo make install
 # (search your distro's package manager first — some do carry it)
+#
+# Also needs `xdotool` for screen-size detection (falls back to a 1920x1080
+# guess if it's missing, so install it for correct results):
+#   sudo apt install xdotool
 #
 # This only manipulates X11 windows. Under Wayland it generally only has
 # a chance of working through XWayland, and even then depends on how
@@ -36,4 +42,4 @@ WIDTH=$(echo "$GEOMETRY" | awk '{print $1}')
 HEIGHT=$(echo "$GEOMETRY" | awk '{print $2}')
 
 exec xwinwrap -ov -fs -s -st -sp -nf -b -un -g "${WIDTH}x${HEIGHT}+0+0" -- \
-  "$ELECTRON_BIN" "$PROJECT_DIR" &
+  "$ELECTRON_BIN" "$PROJECT_DIR"

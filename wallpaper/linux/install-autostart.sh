@@ -3,6 +3,15 @@
 # sits on the desktop background layer for the rest of the session. XDG
 # autostart is a shared freedesktop.org standard, so this works the same
 # way under GNOME, KDE, XFCE, etc.
+#
+# Usage:
+#   bash install-autostart.sh            # native: launches Electron directly
+#   bash install-autostart.sh --xwinwrap # launches via xwinwrap-launch.sh instead
+#
+# Use --xwinwrap on Cinnamon (Mint's default edition) — its compositor
+# generally ignores the native `type: 'desktop'` hint, so xwinwrap is the
+# one that actually lands the wallpaper behind your icons there. On MATE
+# or Xfce, try without the flag first.
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,14 +26,22 @@ if [ ! -x "$ELECTRON_BIN" ]; then
   exit 1
 fi
 
+if [ "${1:-}" = "--xwinwrap" ]; then
+  EXEC_LINE="$PROJECT_DIR/linux/xwinwrap-launch.sh"
+else
+  EXEC_LINE="$ELECTRON_BIN $PROJECT_DIR"
+fi
+
 mkdir -p "$AUTOSTART_DIR"
 
-sed "s|Exec=.*|Exec=$ELECTRON_BIN $PROJECT_DIR|" \
+sed "s|Exec=.*|Exec=$EXEC_LINE|" \
   "$PROJECT_DIR/linux/weather-wallpaper.desktop" > "$DEST"
 
 echo "Installed autostart entry: $DEST"
+echo "Launch method: $EXEC_LINE"
 echo "It will launch next time you log in. To run it right now instead:"
-echo "  cd $PROJECT_DIR && npm start"
-echo ""
-echo "If it doesn't sit behind your desktop icons (common on GNOME/KDE),"
-echo "try linux/xwinwrap-launch.sh instead — see README.md."
+if [ "${1:-}" = "--xwinwrap" ]; then
+  echo "  bash $PROJECT_DIR/linux/xwinwrap-launch.sh"
+else
+  echo "  cd $PROJECT_DIR && npm start"
+fi
