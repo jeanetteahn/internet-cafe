@@ -124,6 +124,42 @@ Other things worth knowing:
   interacting with them — which fits a background wallpaper that
   generally shouldn't be grabbing input anyway.
 
+## Recommended workflow
+
+1. **Iterate on the Mac first.** `npm start` runs fine on macOS for
+   everything except the Linux-specific desktop-layer placement — video
+   playback, weather fetching, and the browser wall's layout/rotation all
+   work identically. This is where most edits should happen, since it's
+   instant (no transfer, no Mint round-trip).
+2. **Sync to Mint with git**, not by re-downloading a zip each time:
+   ```bash
+   # one-time, on whichever machine creates the remote (e.g. GitHub/GitLab):
+   git remote add origin <your-repo-url>
+   git push -u origin master
+
+   # on the Mac, after making changes:
+   git add -A && git commit -m "..." && git push
+
+   # on Mint, to pick them up:
+   git pull
+   ```
+3. **Validate window placement on Mint only.** Run `npm start` there and
+   check whether it settles behind your icons. If not, try
+   `bash linux/xwinwrap-launch.sh`. This is the one step that has to happen
+   on real Linux hardware — there's no way to shortcut it from the Mac.
+4. **Wire up autostart** (`bash linux/install-autostart.sh`) once placement
+   is working, so it survives a reboot without manual steps.
+5. **Package for real deployment last, not during dev.** `npm run
+   build:linux` bundles Electron and the app into a single AppImage —
+   worth doing once things are settled, not on every iteration.
+
+One practical note while testing the browser wall specifically: it's
+useful to temporarily drop `SIDE_REFRESH_MS` in `browser-wall.js` to
+something short (a few seconds) so you can see the rotation working
+without waiting minutes — just remember to set it back to a
+multi-minute value before leaving it running for real, since a short
+interval is what risks getting rate-limited.
+
 ## Multi-monitor
 
 `main.js` creates one desktop-layer window per connected display
