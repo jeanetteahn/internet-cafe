@@ -51,6 +51,18 @@ Your video goes at `assets/loop.mp4` (the `<video>` tag in `index.html`
 points there). It should appear immediately, behind your desktop icons,
 and just stay there.
 
+**Emergency exit: `Ctrl+Alt+Q` always quits the app immediately**, no
+matter what's on screen or which window (if any) has focus. This matters
+because, especially via `xwinwrap`, it's possible for this app to end up
+genuinely covering the entire screen with nothing else reachable —
+keyboard shortcuts registered through Electron's `globalShortcut` API are
+caught before any window gets them, so this works even then. Not
+something a customer would stumble into by accident, but worth knowing
+about while testing placement on a new machine, and worth reconsidering
+(or changing the combo) before this goes into real unattended production
+use, if a "hidden exit" isn't something you want customers to ever be
+able to find.
+
 If you eventually want this running on a machine without Node/npm
 installed at all — a real deployment rather than a dev/test setup —
 `npm run build:linux` (via `electron-builder`, already configured in

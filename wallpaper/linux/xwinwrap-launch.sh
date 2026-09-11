@@ -41,5 +41,12 @@ GEOMETRY=$(xdotool getdisplaygeometry 2>/dev/null || echo "1920 1080")
 WIDTH=$(echo "$GEOMETRY" | awk '{print $1}')
 HEIGHT=$(echo "$GEOMETRY" | awk '{print $2}')
 
-exec xwinwrap -ov -fs -s -st -sp -nf -b -un -g "${WIDTH}x${HEIGHT}+0+0" -- \
+# NOTE: deliberately no `-fs` here. xwinwrap's own usage text says `-ov`
+# (override_redirect, what makes this sit seamlessly in the background) is
+# intended for non-fullscreen mode; combining `-ov` with `-fs` triggers a
+# BadMatch X error on window creation on at least some X11/compositor
+# combinations (confirmed on Cinnamon/Mutter-family setups). The explicit
+# `-g` geometry below already covers the full display, so dropping `-fs`
+# costs nothing.
+exec xwinwrap -ov -s -st -sp -nf -b -un -g "${WIDTH}x${HEIGHT}+0+0" -- \
   "$ELECTRON_BIN" "$PROJECT_DIR"

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, screen } = require('electron');
+const { app, BrowserWindow, screen, globalShortcut } = require('electron');
 const path = require('path');
 const { createKioskWindow } = require('./kiosk-browsers');
 
@@ -66,6 +66,27 @@ app.whenReady().then(() => {
     // desktop-background layer), no special z-order code needed.
     kioskWindow = createKioskWindow();
   }
+
+  // Safety valve for development/testing: this app is designed to cover
+  // the whole screen and (via xwinwrap) can end up genuinely on top of
+  // everything else while we're still confirming window placement on a
+  // new machine. A registered global shortcut is caught by Electron
+  // before any window, so it works even if this app currently owns every
+  // pixel on screen and no other window is reachable. Ctrl+Alt+Q always
+  // quits immediately. Not something a customer would ever guess or
+  // trigger by accident, but worth removing (or changing) once placement
+  // is confirmed stable on the target machine, if it's not wanted as a
+  // permanent "hidden exit" in production.
+  const registered = globalShortcut.register('Control+Alt+Q', () => {
+    app.quit();
+  });
+  if (!registered) {
+    console.error('Failed to register the Ctrl+Alt+Q safety-quit shortcut.');
+  }
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
 });
 
 app.on('window-all-closed', () => {
