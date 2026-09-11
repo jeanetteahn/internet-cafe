@@ -120,6 +120,52 @@ its build dependencies and `xdotool` first — see the comments at the top
 of `linux/xwinwrap-launch.sh` for the exact `apt` packages and the
 build-from-source steps.
 
+**Known xwinwrap crash on Mutter/Muffin-family compositors (GNOME,
+Cinnamon):** `xwinwrap -ov -fs ...` can fail with `X Error of failed
+request: BadMatch (invalid parameter attributes)`. This happens because
+these compositors run an invisible, full-screen `InputOnly` "guard
+window" that xwinwrap's desktop-window detection can mistake for a real
+window to reparent into — and creating a normal window as a child of an
+`InputOnly` one is always a `BadMatch` per the X11 protocol, no exceptions.
+`linux/xwinwrap-launch.sh` already omits `-fs` (redundant with the
+explicit `-g` geometry it passes) since that combination is what tends to
+trigger it, but if you still hit this crash, the real fix is patching
+xwinwrap itself to skip `InputOnly` windows while searching:
+
+```bash
+cd ~/xwinwrap   # wherever you built it from source
+sed -i 's/if (attrs.map_state != 0 && ((attrs.width == display_width/if (attrs.map_state != 0 \&\& attrs.class != InputOnly \&\& ((attrs.width == display_width/' xwinwrap.c
+make && sudo make install
+```
+
+## Restarting after you change the code
+
+Two ways to (re)launch, depending on whether the app is already running:
+
+- **A double-clickable launcher** — run `bash linux/install-desktop-launcher.sh`
+  once to add an icon to the Cinnamon menu (and your Desktop, if you have
+  one). Clicking it kills any already-running instance and starts fresh
+  with whatever code currently exists in the folder — so the flow after
+  every `git pull` is just: pull, then click the icon. No terminal needed
+  for routine updates once this is installed. (Nemo may treat a
+  newly-placed Desktop icon as untrusted the first time — if double-clicking
+  does nothing, right-click it once and choose "Allow Launching".)
+- **Manually from a terminal** — `bash linux/relaunch.sh` does the same
+  kill-then-relaunch, or `bash linux/xwinwrap-launch.sh` directly if you
+  know nothing else is currently running.
+
+Either way, `git pull` only updates the files on disk — it does not
+restart whatever's already running. You always need one of the two
+relaunch steps above afterward to actually see the new code, visuals, or
+animations on screen. (`npm install` is also needed again, but only if the
+update changed `package.json` — a new dependency or an Electron version
+bump — not for ordinary code/asset changes.)
+
+**Safety exit while testing:** `Ctrl+Alt+Q` always force-quits the app
+immediately, regardless of what's on screen or what has focus — useful
+since a placement/layering issue can otherwise leave the app genuinely
+covering the entire display with nothing else reachable.
+
 ## Kiosk browsers (5-panel interactive cluster)
 
 `kiosk-browsers.js` creates five real, usable browser panels arranged in a
