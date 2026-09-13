@@ -28,7 +28,17 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Use the project's own local Electron (installed by `npm install` into
 # node_modules) rather than assuming a global `electron` command is on
 # PATH — a plain `npm install` never puts one there.
-ELECTRON_BIN="$PROJECT_DIR/node_modules/.bin/electron"
+#
+# Deliberately the real native binary (node_modules/electron/dist/electron),
+# NOT node_modules/.bin/electron. That .bin wrapper is a small script
+# starting with `#!/usr/bin/env node` — it needs `node` on PATH to even
+# start. That's fine in an interactive terminal (opening one sources
+# ~/.bashrc, which is what wires up nvm's PATH additions), but this script
+# is also meant to be launched from a desktop icon or an XDG autostart
+# entry — neither of which sources ~/.bashrc, so `node` isn't found there
+# and the wrapper dies immediately with "No such file or directory". The
+# real Electron binary below is self-contained and needs nothing on PATH.
+ELECTRON_BIN="$PROJECT_DIR/node_modules/electron/dist/electron"
 if [ ! -x "$ELECTRON_BIN" ]; then
   echo "Electron not found at $ELECTRON_BIN — run 'npm install' in $PROJECT_DIR first." >&2
   exit 1

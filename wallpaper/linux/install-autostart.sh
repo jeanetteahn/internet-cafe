@@ -20,7 +20,13 @@ DEST="$AUTOSTART_DIR/weather-wallpaper.desktop"
 
 # Uses the project's own local Electron (from `npm install`) rather than a
 # global `electron` command, which a plain `npm install` never provides.
-ELECTRON_BIN="$PROJECT_DIR/node_modules/.bin/electron"
+#
+# The real native binary, not node_modules/.bin/electron — that wrapper
+# needs `node` on PATH (it's a `#!/usr/bin/env node` script), and an XDG
+# autostart entry never sources ~/.bashrc the way an interactive terminal
+# does, so nvm's PATH setup never runs and `node` can't be found. The
+# actual Electron binary below is self-contained and needs nothing on PATH.
+ELECTRON_BIN="$PROJECT_DIR/node_modules/electron/dist/electron"
 if [ ! -x "$ELECTRON_BIN" ]; then
   echo "Electron not found at $ELECTRON_BIN — run 'npm install' in $PROJECT_DIR first." >&2
   exit 1
