@@ -23,7 +23,15 @@ const WEATHER_CODES = {
 async function getApproxLocation() {
   // IP-based geolocation: no permission prompt, works with nobody at the
   // keyboard, which is exactly the situation a screensaver runs in.
-  const res = await fetch('https://ip-api.com/json/');
+  //
+  // Deliberately http://, not https://. ip-api.com's free tier only
+  // supports plain HTTP — the HTTPS endpoint returns a 403 with
+  // "SSL unavailable for this endpoint, order a paid plan..." (confirmed
+  // via curl on the physical Mint machine). This isn't a mixed-content
+  // problem here: index.html is loaded via file://, not https://, so
+  // Chromium doesn't block an http:// fetch from it the way it would from
+  // a real https:// page.
+  const res = await fetch('http://ip-api.com/json/');
   if (!res.ok) throw new Error('geolocation lookup failed');
   const data = await res.json();
   return { lat: data.lat, lon: data.lon, city: data.city, region: data.regionName };
