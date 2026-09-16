@@ -40,12 +40,15 @@ npm start
 
 No separate Electron install is needed — `npm install` downloads the exact
 Electron binary this project needs straight into `node_modules`, and
-`npm start` runs that local copy. `linux/xwinwrap-launch.sh` and
-`linux/install-autostart.sh` both also reference that same local copy
-(`node_modules/.bin/electron`) directly, rather than assuming a global
-`electron` command is on your `PATH` — a plain `npm install` never puts
-one there, so don't try to `apt install electron` or similar; it isn't
-needed and isn't how this is meant to run.
+`npm start` runs it (via `scripts/launch-both.js`, which spawns the
+wallpaper and the kiosk cluster as two separate processes — see "Kiosk
+browsers" below for why). The Linux launch scripts
+(`linux/xwinwrap-launch.sh`, `linux/native-launch.sh`,
+`linux/install-autostart.sh`) reference that same local copy's real
+binary directly (`node_modules/electron/dist/electron`) rather than
+assuming a global `electron` command is on your `PATH` — a plain `npm
+install` never puts one there, so don't try to `apt install electron` or
+similar; it isn't needed and isn't how this is meant to run.
 
 Your video goes at `assets/loop.mp4` (the `<video>` tag in `index.html`
 points there). It should appear immediately, behind your desktop icons,
@@ -181,7 +184,29 @@ gaps (the cross shape doesn't fill its own bounding rectangle) — this
 needs a compositor running on the guest, which Cinnamon has by default via
 Muffin; on a non-compositing window manager the gaps would show solid
 black instead, a cosmetic downgrade rather than a broken app. It only
-appears on the primary display (`ENABLE_KIOSK_BROWSERS` in `main.js`).
+appears on the primary display.
+
+**It's also a separate *process*, not just a separate window** —
+`kiosk-main.js` is its own Electron entry point, launched alongside
+`main.js` rather than from inside it. This isn't just tidiness: on a
+Mint Cinnamon test machine (a NucBox5), running the kiosk window and the
+wallpaper window out of one Electron process, then wrapping that whole
+process with `xwinwrap` (see the Cinnamon section below), reliably killed
+the entire process — silently, exit status 0 — the instant the kiosk
+window was created alongside the wallpaper window. `xwinwrap` was built
+around single-window apps like `mpv`; handing it a process that opens a
+second, differently-sized top-level window right after the first isn't
+something it tolerates. Splitting the kiosk cluster into its own process
+(`kiosk-main.js`) sidesteps this: `xwinwrap` only ever wraps `main.js`
+(wallpaper, one window), and the kiosk process launches normally,
+unwrapped, alongside it — see `linux/xwinwrap-launch.sh` and
+`linux/native-launch.sh`, which start both. `npm start` does the same via
+`scripts/launch-both.js` for Mac/dev. Set `ENABLE_KIOSK=0` before any of
+these to skip the kiosk process (handy for isolating wallpaper-only
+issues, which is how this crash was originally tracked down). Since the
+two are separate OS processes, the `Ctrl+Alt+Q` safety-quit (below) is
+coordinated between them via small PID files (`process-pair.js`) so it
+still quits both together.
 
 **All 5 panels behave identically, and the behavior is idle vs. active,
 not decorative vs. interactive:** left alone, each one auto-searches

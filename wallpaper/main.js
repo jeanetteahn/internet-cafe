@@ -1,16 +1,25 @@
 const { app, BrowserWindow, screen, globalShortcut } = require('electron');
 const path = require('path');
-const { createKioskWindow } = require('./kiosk-browsers');
+const { registerSelf, killOthers } = require('./process-pair');
 
-// ---- Tunables -----------------------------------------------------------
-// The 5-panel kiosk browser cluster only appears on the primary display.
-// Putting one on every monitor would multiply outbound search traffic per
-// extra screen, and a customer can only sit at one screen at a time anyway.
-const ENABLE_KIOSK_BROWSERS = true;
+// ---- Wallpaper only -------------------------------------------------------
+// This process creates ONLY the desktop-layer video/weather window(s).
+// The 5-panel kiosk browser cluster used to be created from here too, as a
+// second window in this same process — it now lives in its own process
+// (kiosk-main.js), launched separately by linux/xwinwrap-launch.sh /
+// linux/native-launch.sh / scripts/launch-both.js. That split exists
+// because of a confirmed crash: wrapping this process with `xwinwrap`
+// (needed on Cinnamon, see README) while it also owned the kiosk window
+// killed the whole process silently — exit status 0 — the instant that
+// second, differently-sized window was created. xwinwrap was built to
+// wrap a single-window app (tools like mpv), and having this process open
+// only its own wallpaper window(s) keeps it exactly that.
 // ---------------------------------------------------------------------------
 
+const PROCESS_NAME = 'wallpaper';
+const cleanupPidFile = registerSelf(PROCESS_NAME);
+
 let wallpaperWindows = [];
-let kioskWindow = null;
 
 function createWallpaperWindows() {
   const displays = screen.getAllDisplays();
@@ -58,35 +67,36 @@ function createWallpaperWindows() {
 app.whenReady().then(() => {
   createWallpaperWindows();
 
-  if (ENABLE_KIOSK_BROWSERS) {
-    // A separate, normal, focusable window — unlike the wallpaper windows
-    // above, this one is deliberately interactive, since it's what
-    // customers actually click into and browse with. It sits on top of
-    // the wallpaper automatically (any ordinary window sits above the
-    // desktop-background layer), no special z-order code needed.
-    kioskWindow = createKioskWindow();
-  }
-
   // Safety valve for development/testing: this app is designed to cover
   // the whole screen and (via xwinwrap) can end up genuinely on top of
   // everything else while we're still confirming window placement on a
   // new machine. A registered global shortcut is caught by Electron
   // before any window, so it works even if this app currently owns every
   // pixel on screen and no other window is reachable. Ctrl+Alt+Q always
-  // quits immediately. Not something a customer would ever guess or
-  // trigger by accident, but worth removing (or changing) once placement
-  // is confirmed stable on the target machine, if it's not wanted as a
-  // permanent "hidden exit" in production.
+  // quits immediately — and also quits the separate kiosk process (see
+  // process-pair.js), since the two are meant to go together. Not
+  // something a customer would ever guess or trigger by accident, but
+  // worth removing (or changing) once placement is confirmed stable on
+  // the target machine, if it's not wanted as a permanent "hidden exit"
+  // in production.
   const registered = globalShortcut.register('Control+Alt+Q', () => {
+    killOthers(PROCESS_NAME);
     app.quit();
   });
   if (!registered) {
-    console.error('Failed to register the Ctrl+Alt+Q safety-quit shortcut.');
+    // Expected if the kiosk process (kiosk-main.js) happened to register
+    // this OS-level shortcut first — its handler kills this process too,
+    // so Ctrl+Alt+Q still quits both either way.
+    console.error(
+      'Ctrl+Alt+Q already claimed by the kiosk process — expected, and ' +
+      'harmless: that process\'s shortcut quits this one too.'
+    );
   }
 });
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  cleanupPidFile();
 });
 
 app.on('window-all-closed', () => {

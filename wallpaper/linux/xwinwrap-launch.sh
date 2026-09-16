@@ -5,6 +5,18 @@
 # arbitrary app's window into it — the same trick most existing "live
 # wallpaper on Linux" tools (mpv-based ones especially) use.
 #
+# xwinwrap wraps ONLY the wallpaper process (main.js) below — never the
+# kiosk browser cluster. That used to be one Electron process opening both
+# windows, but wrapping the pair crashed xwinwrap outright (confirmed on a
+# NucBox5 running Mint Cinnamon: the whole Electron process died silently,
+# exit status 0, the instant the second, differently-sized kiosk window
+# was created). xwinwrap expects a single-window app, like the mpv-style
+# tools it was built around. The kiosk cluster now runs as its own,
+# completely separate, unwrapped Electron process (kiosk-main.js),
+# launched normally in the background just below — it doesn't need any
+# desktop-layer trick since it's an ordinary focusable window that sits
+# above the wallpaper automatically, wrapped or not.
+#
 # xwinwrap isn't packaged in every distro's repos. On Debian/Ubuntu-based
 # systems (Mint included) it's usually unavailable via apt and needs
 # building from source:
@@ -50,6 +62,13 @@ fi
 GEOMETRY=$(xdotool getdisplaygeometry 2>/dev/null || echo "1920 1080")
 WIDTH=$(echo "$GEOMETRY" | awk '{print $1}')
 HEIGHT=$(echo "$GEOMETRY" | awk '{print $2}')
+
+# Kiosk cluster: separate, unwrapped, ordinary Electron process — see the
+# comment above. Set ENABLE_KIOSK=0 to skip it (handy while debugging
+# wallpaper placement on its own, the way we bisected the xwinwrap crash).
+if [ "${ENABLE_KIOSK:-1}" != "0" ]; then
+  "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" &
+fi
 
 # NOTE: deliberately no `-fs` here. xwinwrap's own usage text says `-ov`
 # (override_redirect, what makes this sit seamlessly in the background) is

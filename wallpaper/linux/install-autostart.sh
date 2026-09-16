@@ -35,7 +35,11 @@ fi
 if [ "${1:-}" = "--xwinwrap" ]; then
   EXEC_LINE="$PROJECT_DIR/linux/xwinwrap-launch.sh"
 else
-  EXEC_LINE="$ELECTRON_BIN $PROJECT_DIR"
+  # native-launch.sh, not a direct electron invocation: the kiosk browser
+  # cluster is its own separate process (kiosk-main.js) now, so something
+  # has to start both. See linux/native-launch.sh and
+  # linux/xwinwrap-launch.sh's comments for why they're split.
+  EXEC_LINE="$PROJECT_DIR/linux/native-launch.sh"
 fi
 
 mkdir -p "$AUTOSTART_DIR"
@@ -49,5 +53,5 @@ echo "It will launch next time you log in. To run it right now instead:"
 if [ "${1:-}" = "--xwinwrap" ]; then
   echo "  bash $PROJECT_DIR/linux/xwinwrap-launch.sh"
 else
-  echo "  cd $PROJECT_DIR && npm start"
+  echo "  bash $PROJECT_DIR/linux/native-launch.sh"
 fi
