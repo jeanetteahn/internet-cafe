@@ -1,0 +1,281 @@
+# Weather Wallpaper (Electron)
+
+An always-on live desktop background: looping video, a live local weather
+overlay, and an optional 5-panel browser wall that auto-runs search
+queries — all sitting on the desktop layer, behind your icons, never
+stealing focus or responding to input by disappearing (this is a
+wallpaper, not a screensaver — it's visible continuously, not just when
+the machine goes idle).
+
+## The honest caveat, up front
+
+There is no single "Linux desktop wallpaper API." What actually happens
+depends heavily on your window manager and whether you're on X11 or
+Wayland:
+
+- **Lighter X11 window managers** (Openbox, XFCE, many i3/tiling setups)
+  generally honor Electron's `type: 'desktop'` window hint out of the box
+  — this is what `main.js` uses, and it's the first thing to try.
+- **GNOME and KDE Plasma** manage their own desktop/icon layer more
+  tightly and don't reliably let an arbitrary app claim the background,
+  even with that hint set. If the window shows up on top of everything
+  instead of behind your icons, this is why.
+- **Wayland** (increasingly the default on GNOME/Fedora/Ubuntu) has no
+  standard protocol letting an ordinary client claim the background layer
+  at all. Only a couple of compositors (Sway, Hyprland) support a
+  background-layer protocol (`wlr-layer-shell`), and Electron doesn't
+  implement it. A from-scratch Electron wallpaper is realistically an X11
+  (or XWayland-tolerant) thing today.
+
+If the native approach doesn't sit correctly on your setup, use
+`linux/xwinwrap-launch.sh` instead (below) — that's the trick most
+existing Linux "live wallpaper" tools actually rely on.
+
+## Running it
+
+```bash
+npm install
+npm start
+```
+
+No separate Electron install is needed — `npm install` downloads the exact
+Electron binary this project needs straight into `node_modules`, and
+`npm start` runs it (via `scripts/launch-both.js`, which spawns the
+wallpaper and the kiosk cluster as two separate processes — see "Kiosk
+browsers" below for why). The Linux launch scripts
+(`linux/xwinwrap-launch.sh`, `linux/native-launch.sh`,
+`linux/install-autostart.sh`) reference that same local copy's real
+binary directly (`node_modules/electron/dist/electron`) rather than
+assuming a global `electron` command is on your `PATH` — a plain `npm
+install` never puts one there, so don't try to `apt install electron` or
+similar; it isn't needed and isn't how this is meant to run.
+
+Your video goes at `assets/loop.mp4` (the `<video>` tag in `index.html`
+points there). It should appear immediately, behind your desktop icons,
+and just stay there.
+
+**Emergency exit: `Ctrl+Alt+Q` always quits the app immediately**, no
+matter what's on screen or which window (if any) has focus. This matters
+because, especially via `xwinwrap`, it's possible for this app to end up
+genuinely covering the entire screen with nothing else reachable —
+keyboard shortcuts registered through Electron's `globalShortcut` API are
+caught before any window gets them, so this works even then. Not
+something a customer would stumble into by accident, but worth knowing
+about while testing placement on a new machine, and worth reconsidering
+(or changing the combo) before this goes into real unattended production
+use, if a "hidden exit" isn't something you want customers to ever be
+able to find.
+
+If you eventually want this running on a machine without Node/npm
+installed at all — a real deployment rather than a dev/test setup —
+`npm run build:linux` (via `electron-builder`, already configured in
+`package.json`) bundles Electron and the app together into a single
+self-contained AppImage. That file runs on its own; nothing needs
+installing on the target machine beforehand.
+
+## Font
+
+The weather overlay (temperature, condition, city, clock) uses Apercu,
+loaded from `assets/fonts/Apercu.otf` via an `@font-face` rule in
+`index.html`. It only applies to text this app directly controls — the
+overlay text, not the browser wall's four search panels, since those load
+actual DuckDuckGo pages (someone else's HTML/CSS) rather than content this
+project renders itself. There's no way to force a font onto a separate
+website's own page content.
+
+## Location and weather
+
+- Location comes from IP geolocation (`ip-api.com`), not the browser's
+  `navigator.geolocation` — a background app has no user present to grant
+  a location permission prompt.
+- Weather comes from Open-Meteo (`api.open-meteo.com`), free and no API
+  key needed. Refreshes every 15 minutes (`renderer.js`).
+
+## Getting it to actually sit behind your icons
+
+**Try first — native (`main.js` does this already):** `type: 'desktop'`,
+`focusable: false`, and an always-on-top level of `'desktop'` (the lowest
+level, not the highest — the opposite of what you'd want for something
+meant to float on top). Just run `npm start` and see where it lands.
+
+**If that doesn't work — `xwinwrap`:** run `bash linux/xwinwrap-launch.sh`.
+It launches Electron wrapped by `xwinwrap`, a small X11 utility that
+creates a placeholder window pinned to the desktop layer and reparents
+your app's window into it. It isn't packaged in every distro's repos —
+the script's comments have the build-from-source steps if `apt`/your
+package manager doesn't have it. This is X11-only in practice; under
+Wayland it depends on XWayland tolerance and isn't guaranteed.
+
+**Autostart at login:** `bash linux/install-autostart.sh` installs an XDG
+autostart entry (`~/.config/autostart/weather-wallpaper.desktop`), which
+works the same across GNOME, KDE, XFCE, etc. Pass `--xwinwrap` to have it
+launch through `xwinwrap-launch.sh` instead of Electron directly:
+
+```bash
+bash linux/install-autostart.sh --xwinwrap
+```
+
+**On Mint Cinnamon with X11** (confirmed via `grep EDITION
+/etc/linuxmint/info` and `echo $XDG_SESSION_TYPE`): use the `--xwinwrap`
+flag above. Cinnamon's compositor generally ignores the native `type:
+'desktop'` hint, but X11 means `xwinwrap` itself is fully usable. Install
+its build dependencies and `xdotool` first — see the comments at the top
+of `linux/xwinwrap-launch.sh` for the exact `apt` packages and the
+build-from-source steps.
+
+**Known xwinwrap crash on Mutter/Muffin-family compositors (GNOME,
+Cinnamon):** `xwinwrap -ov -fs ...` can fail with `X Error of failed
+request: BadMatch (invalid parameter attributes)`. This happens because
+these compositors run an invisible, full-screen `InputOnly` "guard
+window" that xwinwrap's desktop-window detection can mistake for a real
+window to reparent into — and creating a normal window as a child of an
+`InputOnly` one is always a `BadMatch` per the X11 protocol, no exceptions.
+`linux/xwinwrap-launch.sh` already omits `-fs` (redundant with the
+explicit `-g` geometry it passes) since that combination is what tends to
+trigger it, but if you still hit this crash, the real fix is patching
+xwinwrap itself to skip `InputOnly` windows while searching:
+
+```bash
+cd ~/xwinwrap   # wherever you built it from source
+sed -i 's/if (attrs.map_state != 0 && ((attrs.width == display_width/if (attrs.map_state != 0 \&\& attrs.class != InputOnly \&\& ((attrs.width == display_width/' xwinwrap.c
+make && sudo make install
+```
+
+## Restarting after you change the code
+
+Two ways to (re)launch, depending on whether the app is already running:
+
+- **A double-clickable launcher** — run `bash linux/install-desktop-launcher.sh`
+  once to add an icon to the Cinnamon menu (and your Desktop, if you have
+  one). Clicking it kills any already-running instance and starts fresh
+  with whatever code currently exists in the folder — so the flow after
+  every `git pull` is just: pull, then click the icon. No terminal needed
+  for routine updates once this is installed. (Nemo may treat a
+  newly-placed Desktop icon as untrusted the first time — if double-clicking
+  does nothing, right-click it once and choose "Allow Launching".)
+- **Manually from a terminal** — `bash linux/relaunch.sh` does the same
+  kill-then-relaunch, or `bash linux/xwinwrap-launch.sh` directly if you
+  know nothing else is currently running.
+
+Either way, `git pull` only updates the files on disk — it does not
+restart whatever's already running. You always need one of the two
+relaunch steps above afterward to actually see the new code, visuals, or
+animations on screen. (`npm install` is also needed again, but only if the
+update changed `package.json` — a new dependency or an Electron version
+bump — not for ordinary code/asset changes.)
+
+**Safety exit while testing:** `Ctrl+Alt+Q` always force-quits the app
+immediately, regardless of what's on screen or what has focus — useful
+since a placement/layering issue can otherwise leave the app genuinely
+covering the entire display with nothing else reachable.
+
+## Kiosk browsers (5-panel interactive cluster)
+
+`kiosk-browsers.js` creates five real, usable browser panels arranged in a
+cross/bracket cluster: one larger center panel, and four smaller panels
+above/below/left/right of it. **This is a separate, ordinary, focusable
+window from the wallpaper** — not embedded in it — because a true
+wallpaper window (`main.js`, `type: 'desktop'`, `focusable: false`)
+fundamentally cannot receive clicks or keyboard input; that's not a
+limitation of this code, it's how window managers treat that layer. The
+kiosk window is sized to exactly the cluster's bounding box and uses
+`transparent: true` so the video wallpaper shows through its four corner
+gaps (the cross shape doesn't fill its own bounding rectangle) — this
+needs a compositor running on the guest, which Cinnamon has by default via
+Muffin; on a non-compositing window manager the gaps would show solid
+black instead, a cosmetic downgrade rather than a broken app. It only
+appears on the primary display.
+
+**It's also a separate *process*, not just a separate window** —
+`kiosk-main.js` is its own Electron entry point, launched alongside
+`main.js` rather than from inside it. This isn't just tidiness: on a
+Mint Cinnamon test machine (a NucBox5), running the kiosk window and the
+wallpaper window out of one Electron process, then wrapping that whole
+process with `xwinwrap` (see the Cinnamon section below), reliably killed
+the entire process — silently, exit status 0 — the instant the kiosk
+window was created alongside the wallpaper window. `xwinwrap` was built
+around single-window apps like `mpv`; handing it a process that opens a
+second, differently-sized top-level window right after the first isn't
+something it tolerates. Splitting the kiosk cluster into its own process
+(`kiosk-main.js`) sidesteps this: `xwinwrap` only ever wraps `main.js`
+(wallpaper, one window), and the kiosk process launches normally,
+unwrapped, alongside it — see `linux/xwinwrap-launch.sh` and
+`linux/native-launch.sh`, which start both. `npm start` does the same via
+`scripts/launch-both.js` for Mac/dev. Set `ENABLE_KIOSK=0` before any of
+these to skip the kiosk process (handy for isolating wallpaper-only
+issues, which is how this crash was originally tracked down). Since the
+two are separate OS processes, the `Ctrl+Alt+Q` safety-quit (below) is
+coordinated between them via small PID files (`process-pair.js`) so it
+still quits both together.
+
+**All 5 panels behave identically, and the behavior is idle vs. active,
+not decorative vs. interactive:** left alone, each one auto-searches
+through `SEARCH_TERMS` on its own staggered timer (`REFRESH_MS` between
+jumps), hitting DuckDuckGo's plain HTML endpoint
+(`html.duckduckgo.com/html/?q=...`) rather than Google or a JS-heavy
+results page, since that endpoint tolerates repeated automated requests
+noticeably better — though "tolerates better" isn't "immune," so don't
+push `REFRESH_MS` much below a few minutes. The moment a customer clicks
+or types into any panel (detected via `kiosk-preload.js`, attached
+regardless of what page is loaded), that panel's rotation stops and it
+becomes a normal browser for them — clicking search results navigates
+like any real browser, since it's a genuine, isolated `BrowserView`, not a
+simulation. After `INACTIVITY_TIMEOUT_MS` (2.5 minutes by default) with no
+further clicks or typing in that panel, it automatically goes back to
+auto-searching on its own, ready for the next customer.
+
+Other things worth knowing:
+
+- **Panel sizes are pixel-based**, not fractions of the screen —
+  `PANEL_SIZES` in `kiosk-browsers.js` controls the cluster's dimensions
+  directly, and the window is sized to match automatically.
+- **No address bar or browser chrome yet** — panels show whatever page
+  they're on with no navigation controls of their own; customers browse by
+  clicking links within the page. Worth adding if that's a problem in
+  practice.
+- Since idle panels are now making network requests continuously
+  whenever the app is running (not just during customer use), that's
+  worth keeping in mind on a metered or unusual connection.
+
+## Recommended workflow
+
+1. **Iterate on the Mac first.** `npm start` runs fine on macOS for
+   everything except the Linux-specific desktop-layer placement — video
+   playback, weather fetching, and the browser wall's layout/rotation all
+   work identically. This is where most edits should happen, since it's
+   instant (no transfer, no Mint round-trip).
+2. **Sync to Mint with git**, not by re-downloading a zip each time:
+   ```bash
+   # one-time, on whichever machine creates the remote (e.g. GitHub/GitLab):
+   git remote add origin <your-repo-url>
+   git push -u origin master
+
+   # on the Mac, after making changes:
+   git add -A && git commit -m "..." && git push
+
+   # on Mint, to pick them up:
+   git pull
+   ```
+3. **Validate window placement on Mint only.** Run `npm start` there and
+   check whether it settles behind your icons. If not, try
+   `bash linux/xwinwrap-launch.sh`. This is the one step that has to happen
+   on real Linux hardware — there's no way to shortcut it from the Mac.
+4. **Wire up autostart** (`bash linux/install-autostart.sh`) once placement
+   is working, so it survives a reboot without manual steps.
+5. **Package for real deployment last, not during dev.** `npm run
+   build:linux` bundles Electron and the app into a single AppImage —
+   worth doing once things are settled, not on every iteration.
+
+One practical note while testing the browser wall specifically: it's
+useful to temporarily drop `SIDE_REFRESH_MS` in `browser-wall.js` to
+something short (a few seconds) so you can see the rotation working
+without waiting minutes — just remember to set it back to a
+multi-minute value before leaving it running for real, since a short
+interval is what risks getting rate-limited.
+
+## Multi-monitor
+
+`main.js` creates one desktop-layer window per connected display
+(`screen.getAllDisplays()`), each independently loading `index.html`, so
+every screen gets its own video + weather overlay. Only the primary
+display gets the browser wall.
