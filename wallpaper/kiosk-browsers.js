@@ -144,6 +144,8 @@ function createKioskWindow() {
     transparent: true,
     skipTaskbar: true,
     resizable: false,
+    // Keep the kiosk above the wallpaper regardless of which process starts first.
+    alwaysOnTop: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
