@@ -224,6 +224,38 @@ simulation. After `INACTIVITY_TIMEOUT_MS` (2.5 minutes by default) with no
 further clicks or typing in that panel, it automatically goes back to
 auto-searching on its own, ready for the next customer.
 
+**Known bug (fixed): kiosk window silently garbage-collected — process
+alive, nothing on screen.** After the process split above, `kiosk-main.js`
+still called `createKioskWindow()` without keeping its return value:
+`createKioskWindow();`. That return value (the `BrowserWindow` instance)
+was the *only* thing in the whole JS object graph pointing at that window
+— the `BrowserView` panels attached to it stay alive separately via the
+idle-rotation timers and the `ipcMain` activity listener, but nothing kept
+the window itself referenced. Electron's docs are explicit that a
+`BrowserWindow` with no surviving JS reference gets destroyed
+automatically by V8's garbage collector, with no error and no crash. Once
+that happened (empirically, anywhere from a couple seconds to under a
+minute after launch — inconsistent, since GC timing isn't deterministic),
+the kiosk window vanished. It didn't take the process down with it,
+though: `window-all-closed` in `kiosk-main.js` is a deliberate no-op (the
+app is meant to run indefinitely), so the process just sat there alive
+and idle forever afterward. That combination — confirmed via `ps aux`
+that both the wallpaper and kiosk processes were genuinely running, yet
+the kiosk cluster was never visible on screen, on a NucBox5 running Mint
+Cinnamon — is what made this one hard to pin down: it looked like a
+rendering or positioning bug (transparency, window placement,
+`screen.getPrimaryDisplay()` geometry) but was neither; toggling
+`transparent: true/false` made no difference because the window object
+didn't exist by the time anyone looked at the screen. Fixed by keeping a
+module-level reference to the window inside `kiosk-browsers.js` itself
+(`let kioskWindow = ...` set inside `createKioskWindow()`, cleared on the
+window's own `'closed'` event), so the fix holds regardless of whether
+callers remember to keep the return value too — `kiosk-main.js` now keeps
+its own reference as well, belt-and-suspenders. If a future rewrite of
+either file drops that module-level reference again, this exact
+symptom — processes alive in `ps aux`, nothing rendered, no errors
+anywhere — is what will come back.
+
 Other things worth knowing:
 
 - **Panel sizes are pixel-based**, not fractions of the screen —

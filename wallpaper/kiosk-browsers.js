@@ -41,6 +41,30 @@ const PANEL_SIZES = {
 };
 // ---------------------------------------------------------------------------
 
+// Module-level reference to the kiosk window. This is NOT optional
+// bookkeeping — without it, the BrowserWindow created in
+// createKioskWindow() is only reachable from that function's own local
+// `win` variable, which V8 is free to garbage-collect the moment the
+// function returns (nothing else in the JS object graph points at `win`
+// itself; the BrowserViews attached to it are kept alive separately by
+// the panelStates/ipcMain closures, but that doesn't save the window).
+// Electron's docs call this out explicitly: a BrowserWindow with no
+// remaining JS reference gets destroyed automatically by GC, silently,
+// with no 'closed' event you'd notice as an error.
+//
+// That's exactly the bug this project hit on the NucBox: kiosk-main.js
+// called `createKioskWindow();` and discarded the return value, so once
+// GC ran (usually a handful of seconds after launch — hence `ps aux`
+// checks done quickly after launch still showed the process "working"),
+// the window was destroyed. `window-all-closed` is a deliberate no-op in
+// kiosk-main.js (see its comment), so the process didn't quit either —
+// it just sat there alive and doing nothing, which is why the kiosk
+// process always showed up in `ps aux` while never actually appearing on
+// screen, regardless of transparency, position, or timing. Keeping this
+// module-level reference is what fixes it; do not remove it or make
+// createKioskWindow() the only thing holding onto `win`.
+let kioskWindow = null;
+
 function computeClusterLayout() {
   const { center, side, gap } = PANEL_SIZES;
   const totalWidth = side.w + gap + center.w + gap + side.w;
@@ -142,6 +166,15 @@ function createKioskWindow() {
   attachActivityHandling(panels);
   startAllIdleRotation(panels);
 
+  // Keep the strong reference alive for the life of the process (see the
+  // comment on the module-level `kioskWindow` declaration above), and
+  // drop it once the window is actually, deliberately closed so it can
+  // be GC'd normally at that point instead of leaking forever.
+  kioskWindow = win;
+  win.on('closed', () => {
+    if (kioskWindow === win) kioskWindow = null;
+  });
+
   return win;
 }
 
@@ -213,4 +246,8 @@ function stopIdleRotation(panels, key) {
   state.intervalId = null;
 }
 
-module.exports = { createKioskWindow, computeClusterLayout };
+module.exports = {
+  createKioskWindow,
+  computeClusterLayout,
+  getKioskWindow: () => kioskWindow,
+};

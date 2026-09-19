@@ -20,8 +20,18 @@ const { registerSelf, killOthers } = require('./process-pair');
 const PROCESS_NAME = 'kiosk';
 const cleanupPidFile = registerSelf(PROCESS_NAME);
 
+// Kept even though createKioskWindow() itself now also holds a
+// module-level reference internally — belt-and-suspenders against the
+// exact bug that made the kiosk cluster invisible before: a BrowserWindow
+// with no surviving JS reference gets silently destroyed by garbage
+// collection a few seconds after creation, and since window-all-closed
+// below is a deliberate no-op, the process just sits there alive forever
+// afterward with nothing on screen — no crash, no error, nothing in
+// `ps aux` to suggest anything was wrong.
+let kioskWindow = null;
+
 app.whenReady().then(() => {
-  createKioskWindow();
+  kioskWindow = createKioskWindow();
 
   // Safety valve, mirrored from main.js: Ctrl+Alt+Q always quits
   // immediately. Only one of the two processes (this one, or main.js —
