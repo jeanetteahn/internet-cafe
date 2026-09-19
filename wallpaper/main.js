@@ -37,7 +37,7 @@ function createWallpaperWindows() {
       // unreliable on GNOME/KDE; not supported on most Wayland
       // compositors at all — see linux/xwinwrap-launch.sh for the
       // fallback on window managers that ignore this.
-      type: 'desktop',
+      //type: 'desktop',
       focusable: false,
       skipTaskbar: true,
       autoHideMenuBar: true,
