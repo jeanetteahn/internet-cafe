@@ -51,13 +51,6 @@ function createWallpaperWindows() {
       },
     });
 
-    // Belt-and-suspenders for WMs that respect setAlwaysOnTop levels but
-    // not the `type: 'desktop'` hint itself — 'desktop' level asks to be
-    // pinned at the very bottom of the stack rather than the top.
-    if (typeof win.setAlwaysOnTop === 'function') {
-      win.setAlwaysOnTop(true, 'desktop');
-    }
-
     win.loadFile('index.html');
 
     return win;
