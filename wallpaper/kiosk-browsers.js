@@ -34,11 +34,6 @@ const INACTIVITY_TIMEOUT_MS = 2.5 * 60 * 1000;
 // bounding box is computed from these, and the window is sized to exactly
 // that, so there's no window content outside the cross shape other than
 // its transparent corners (see createKioskWindow).
-const PANEL_SIZES = {
-  center: { w: 640, h: 480 },
-  side: { w: 420, h: 320 },
-  gap: 24,
-};
 // ---------------------------------------------------------------------------
 
 // Module-level reference to the kiosk window. This is NOT optional
@@ -65,43 +60,41 @@ const PANEL_SIZES = {
 // createKioskWindow() the only thing holding onto `win`.
 let kioskWindow = null;
 
-function computeClusterLayout() {
-  const { center, side, gap } = PANEL_SIZES;
-  const totalWidth = side.w + gap + center.w + gap + side.w;
-  const totalHeight = side.h + gap + center.h + gap + side.h;
+function computeClusterLayout(screenW, screenH) {
+  // Cluster fills 88 % × 82 % of the display so the full layout fits on screen
+  // with margin.  The old symmetric cross was 1 168 px tall at 1 080 p and
+  // overflowed the display by 88 px.
+  const W = Math.round((screenW || 1920) * 0.88);
+  const H = Math.round((screenH || 1080) * 0.82);
 
-  const centerX = side.w + gap;
-  const centerY = side.h + gap;
-
-  return {
-    totalWidth,
-    totalHeight,
-    center: { x: centerX, y: centerY, width: center.w, height: center.h },
-    top: {
-      x: centerX + (center.w - side.w) / 2,
-      y: 0,
-      width: side.w,
-      height: side.h,
-    },
-    bottom: {
-      x: centerX + (center.w - side.w) / 2,
-      y: centerY + center.h + gap,
-      width: side.w,
-      height: side.h,
-    },
-    left: {
-      x: 0,
-      y: centerY + (center.h - side.h) / 2,
-      width: side.w,
-      height: side.h,
-    },
-    right: {
-      x: centerX + center.w + gap,
-      y: centerY + (center.h - side.h) / 2,
-      width: side.w,
-      height: side.h,
-    },
+  // Fractions of the cluster bounding box, measured from the reference design,
+  // so the layout scales to any resolution.  Adjacent panels share edges;
+  // some panels intentionally overlap — z-order (addBrowserView call order in
+  // createKioskWindow) controls which panel is visible in the overlap.
+  //
+  // Edge alignments that hold exactly at any resolution:
+  //   top.left  = left.right   (rx 0.419)
+  //   top.right = right.left   (rx 0.581)
+  //   top.bottom = center.top  (ry 0.203)
+  //   center.right = bottom.left (rx 0.795)
+  const defs = {
+    left:   { rx: 0.000, ry: 0.066, rw: 0.419, rh: 0.801 },
+    top:    { rx: 0.419, ry: 0.000, rw: 0.162, rh: 0.203 },
+    center: { rx: 0.197, ry: 0.203, rw: 0.598, rh: 0.612 },
+    right:  { rx: 0.581, ry: 0.000, rw: 0.419, rh: 0.494 },
+    bottom: { rx: 0.795, ry: 0.523, rw: 0.205, rh: 0.477 },
   };
+
+  const result = { totalWidth: W, totalHeight: H };
+  for (const [key, d] of Object.entries(defs)) {
+    result[key] = {
+      x:      Math.round(d.rx * W),
+      y:      Math.round(d.ry * H),
+      width:  Math.round(d.rw * W),
+      height: Math.round(d.rh * H),
+    };
+  }
+  return result;
 }
 
 function makePanelView() {
@@ -130,8 +123,8 @@ function makePanelView() {
  * showing through — a cosmetic downgrade, not a broken app.
  */
 function createKioskWindow() {
-  const layout = computeClusterLayout();
   const primary = screen.getPrimaryDisplay();
+  const layout = computeClusterLayout(primary.bounds.width, primary.bounds.height);
   const x = primary.bounds.x + Math.round((primary.bounds.width - layout.totalWidth) / 2);
   const y = primary.bounds.y + Math.round((primary.bounds.height - layout.totalHeight) / 2);
 
