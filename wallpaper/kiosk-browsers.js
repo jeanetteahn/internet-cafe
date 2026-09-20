@@ -68,21 +68,15 @@ function computeClusterLayout(screenW, screenH) {
   const H = Math.round((screenH || 1080) * 0.82);
 
   // Fractions of the cluster bounding box, measured from the reference design,
-  // so the layout scales to any resolution.  Adjacent panels share edges;
-  // some panels intentionally overlap — z-order (addBrowserView call order in
-  // createKioskWindow) controls which panel is visible in the overlap.
-  //
-  // Edge alignments that hold exactly at any resolution:
-  //   top.left  = left.right   (rx 0.419)
-  //   top.right = right.left   (rx 0.581)
-  //   top.bottom = center.top  (ry 0.203)
-  //   center.right = bottom.left (rx 0.795)
+  // so the layout scales to any resolution.  Panels overlap on purpose
+  // (pinwheel arrangement) — z-order in createKioskWindow controls what's
+  // visible in each overlap region.
   const defs = {
-    left:   { rx: 0.000, ry: 0.066, rw: 0.419, rh: 0.801 },
-    top:    { rx: 0.419, ry: 0.000, rw: 0.162, rh: 0.203 },
-    center: { rx: 0.197, ry: 0.203, rw: 0.598, rh: 0.612 },
-    right:  { rx: 0.581, ry: 0.000, rw: 0.419, rh: 0.494 },
-    bottom: { rx: 0.795, ry: 0.523, rw: 0.205, rh: 0.477 },
+    hub:         { rx: 0.20, ry: 0.24, rw: 0.57, rh: 0.52 },
+    topLeft:     { rx: 0.03, ry: 0.10, rw: 0.39, rh: 0.40 },
+    topRight:    { rx: 0.59, ry: 0.05, rw: 0.39, rh: 0.43 },
+    bottomLeft:  { rx: 0.09, ry: 0.53, rw: 0.39, rh: 0.39 },
+    bottomRight: { rx: 0.78, ry: 0.51, rw: 0.19, rh: 0.41 },
   };
 
   const result = { totalWidth: W, totalHeight: H };
@@ -145,12 +139,15 @@ function createKioskWindow() {
     },
   });
 
+  // Insertion order here is the z-order: hub goes in first so it sits behind
+  // all four corner panels, which are added after and appear on top wherever
+  // the pinwheel panels overlap.
   const panels = {
-    center: makePanelView(),
-    top: makePanelView(),
-    bottom: makePanelView(),
-    left: makePanelView(),
-    right: makePanelView(),
+    hub:         makePanelView(),
+    topLeft:     makePanelView(),
+    topRight:    makePanelView(),
+    bottomLeft:  makePanelView(),
+    bottomRight: makePanelView(),
   };
 
   Object.entries(panels).forEach(([key, view]) => {
@@ -207,7 +204,7 @@ function attachActivityHandling(panels) {
 const panelStates = new Map();
 
 function startAllIdleRotation(panels) {
-  const order = ['center', 'top', 'right', 'bottom', 'left'];
+  const order = ['hub', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
   order.forEach((key, i) => {
     panelStates.set(key, { mode: 'auto', rotationIndex: i, intervalId: null, inactivityTimer: null });
     setTimeout(() => startIdleRotation(panels, key), i * STAGGER_MS);
