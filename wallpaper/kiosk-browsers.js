@@ -2,7 +2,7 @@ const { BrowserWindow, BrowserView, screen, ipcMain } = require('electron');
 const path = require('path');
 
 // ---- Tunables -----------------------------------------------------------
-// All 5 panels (center + 4 sides) behave identically: they auto-search
+// All 5 panels (hub + 4 corners) behave identically: they auto-search
 // through this list on their own while idle, and the instant a customer
 // clicks or types into one, it stops rotating and becomes a normal browser
 // for them to use — see attachActivityHandling() below for that logic.
@@ -106,9 +106,9 @@ function makePanelView() {
  * Creates the kiosk window: a normal, focusable window (unlike the
  * wallpaper windows in main.js, which are deliberately non-interactive) —
  * this is the one part of the app customers actually click into and use.
- * Sized to exactly the 5-panel cross cluster's bounding box and centered
- * on the primary display, with `transparent: true` so the video wallpaper
- * shows through the four corner gaps the cross shape doesn't cover.
+ * Sized to the 5-panel pinwheel cluster's bounding box and centered on
+ * the primary display, with `transparent: true` so the video wallpaper
+ * shows through any gaps the overlapping panels don't cover.
  *
  * Transparency needs a compositor running on the guest to render
  * correctly — Cinnamon (Mint's default) has one on by default via
