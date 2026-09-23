@@ -1,11 +1,11 @@
 const { BrowserWindow, BrowserView, screen, ipcMain } = require('electron');
 const path = require('path');
 
-// ---- Tunables -----------------------------------------------------------
+// ---- Tunables ---------------------------------------------------------------
 // All 5 panels (hub + 4 corners) behave identically: they auto-search
 // through this list on their own while idle, and the instant a customer
-// clicks or types into one, it stops rotating and becomes a normal browser
-// for them to use — see attachActivityHandling() below for that logic.
+// clicks, types, or drags a panel, it stops rotating and becomes a normal
+// browser for them — see notePanelActivity() below for that logic.
 const SEARCH_TERMS = [
   'weather today',
   'local news',
@@ -23,54 +23,45 @@ function buildSearchUrl(term) {
   return `https://html.duckduckgo.com/html/?q=${encodeURIComponent(term)}`;
 }
 
-const REFRESH_MS = 4 * 60 * 1000; // how often an idle panel jumps to its next search
-const STAGGER_MS = 20 * 1000; // stagger initial idle starts across the 5 panels
+const REFRESH_MS          = 4 * 60 * 1000; // how often an idle panel jumps to its next search
+const STAGGER_MS          = 20 * 1000;      // stagger initial idle starts across the 5 panels
+const INACTIVITY_TIMEOUT_MS = 2.5 * 60 * 1000; // idle grace period before auto-search resumes
 
-// How long a panel waits with no clicks/typing before it goes back to
-// auto-searching on its own after a customer was using it.
-const INACTIVITY_TIMEOUT_MS = 2.5 * 60 * 1000;
+const HANDLE_HEIGHT        = 28;   // px — height of the draggable title strip on each panel
+const RETURN_HOME_WHEN_IDLE = true; // move a panel back to its home position when it goes idle
+const MIN_VISIBLE_PX       = 120;  // minimum px of the drag strip that must stay on-screen
 
-// Panel sizes in pixels (not fractions of the screen) — the cluster's own
-// bounding box is computed from these, and the window is sized to exactly
-// that, so there's no window content outside the cross shape other than
-// its transparent corners (see createKioskWindow).
-// ---------------------------------------------------------------------------
-
-// Module-level reference to the kiosk window. This is NOT optional
-// bookkeeping — without it, the BrowserWindow created in
-// createKioskWindow() is only reachable from that function's own local
-// `win` variable, which V8 is free to garbage-collect the moment the
-// function returns (nothing else in the JS object graph points at `win`
-// itself; the BrowserViews attached to it are kept alive separately by
-// the panelStates/ipcMain closures, but that doesn't save the window).
-// Electron's docs call this out explicitly: a BrowserWindow with no
-// remaining JS reference gets destroyed automatically by GC, silently,
-// with no 'closed' event you'd notice as an error.
+// ---- Module-level state (GC protection + shared between helper functions) ---
 //
-// That's exactly the bug this project hit on the NucBox: kiosk-main.js
-// called `createKioskWindow();` and discarded the return value, so once
-// GC ran (usually a handful of seconds after launch — hence `ps aux`
-// checks done quickly after launch still showed the process "working"),
-// the window was destroyed. `window-all-closed` is a deliberate no-op in
-// kiosk-main.js (see its comment), so the process didn't quit either —
-// it just sat there alive and doing nothing, which is why the kiosk
-// process always showed up in `ps aux` while never actually appearing on
-// screen, regardless of transparency, position, or timing. Keeping this
-// module-level reference is what fixes it; do not remove it or make
-// createKioskWindow() the only thing holding onto `win`.
-let kioskWindow = null;
+// Every panel window is kept in panelWindows so V8 can never garbage-collect
+// it while the process is alive.  Without a surviving JS reference, a
+// BrowserWindow is silently destroyed by the GC — no error, no 'closed'
+// event you'd notice.  That's exactly the bug this project hit on the
+// NucBox5: kiosk-main.js used to call createKioskWindow() and discard the
+// return value, and the window vanished a few seconds later while the
+// process appeared fully alive in `ps aux`.  See README for the full story.
+// Do not remove these module-level Maps or make createKioskWindow() the only
+// thing holding panel-window references.
+const panelWindows    = new Map(); // key -> BrowserWindow
+const homeBounds      = new Map(); // key -> { x, y, width, height }
+const panelViews      = {};        // key -> BrowserView (for rotation + activity)
+const panelStates     = new Map(); // key -> { mode, rotationIndex, intervalId, inactivityTimer }
+
+// Truthy while a programmatic setBounds is in flight for a given panel.
+// The 'move' event debounce handler checks this to avoid mistaking a
+// clamping or send-home move for a customer drag.
+const ignoreNextMoves = new Map(); // key -> timeout-id | null
+
+// ---- Layout -----------------------------------------------------------------
 
 function computeClusterLayout(screenW, screenH) {
-  // Cluster fills 88 % × 82 % of the display so the full layout fits on screen
-  // with margin.  The old symmetric cross was 1 168 px tall at 1 080 p and
-  // overflowed the display by 88 px.
+  // Cluster fills 88 % × 82 % of the display so the full layout fits on
+  // screen with margin.  Panels overlap on purpose (pinwheel arrangement);
+  // z-order — hub behind the four corner windows — controls what's visible
+  // in each overlap region.
   const W = Math.round((screenW || 1920) * 0.88);
   const H = Math.round((screenH || 1080) * 0.82);
 
-  // Fractions of the cluster bounding box, measured from the reference design,
-  // so the layout scales to any resolution.  Panels overlap on purpose
-  // (pinwheel arrangement) — z-order in createKioskWindow controls what's
-  // visible in each overlap region.
   const defs = {
     hub:         { rx: 0.20, ry: 0.24, rw: 0.57, rh: 0.52 },
     topLeft:     { rx: 0.03, ry: 0.10, rw: 0.39, rh: 0.40 },
@@ -102,122 +93,224 @@ function makePanelView() {
   });
 }
 
+// ---- Programmatic move helpers ----------------------------------------------
+
+// Call this instead of win.setBounds() for any move we initiate ourselves
+// (clamping, send-home).  Sets the ignoreNextMoves flag so the 'move' event
+// debounce handler doesn't treat the resulting OS move events as customer
+// drags.  The flag clears itself after 400 ms — long enough to outlast the
+// sequence of 'move' events that a single setBounds() call can produce.
+function setPanelBoundsIgnored(key, bounds) {
+  const existing = ignoreNextMoves.get(key);
+  if (existing) clearTimeout(existing);
+  ignoreNextMoves.set(key, setTimeout(() => ignoreNextMoves.set(key, null), 400));
+  const win = panelWindows.get(key);
+  if (win && !win.isDestroyed()) win.setBounds(bounds);
+}
+
+function sendPanelHome(key) {
+  const bounds = homeBounds.get(key);
+  if (bounds) setPanelBoundsIgnored(key, bounds);
+}
+
+// After any customer drag, clamp the window so at least MIN_VISIBLE_PX of
+// the drag strip remains horizontally on screen and the strip stays
+// vertically on screen (so the customer can always grab it again).
+function clampToPrimary(key) {
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return;
+  const { workArea } = screen.getPrimaryDisplay();
+  const { x, y, width, height } = win.getBounds();
+
+  // Horizontal: window may slide off-screen, but at least MIN_VISIBLE_PX
+  // of its width must remain visible on each side.
+  const cx = Math.max(
+    workArea.x - width + MIN_VISIBLE_PX,
+    Math.min(x, workArea.x + workArea.width - MIN_VISIBLE_PX)
+  );
+  // Vertical: the drag strip (HANDLE_HEIGHT px) must remain fully on-screen
+  // so the customer can always re-grab the panel.
+  const cy = Math.max(
+    workArea.y,
+    Math.min(y, workArea.y + workArea.height - HANDLE_HEIGHT)
+  );
+
+  if (cx !== x || cy !== y) {
+    setPanelBoundsIgnored(key, { x: cx, y: cy, width, height });
+  }
+}
+
+// ---- Activity ---------------------------------------------------------------
+
+// Central activity handler — called from IPC (kiosk-preload.js click/keypress
+// in the panel view), the 'move' debounce (customer drag), and the reset-
+// position IPC.  Stops idle rotation if running, resets the inactivity clock.
+function notePanelActivity(key) {
+  const state = panelStates.get(key);
+  if (!state) return;
+
+  if (state.mode === 'auto') {
+    stopIdleRotation(key);
+    state.mode = 'active';
+  }
+
+  clearTimeout(state.inactivityTimer);
+  state.inactivityTimer = setTimeout(() => {
+    if (RETURN_HOME_WHEN_IDLE) sendPanelHome(key);
+    startIdleRotation(key);
+  }, INACTIVITY_TIMEOUT_MS);
+}
+
+// ---- Window creation --------------------------------------------------------
+
 /**
- * Creates the kiosk window: a normal, focusable window (unlike the
- * wallpaper windows in main.js, which are deliberately non-interactive) —
- * this is the one part of the app customers actually click into and use.
- * Sized to the 5-panel pinwheel cluster's bounding box and centered on
- * the primary display, with `transparent: true` so the video wallpaper
- * shows through any gaps the overlapping panels don't cover.
+ * Creates five independent, movable panel windows — one per kiosk panel
+ * (hub, topLeft, topRight, bottomLeft, bottomRight).  Each window is a
+ * frameless, opaque BrowserWindow with a 28 px drag strip (kiosk-handle.html)
+ * at the top and the panel's BrowserView content below it.  Panels are opaque
+ * (#1a1a1a background) so no compositor is required on the host.
  *
- * Transparency needs a compositor running on the guest to render
- * correctly — Cinnamon (Mint's default) has one on by default via
- * Muffin, so this should just work there. On a window manager with no
- * compositor, the gaps would show solid black instead of the video
- * showing through — a cosmetic downgrade, not a broken app.
+ * Hub is created first, so it sits behind the four corner windows wherever
+ * the pinwheel layout causes them to overlap.
+ *
+ * Returns an array of the five BrowserWindow instances.  Callers should store
+ * this array — belt-and-suspenders against GC alongside the module-level
+ * panelWindows Map.  See the README's "Known bug" section for why both
+ * references matter.
  */
 function createKioskWindow() {
   const primary = screen.getPrimaryDisplay();
-  const layout = computeClusterLayout(primary.bounds.width, primary.bounds.height);
-  const x = primary.bounds.x + Math.round((primary.bounds.width - layout.totalWidth) / 2);
-  const y = primary.bounds.y + Math.round((primary.bounds.height - layout.totalHeight) / 2);
+  const { workArea } = primary;
+  const layout = computeClusterLayout(workArea.width, workArea.height);
+  const originX = workArea.x + Math.round((workArea.width  - layout.totalWidth)  / 2);
+  const originY = workArea.y + Math.round((workArea.height - layout.totalHeight) / 2);
 
-  const win = new BrowserWindow({
-    x,
-    y,
-    width: layout.totalWidth,
-    height: layout.totalHeight,
-    frame: false,
-    transparent: true,
-    skipTaskbar: true,
-    resizable: false,
-    // Keep the kiosk above the wallpaper regardless of which process starts first.
-    alwaysOnTop: true,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
+  // Hub first → lowest z-order; corner panels added after appear on top.
+  const order = ['hub', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
 
-  // Insertion order here is the z-order: hub goes in first so it sits behind
-  // all four corner panels, which are added after and appear on top wherever
-  // the pinwheel panels overlap.
-  const panels = {
-    hub:         makePanelView(),
-    topLeft:     makePanelView(),
-    topRight:    makePanelView(),
-    bottomLeft:  makePanelView(),
-    bottomRight: makePanelView(),
-  };
+  for (const key of order) {
+    const pLayout = layout[key];
+    const winW    = pLayout.width;
+    const winH    = pLayout.height + HANDLE_HEIGHT;
+    const homeX   = originX + pLayout.x;
+    const homeY   = originY + pLayout.y;
 
-  Object.entries(panels).forEach(([key, view]) => {
+    const bounds = { x: homeX, y: homeY, width: winW, height: winH };
+    homeBounds.set(key, bounds);
+
+    const win = new BrowserWindow({
+      x: homeX,
+      y: homeY,
+      width:  winW,
+      height: winH,
+      frame:       false,
+      resizable:   false,
+      movable:     true,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      backgroundColor: '#1a1a1a', // opaque — no compositor required
+      webPreferences: {
+        preload: path.join(__dirname, 'kiosk-handle-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+
+    win.loadFile(path.join(__dirname, 'kiosk-handle.html'));
+
+    // Attach the panel content below the drag strip.
+    const view = makePanelView();
     win.addBrowserView(view);
-    view.setBounds(layout[key]);
-  });
+    view.setBounds({ x: 0, y: HANDLE_HEIGHT, width: winW, height: winH - HANDLE_HEIGHT });
+    view.setAutoResize({ width: true, height: true });
 
-  attachActivityHandling(panels);
-  startAllIdleRotation(panels);
+    // Forward the panel page's title to the drag strip.
+    view.webContents.on('page-title-updated', (_e, title) => {
+      if (!win.isDestroyed()) win.webContents.send('panel-title', title);
+    });
 
-  // Keep the strong reference alive for the life of the process (see the
-  // comment on the module-level `kioskWindow` declaration above), and
-  // drop it once the window is actually, deliberately closed so it can
-  // be GC'd normally at that point instead of leaking forever.
-  kioskWindow = win;
-  win.on('closed', () => {
-    if (kioskWindow === win) kioskWindow = null;
-  });
+    panelViews[key]  = view;
+    panelWindows.set(key, win);
 
-  return win;
+    // Drag clamping: debounce 'move' events (the only drag event on Linux)
+    // so we only clamp once per finished drag, not on every pixel.
+    let moveDebounce = null;
+    win.on('move', () => {
+      if (ignoreNextMoves.get(key)) return; // programmatic move — skip
+      clearTimeout(moveDebounce);
+      moveDebounce = setTimeout(() => {
+        notePanelActivity(key);
+        clampToPrimary(key);
+      }, 250);
+    });
+
+    win.on('closed', () => {
+      panelWindows.delete(key);
+      homeBounds.delete(key);
+    });
+  }
+
+  attachActivityHandling();
+  startAllIdleRotation();
+
+  return order.map(key => panelWindows.get(key));
 }
 
-function attachActivityHandling(panels) {
-  // Map each panel's webContents id back to its key, so the shared
-  // 'panel-activity' IPC channel (see kiosk-preload.js) can tell which
-  // specific panel a click/keypress came from.
-  const webContentsIdToKey = new Map();
-  Object.entries(panels).forEach(([key, view]) => {
-    webContentsIdToKey.set(view.webContents.id, key);
-  });
+// ---- IPC activity handling --------------------------------------------------
 
+function attachActivityHandling() {
+  // Map both the panel view's webContents id AND the handle window's
+  // webContents id to the panel key, so IPC messages from either context
+  // resolve to the right panel.
+  const webContentsIdToKey = new Map();
+  for (const [key, view] of Object.entries(panelViews)) {
+    webContentsIdToKey.set(view.webContents.id, key);
+  }
+  for (const [key, win] of panelWindows) {
+    webContentsIdToKey.set(win.webContents.id, key);
+  }
+
+  // Sent by kiosk-preload.js on any click/keypress inside a panel view.
   ipcMain.on('panel-activity', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
-    if (!key) return; // activity from some other window/panel — ignore
+    if (key) notePanelActivity(key);
+  });
 
-    const state = panelStates.get(key);
-    if (!state) return;
-
-    if (state.mode === 'auto') {
-      stopIdleRotation(panels, key);
-      state.mode = 'active';
-    }
-
-    // Any further activity resets the "how long until we resume
-    // auto-search" clock, so an actively-browsing customer never gets
-    // interrupted mid-use.
-    clearTimeout(state.inactivityTimer);
-    state.inactivityTimer = setTimeout(() => {
-      startIdleRotation(panels, key);
-    }, INACTIVITY_TIMEOUT_MS);
+  // Sent by kiosk-handle-preload.js when the customer clicks "Reset position".
+  ipcMain.on('panel-reset-position', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (key) sendPanelHome(key);
   });
 }
 
-const panelStates = new Map();
+// ---- Idle rotation ----------------------------------------------------------
 
-function startAllIdleRotation(panels) {
+function startAllIdleRotation() {
   const order = ['hub', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
   order.forEach((key, i) => {
-    panelStates.set(key, { mode: 'auto', rotationIndex: i, intervalId: null, inactivityTimer: null });
-    setTimeout(() => startIdleRotation(panels, key), i * STAGGER_MS);
+    panelStates.set(key, {
+      mode: 'auto',
+      rotationIndex: i,
+      intervalId: null,
+      inactivityTimer: null,
+    });
+    setTimeout(() => startIdleRotation(key), i * STAGGER_MS);
   });
 }
 
-function startIdleRotation(panels, key) {
+function startIdleRotation(key) {
   const state = panelStates.get(key);
-  const view = panels[key];
+  const view  = panelViews[key];
   if (!state || !view) return;
 
+  // Clear any existing interval before starting a new one — prevents
+  // double-up rotation if startIdleRotation is called while already running
+  // (e.g., two inactivity timers firing in quick succession).
+  clearInterval(state.intervalId);
   clearTimeout(state.inactivityTimer);
-  state.mode = 'auto';
+  state.mode          = 'auto';
+  state.inactivityTimer = null;
 
   const load = () => {
     const term = SEARCH_TERMS[state.rotationIndex % SEARCH_TERMS.length];
@@ -231,15 +324,17 @@ function startIdleRotation(panels, key) {
   state.intervalId = setInterval(load, REFRESH_MS);
 }
 
-function stopIdleRotation(panels, key) {
+function stopIdleRotation(key) {
   const state = panelStates.get(key);
   if (!state) return;
   clearInterval(state.intervalId);
   state.intervalId = null;
 }
 
+// ---- Exports ----------------------------------------------------------------
+
 module.exports = {
   createKioskWindow,
   computeClusterLayout,
-  getKioskWindow: () => kioskWindow,
+  getKioskWindows: () => [...panelWindows.values()],
 };

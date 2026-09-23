@@ -171,20 +171,24 @@ covering the entire display with nothing else reachable.
 
 ## Kiosk browsers (5-panel interactive cluster)
 
-`kiosk-browsers.js` creates five real, usable browser panels arranged in a
-cross/bracket cluster: one larger center panel, and four smaller panels
-above/below/left/right of it. **This is a separate, ordinary, focusable
-window from the wallpaper** — not embedded in it — because a true
-wallpaper window (`main.js`, `type: 'desktop'`, `focusable: false`)
-fundamentally cannot receive clicks or keyboard input; that's not a
-limitation of this code, it's how window managers treat that layer. The
-kiosk window is sized to exactly the cluster's bounding box and uses
-`transparent: true` so the video wallpaper shows through its four corner
-gaps (the cross shape doesn't fill its own bounding rectangle) — this
-needs a compositor running on the guest, which Cinnamon has by default via
-Muffin; on a non-compositing window manager the gaps would show solid
-black instead, a cosmetic downgrade rather than a broken app. It only
-appears on the primary display.
+`kiosk-browsers.js` creates five independent, movable browser windows arranged
+in a pinwheel cluster on the primary display: one larger hub panel and four
+corner panels. **These are separate, ordinary, focusable windows from the
+wallpaper** — not embedded in it — because a true wallpaper window (`main.js`,
+`type: 'desktop'`, `focusable: false`) fundamentally cannot receive clicks or
+keyboard input; that's not a limitation of this code, it's how window managers
+treat that layer.
+
+Each panel window is **opaque** (`backgroundColor: '#1a1a1a'`) rather than
+transparent, so no compositor is required on the host. Each one has a 28 px
+drag strip (`kiosk-handle.html`) across the top: customers can grab it to
+reposition any panel anywhere on screen. A **Reset position** button in the
+strip snaps the panel back to its home position in the cluster. If
+`RETURN_HOME_WHEN_IDLE` is true (the default), panels also return home
+automatically when their inactivity timer expires. After any drag, each panel
+is clamped so at least `MIN_VISIBLE_PX` (120 px by default) of the strip
+remains horizontally visible and the strip stays fully on screen vertically —
+so a customer can always grab it again.
 
 **It's also a separate *process*, not just a separate window** —
 `kiosk-main.js` is its own Electron entry point, launched alongside
@@ -215,52 +219,60 @@ jumps), hitting DuckDuckGo's plain HTML endpoint
 (`html.duckduckgo.com/html/?q=...`) rather than Google or a JS-heavy
 results page, since that endpoint tolerates repeated automated requests
 noticeably better — though "tolerates better" isn't "immune," so don't
-push `REFRESH_MS` much below a few minutes. The moment a customer clicks
-or types into any panel (detected via `kiosk-preload.js`, attached
-regardless of what page is loaded), that panel's rotation stops and it
-becomes a normal browser for them — clicking search results navigates
+push `REFRESH_MS` much below a few minutes. The moment a customer clicks,
+types, or drags any panel (detected via `kiosk-preload.js` for clicks/keys,
+and the panel window's `move` event for drags), that panel's rotation stops
+and it becomes a normal browser for them — clicking search results navigates
 like any real browser, since it's a genuine, isolated `BrowserView`, not a
 simulation. After `INACTIVITY_TIMEOUT_MS` (2.5 minutes by default) with no
-further clicks or typing in that panel, it automatically goes back to
-auto-searching on its own, ready for the next customer.
+further activity in that panel, it automatically goes back to auto-searching
+on its own, ready for the next customer.
 
-**Known bug (fixed): kiosk window silently garbage-collected — process
+**Known bug (fixed): kiosk windows silently garbage-collected — process
 alive, nothing on screen.** After the process split above, `kiosk-main.js`
 still called `createKioskWindow()` without keeping its return value:
-`createKioskWindow();`. That return value (the `BrowserWindow` instance)
-was the *only* thing in the whole JS object graph pointing at that window
-— the `BrowserView` panels attached to it stay alive separately via the
-idle-rotation timers and the `ipcMain` activity listener, but nothing kept
-the window itself referenced. Electron's docs are explicit that a
-`BrowserWindow` with no surviving JS reference gets destroyed
-automatically by V8's garbage collector, with no error and no crash. Once
-that happened (empirically, anywhere from a couple seconds to under a
-minute after launch — inconsistent, since GC timing isn't deterministic),
-the kiosk window vanished. It didn't take the process down with it,
-though: `window-all-closed` in `kiosk-main.js` is a deliberate no-op (the
-app is meant to run indefinitely), so the process just sat there alive
-and idle forever afterward. That combination — confirmed via `ps aux`
-that both the wallpaper and kiosk processes were genuinely running, yet
-the kiosk cluster was never visible on screen, on a NucBox5 running Mint
-Cinnamon — is what made this one hard to pin down: it looked like a
-rendering or positioning bug (transparency, window placement,
-`screen.getPrimaryDisplay()` geometry) but was neither; toggling
-`transparent: true/false` made no difference because the window object
-didn't exist by the time anyone looked at the screen. Fixed by keeping a
-module-level reference to the window inside `kiosk-browsers.js` itself
-(`let kioskWindow = ...` set inside `createKioskWindow()`, cleared on the
+`createKioskWindow();`. That return value (the `BrowserWindow` instance, or
+now the array of five instances) was the *only* thing in the whole JS object
+graph pointing at those windows — the `BrowserView` panels attached to each
+stay alive separately via the idle-rotation timers and the `ipcMain` activity
+listener, but nothing kept the window objects themselves referenced.
+Electron's docs are explicit that a `BrowserWindow` with no surviving JS
+reference gets destroyed automatically by V8's garbage collector, with no
+error and no crash. Once that happened (empirically, anywhere from a couple
+seconds to under a minute after launch — inconsistent, since GC timing isn't
+deterministic), the kiosk windows vanished. It didn't take the process down
+with it, though: `window-all-closed` in `kiosk-main.js` is a deliberate
+no-op (the app is meant to run indefinitely), so the process just sat there
+alive and idle forever afterward. That combination — confirmed via `ps aux`
+that both processes were genuinely running, yet the kiosk cluster was never
+visible on screen, on a NucBox5 running Mint Cinnamon — is what made this
+one hard to pin down. Fixed by keeping all five windows in a module-level
+`panelWindows` Map inside `kiosk-browsers.js` (entries removed only on each
 window's own `'closed'` event), so the fix holds regardless of whether
-callers remember to keep the return value too — `kiosk-main.js` now keeps
-its own reference as well, belt-and-suspenders. If a future rewrite of
-either file drops that module-level reference again, this exact
-symptom — processes alive in `ps aux`, nothing rendered, no errors
-anywhere — is what will come back.
+callers remember to keep the return value too — `kiosk-main.js` also keeps
+the returned array in `kioskWindows`, belt-and-suspenders. If a future
+rewrite drops the module-level Map, this exact symptom — processes alive in
+`ps aux`, nothing rendered, no errors anywhere — is what will come back.
 
 Other things worth knowing:
 
-- **Panel sizes are pixel-based**, not fractions of the screen —
-  `PANEL_SIZES` in `kiosk-browsers.js` controls the cluster's dimensions
-  directly, and the window is sized to match automatically.
+- **Panels are movable.** Each panel window has a 28 px drag strip
+  (`kiosk-handle.html`) at the top, styled with `-webkit-app-region: drag`.
+  Customers can grab it to reposition any panel freely. A **Reset position**
+  button in the strip sends it back to its home position. If
+  `RETURN_HOME_WHEN_IDLE` is `true` (default), panels also return home
+  automatically when their inactivity timer fires.
+- **Off-screen clamping.** After any drag, the panel is clamped so at least
+  `MIN_VISIBLE_PX` (120 px) of the strip stays horizontally on screen, and
+  the strip remains fully visible vertically — so there's always something to
+  grab. `HANDLE_HEIGHT`, `MIN_VISIBLE_PX`, and `RETURN_HOME_WHEN_IDLE` are
+  all tunables near the top of `kiosk-browsers.js`.
+- **No compositor required.** Panels are now opaque (`backgroundColor:
+  '#1a1a1a'`) rather than transparent, so there are no gaps to composite
+  through and no compositor dependency.
+- **Panel sizes scale with the display** — `computeClusterLayout()` in
+  `kiosk-browsers.js` sizes each panel as a fraction of 88 % × 82 % of the
+  work area, so the cluster fits any resolution with margin.
 - **No address bar or browser chrome yet** — panels show whatever page
   they're on with no navigation controls of their own; customers browse by
   clicking links within the page. Worth adding if that's a problem in
