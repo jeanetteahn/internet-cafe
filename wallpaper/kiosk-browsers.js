@@ -71,11 +71,11 @@ function computeClusterLayout(screenW, screenH) {
   const H = Math.round((screenH || 1080) * 0.82);
 
   const defs = {
-    hub:         { rx: 0.20, ry: 0.24, rw: 0.57, rh: 0.52 },
-    topLeft:     { rx: 0.03, ry: 0.10, rw: 0.39, rh: 0.40 },
-    topRight:    { rx: 0.59, ry: 0.05, rw: 0.39, rh: 0.43 },
-    bottomLeft:  { rx: 0.09, ry: 0.53, rw: 0.39, rh: 0.39 },
-    bottomRight: { rx: 0.78, ry: 0.51, rw: 0.19, rh: 0.41 },
+    hub:         { rx: 0.196,  ry: 0.147,  rw: 0.601, rh: 0.634 },
+    topLeft:     { rx: -0.068, ry: -0.103, rw: 0.477, rh: 0.552 },
+    topRight:    { rx: 0.517,  ry: -0.079, rw: 0.471, rh: 0.553 },
+    bottomLeft:  { rx: -0.033, ry: 0.551,  rw: 0.463, rh: 0.492 },
+    bottomRight: { rx: 0.506,  ry: 0.550,  rw: 0.488, rh: 0.494 },
   };
 
   const result = { totalWidth: W, totalHeight: H };
