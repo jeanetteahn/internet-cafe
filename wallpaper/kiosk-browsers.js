@@ -65,8 +65,9 @@ const resizeState     = new Map(); // key -> { startBounds, cornerDx, cornerDy }
 function computeClusterLayout(screenW, screenH) {
   // Cluster fills 88 % × 82 % of the display so the full layout fits on
   // screen with margin.  Panels overlap on purpose (pinwheel arrangement);
-  // z-order — hub behind the four corner windows — controls what's visible
-  // in each overlap region.
+  // z-order is managed in createKioskWindow: hub is created first (so it
+  // starts below the corners) then moved to the front with moveTop() after
+  // all five windows exist, so hub sits on top in each overlap region.
   const W = Math.round((screenW || 1920) * 0.88);
   const H = Math.round((screenH || 1080) * 0.82);
 
@@ -385,6 +386,12 @@ function createKioskWindow() {
       resizeState.delete(key);
     });
   }
+
+  // Re-stack hub on top now that all five windows exist. Hub was created
+  // first (lowest z-order) so the corners could be layered above it during
+  // construction; moveTop() reverses that, making hub the frontmost panel.
+  const hubWin = panelWindows.get('hub');
+  if (hubWin && !hubWin.isDestroyed()) hubWin.moveTop();
 
   attachActivityHandling();
   startAllIdleRotation();
