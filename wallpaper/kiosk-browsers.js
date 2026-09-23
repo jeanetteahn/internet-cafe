@@ -1,4 +1,4 @@
-const { BrowserWindow, BrowserView, screen, ipcMain } = require('electron');
+const { BrowserWindow, BrowserView, screen, ipcMain, globalShortcut } = require('electron');
 const path = require('path');
 
 // ---- Tunables ---------------------------------------------------------------
@@ -388,6 +388,36 @@ function createKioskWindow() {
 
   attachActivityHandling();
   startAllIdleRotation();
+
+  // Dev-only tuning aid: Ctrl+Alt+D dumps the current panel positions and
+  // sizes as ready-to-paste fractions in the shape computeClusterLayout's
+  // defs block expects.  Drag/resize panels to taste, hit the shortcut,
+  // and copy-paste the output straight over the existing defs.
+  //
+  // Remove this shortcut — along with the drag strip (kiosk-handle.html),
+  // the Reset button, and the resize grip (kiosk-resize-grip.html) — once
+  // the layout is finalized for production.
+  const dumpRegistered = globalShortcut.register('Control+Alt+D', () => {
+    const lines = order.map(key => {
+      const win = panelWindows.get(key);
+      if (!win || win.isDestroyed()) return `    ${key}: (window gone)`;
+      const { x, y, width, height } = win.getBounds();
+      const rx = ((x - originX) / layout.totalWidth ).toFixed(3);
+      const ry = ((y - originY) / layout.totalHeight).toFixed(3);
+      const rw = (width              / layout.totalWidth ).toFixed(3);
+      // rh is the content height (strip excluded) so it pastes back correctly.
+      const rh = ((height - HANDLE_HEIGHT) / layout.totalHeight).toFixed(3);
+      const pad = ' '.repeat(12 - key.length); // align '{' with bottomRight
+      return `    ${key}:${pad}{ rx: ${rx}, ry: ${ry}, rw: ${rw}, rh: ${rh} },`;
+    });
+    console.log('[kiosk] Ctrl+Alt+D — current layout (paste over defs in computeClusterLayout):');
+    console.log('  const defs = {');
+    console.log(lines.join('\n'));
+    console.log('  };');
+  });
+  if (!dumpRegistered) {
+    console.error('[kiosk] Ctrl+Alt+D already claimed — layout dump unavailable');
+  }
 
   return order.map(key => panelWindows.get(key));
 }
