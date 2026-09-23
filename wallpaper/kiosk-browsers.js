@@ -1,4 +1,4 @@
-const { BrowserWindow, BrowserView, screen, ipcMain, globalShortcut } = require('electron');
+const { BrowserWindow, BrowserView, screen, ipcMain, globalShortcut, session } = require('electron');
 const path = require('path');
 
 // ---- Tunables ---------------------------------------------------------------
@@ -23,9 +23,13 @@ function buildSearchUrl(term) {
   return `https://html.duckduckgo.com/html/?q=${encodeURIComponent(term)}`;
 }
 
-const REFRESH_MS            = 4 * 60 * 1000; // how often an idle panel jumps to its next search
-const STAGGER_MS            = 20 * 1000;      // stagger initial idle starts across the 5 panels
-const INACTIVITY_TIMEOUT_MS = 2.5 * 60 * 1000; // idle grace period before auto-search resumes
+const REFRESH_MS              = 4 * 60 * 1000; // how often an idle panel cycles to its next search
+const STAGGER_MS              = 20 * 1000;      // spread between each panel's ongoing rotation cycle
+// Startup-only stagger: panels show content within a few seconds of launch.
+// STAGGER_MS still controls the offset between ongoing 4-minute cycles so
+// all five panels don't hit DuckDuckGo at the same moment.
+const INITIAL_LOAD_STAGGER_MS = 1500;
+const INACTIVITY_TIMEOUT_MS   = 2.5 * 60 * 1000; // idle grace period before auto-search resumes
 
 const HANDLE_HEIGHT         = 28;   // px — height of the draggable title strip on each panel
 const RETURN_HOME_WHEN_IDLE = true; // send panel back to home position when it goes idle
@@ -34,6 +38,21 @@ const MIN_VISIBLE_PX        = 120;  // minimum px of the drag strip that must st
 const GRIP_SIZE             = 18;  // px — width/height of the bottom-right resize grip square
 const MIN_PANEL_WIDTH       = 320; // px — minimum panel window width
 const MIN_PANEL_HEIGHT      = 220; // px — minimum panel window height (includes the drag strip)
+
+// "Loading..." placeholder shown immediately in each panel so customers never
+// see a dark empty box while the first network request is in flight.
+const PLACEHOLDER_URL = 'data:text/html,' + encodeURIComponent(
+  '<body style="margin:0;background:#1a1a1a;color:#555;' +
+  'font:14px/1 sans-serif;display:flex;align-items:center;' +
+  'justify-content:center;height:100vh">Loading…</body>'
+);
+
+// ---- Startup timing ---------------------------------------------------------
+// Set at the top of createKioskWindow(); used by [kiosk-timing] console logs.
+// Grep for [kiosk-timing] on the NucBox5 to measure improvements.
+let _t0 = 0;
+const timingMs = () => Date.now() - _t0;
+const firstLoadLogged = new Set(); // panels whose first real page load has been logged
 
 // ---- Module-level state (GC protection + shared between helper functions) ---
 //
@@ -281,6 +300,11 @@ function notePanelActivity(key) {
  * references matter.
  */
 function createKioskWindow() {
+  _t0 = Date.now();
+  // Warm the DNS + TCP connection to DuckDuckGo before any panel navigates,
+  // shaving time off the first real loadURL call on a cold NucBox5.
+  session.defaultSession.preconnect({ url: 'https://html.duckduckgo.com' });
+
   // Determine which display to host the cluster on.  KIOSK_DISPLAY is a
   // 0-based index into screen.getAllDisplays(); falls back to the primary
   // display when the variable is absent or out of range.
@@ -334,6 +358,7 @@ function createKioskWindow() {
 
     // Store in panelWindows early — positionGrip and event listeners need it.
     panelWindows.set(key, win);
+    console.log(`[kiosk-timing] ${key} window created: +${timingMs()} ms`);
 
     // Native minimum: belt-and-suspenders alongside the custom grip's clamp.
     // Uses minSizeFor() which caps at the home size, so small-screen panels
@@ -348,6 +373,19 @@ function createKioskWindow() {
     win.addBrowserView(view);
     view.setBounds({ x: 0, y: HANDLE_HEIGHT, width: winW, height: winH - HANDLE_HEIGHT });
     view.setAutoResize({ width: true, height: true });
+
+    // Show a "Loading…" placeholder immediately so panels never look like
+    // empty dark boxes while waiting for the first network request.
+    view.webContents.loadURL(PLACEHOLDER_URL);
+
+    // Timing: log the first real page load per panel.  Skip the data: URL
+    // placeholder — getURL() returns the current URL when the event fires.
+    view.webContents.on('did-finish-load', () => {
+      if (!firstLoadLogged.has(key) && !view.webContents.getURL().startsWith('data:')) {
+        firstLoadLogged.add(key);
+        console.log(`[kiosk-timing] ${key} did-finish-load: +${timingMs()} ms`);
+      }
+    });
 
     // Forward the panel page's title to the drag strip.
     view.webContents.on('page-title-updated', (_e, title) => {
@@ -486,26 +524,41 @@ function startAllIdleRotation() {
       rotationIndex: i,
       intervalId: null,
       inactivityTimer: null,
+      rotationStartTimer: null,
     });
-    setTimeout(() => startIdleRotation(key), i * STAGGER_MS);
+    // INITIAL_LOAD_STAGGER_MS: fast stagger so all five panels show content
+    // within a few seconds of launch.  i * STAGGER_MS is passed as a rotation
+    // offset so the ongoing 4-minute cycles remain spread across panels and
+    // don't burst DuckDuckGo together on every cycle.
+    setTimeout(() => startIdleRotation(key, i * STAGGER_MS), i * INITIAL_LOAD_STAGGER_MS);
   });
 }
 
-function startIdleRotation(key) {
+// rotationOffset: additional delay before the repeating setInterval fires.
+// Used only at startup (from startAllIdleRotation) to keep ongoing 4-minute
+// cycles spread across panels.  Omit (defaults to 0) when resuming after
+// customer inactivity — the interval should start immediately in that case.
+function startIdleRotation(key, rotationOffset = 0) {
   const state = panelStates.get(key);
   const view  = panelViews[key];
   if (!state || !view) return;
 
-  // Clear any existing interval before starting a new one — prevents
-  // double-up rotation if startIdleRotation is called while already running
-  // (e.g., two inactivity timers firing in quick succession).
+  // Clear all timers before starting fresh — prevents double-up rotation if
+  // startIdleRotation fires while already running (e.g., two inactivity
+  // timers in quick succession) or while a startup offset is still pending.
   clearInterval(state.intervalId);
   clearTimeout(state.inactivityTimer);
-  state.mode            = 'auto';
-  state.inactivityTimer = null;
+  clearTimeout(state.rotationStartTimer);
+  state.mode             = 'auto';
+  state.intervalId       = null;
+  state.inactivityTimer  = null;
+  state.rotationStartTimer = null;
 
   const load = () => {
     const term = SEARCH_TERMS[state.rotationIndex % SEARCH_TERMS.length];
+    if (!firstLoadLogged.has(key)) {
+      console.log(`[kiosk-timing] ${key} first loadURL: +${timingMs()} ms`);
+    }
     view.webContents.loadURL(buildSearchUrl(term)).catch(() => {
       /* transient network/DNS errors are fine to ignore here */
     });
@@ -513,14 +566,29 @@ function startIdleRotation(key) {
   };
 
   load();
-  state.intervalId = setInterval(load, REFRESH_MS);
+
+  if (rotationOffset > 0) {
+    // Delay the interval so cycles fire REFRESH_MS after the offset point,
+    // keeping multi-panel refreshes spread across time.  The first load above
+    // already happened; only the rhythm of subsequent loads is offset here.
+    state.rotationStartTimer = setTimeout(() => {
+      state.rotationStartTimer = null;
+      if (state.mode === 'auto' && !state.intervalId) {
+        state.intervalId = setInterval(load, REFRESH_MS);
+      }
+    }, rotationOffset);
+  } else {
+    state.intervalId = setInterval(load, REFRESH_MS);
+  }
 }
 
 function stopIdleRotation(key) {
   const state = panelStates.get(key);
   if (!state) return;
   clearInterval(state.intervalId);
+  clearTimeout(state.rotationStartTimer);
   state.intervalId = null;
+  state.rotationStartTimer = null;
 }
 
 // ---- Exports ----------------------------------------------------------------
