@@ -16,6 +16,14 @@ const { registerSelf, killOthers } = require('./process-pair');
 // only its own wallpaper window(s) keeps it exactly that.
 // ---------------------------------------------------------------------------
 
+// Log all otherwise-silent failures with a clear prefix.
+process.on('uncaughtException', (err) => {
+  console.error('[wallpaper] Uncaught exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[wallpaper] Unhandled rejection:', reason);
+});
+
 const PROCESS_NAME = 'wallpaper';
 const cleanupPidFile = registerSelf(PROCESS_NAME);
 
@@ -58,7 +66,11 @@ function createWallpaperWindows() {
 }
 
 app.whenReady().then(() => {
-  createWallpaperWindows();
+  try {
+    createWallpaperWindows();
+  } catch (err) {
+    console.error('[wallpaper] Failed to create wallpaper windows:', err);
+  }
 
   // Safety valve for development/testing: this app is designed to cover
   // the whole screen and (via xwinwrap) can end up genuinely on top of
@@ -85,6 +97,8 @@ app.whenReady().then(() => {
       'harmless: that process\'s shortcut quits this one too.'
     );
   }
+}).catch((err) => {
+  console.error('[wallpaper] app.whenReady() rejected:', err);
 });
 
 app.on('will-quit', () => {

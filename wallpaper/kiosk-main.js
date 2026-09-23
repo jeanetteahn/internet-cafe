@@ -17,6 +17,16 @@ const { app, globalShortcut } = require('electron');
 const { createKioskWindow } = require('./kiosk-browsers');
 const { registerSelf, killOthers } = require('./process-pair');
 
+// Log all otherwise-silent failures with a clear prefix so startup errors
+// (like calling a non-existent method on a BrowserView) appear in the
+// terminal rather than being swallowed as unhandled promise rejections.
+process.on('uncaughtException', (err) => {
+  console.error('[kiosk] Uncaught exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[kiosk] Unhandled rejection:', reason);
+});
+
 const PROCESS_NAME = 'kiosk';
 const cleanupPidFile = registerSelf(PROCESS_NAME);
 
@@ -31,7 +41,11 @@ const cleanupPidFile = registerSelf(PROCESS_NAME);
 let kioskWindows = null;
 
 app.whenReady().then(() => {
-  kioskWindows = createKioskWindow();
+  try {
+    kioskWindows = createKioskWindow();
+  } catch (err) {
+    console.error('[kiosk] Failed to create kiosk panels:', err);
+  }
 
   // Safety valve, mirrored from main.js: Ctrl+Alt+Q always quits
   // immediately. Only one of the two processes (this one, or main.js —
@@ -48,6 +62,8 @@ app.whenReady().then(() => {
       'and harmless: that process\'s shortcut quits this one too.'
     );
   }
+}).catch((err) => {
+  console.error('[kiosk] app.whenReady() rejected:', err);
 });
 
 app.on('will-quit', () => {

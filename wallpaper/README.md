@@ -256,6 +256,23 @@ the returned array in `kioskWindows`, belt-and-suspenders. If a future
 rewrite drops the module-level Map, this exact symptom — processes alive in
 `ps aux`, nothing rendered, no errors anywhere — is what will come back.
 
+**Known bug (fixed): grip.loadFile crash — one empty dark panel, four
+missing.** `BrowserView` has no `loadFile` method; that method lives on its
+`webContents`.  Calling `grip.loadFile(...)` instead of
+`grip.webContents.loadFile(...)` in the `createKioskWindow()` loop threw
+"grip.loadFile is not a function" on the very first panel (hub).  Because the
+loop ran inside `app.whenReady()` without a `try/catch`, the error was
+swallowed as an unhandled promise rejection — nothing printed to the console —
+so hub got a `BrowserWindow` (hence one empty dark box on screen) but its grip
+content never loaded, the loop never reached the other four panels, and
+`startAllIdleRotation()` was never called.  Fixed by using
+`grip.webContents.loadFile(...)`.  `kiosk-main.js` and `main.js` now also
+install `uncaughtException` and `unhandledRejection` handlers at process
+startup with a clear `[kiosk]` / `[wallpaper]` prefix, and both
+`app.whenReady()` callbacks wrap their body in `try/catch` and chain a
+`.catch()`, so future errors of this class are immediately visible in the
+terminal rather than silently aborting mid-loop.
+
 Other things worth knowing:
 
 - **Panels are movable and resizable.** The 28 px drag strip
@@ -286,6 +303,12 @@ Other things worth knowing:
 - **No compositor required.** Panels are now opaque (`backgroundColor:
   '#1a1a1a'`) rather than transparent, so there are no gaps to composite
   through and no compositor dependency.
+- **Multi-display kiosk.** The cluster lands on the primary display by default.
+  Set `KIOSK_DISPLAY=N` (a 0-based index into `screen.getAllDisplays()`) before
+  launching to place it on a different monitor — e.g.
+  `KIOSK_DISPLAY=1 npm start`.  Drag-clamping and resize limits use
+  `screen.getDisplayMatching()` on each panel's current bounds, so a panel
+  dragged between monitors clamps to whichever screen it occupies at the time.
 - **Panel sizes scale with the display** — `computeClusterLayout()` in
   `kiosk-browsers.js` sizes each panel as a fraction of 88 % × 82 % of the
   work area, so the cluster fits any resolution with margin.
@@ -337,5 +360,6 @@ interval is what risks getting rate-limited.
 
 `main.js` creates one desktop-layer window per connected display
 (`screen.getAllDisplays()`), each independently loading `index.html`, so
-every screen gets its own video + weather overlay. Only the primary
-display gets the browser wall.
+every screen gets its own video + weather overlay. The kiosk cluster
+(`kiosk-main.js`) appears on the primary display by default; set
+`KIOSK_DISPLAY=N` (0-based index) to place it on a different monitor instead.

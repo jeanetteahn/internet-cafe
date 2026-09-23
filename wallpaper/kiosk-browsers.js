@@ -135,10 +135,12 @@ function sendPanelHome(key) {
 // After any customer drag, clamp the window so at least MIN_VISIBLE_PX of
 // the drag strip remains horizontally on screen and the strip stays
 // vertically on screen (so the customer can always grab it again).
-function clampToPrimary(key) {
+// Uses the display the panel is currently on (not always the primary) so
+// that a panel on a secondary monitor via KIOSK_DISPLAY clamps correctly.
+function clampToDisplay(key) {
   const win = panelWindows.get(key);
   if (!win || win.isDestroyed()) return;
-  const { workArea } = screen.getPrimaryDisplay();
+  const { workArea } = screen.getDisplayMatching(win.getBounds());
   const { x, y, width, height } = win.getBounds();
 
   const cx = Math.max(
@@ -205,7 +207,7 @@ function updateResize(key) {
   if (!win || win.isDestroyed()) return;
 
   const cursor   = screen.getCursorScreenPoint();
-  const { workArea } = screen.getPrimaryDisplay();
+  const { workArea } = screen.getDisplayMatching(win.getBounds());
   const { startBounds, cornerDx, cornerDy } = state;
   const minSize  = minSizeFor(key);
 
@@ -278,8 +280,16 @@ function notePanelActivity(key) {
  * references matter.
  */
 function createKioskWindow() {
-  const primary = screen.getPrimaryDisplay();
-  const { workArea } = primary;
+  // Determine which display to host the cluster on.  KIOSK_DISPLAY is a
+  // 0-based index into screen.getAllDisplays(); falls back to the primary
+  // display when the variable is absent or out of range.
+  const allDisplays = screen.getAllDisplays();
+  const envIndex    = parseInt(process.env.KIOSK_DISPLAY, 10);
+  const kioskDisplay = (Number.isFinite(envIndex) && envIndex >= 0 && envIndex < allDisplays.length)
+    ? allDisplays[envIndex]
+    : screen.getPrimaryDisplay();
+
+  const { workArea } = kioskDisplay;
   const layout = computeClusterLayout(workArea.width, workArea.height);
   const originX = workArea.x + Math.round((workArea.width  - layout.totalWidth)  / 2);
   const originY = workArea.y + Math.round((workArea.height - layout.totalHeight) / 2);
@@ -349,7 +359,7 @@ function createKioskWindow() {
     // page content in the bottom-right corner.
     const grip = makeGripView();
     win.addBrowserView(grip);
-    grip.loadFile(path.join(__dirname, 'kiosk-resize-grip.html'));
+    grip.webContents.loadFile(path.join(__dirname, 'kiosk-resize-grip.html'));
     gripViews[key] = grip;
     positionGrip(key);
 
@@ -364,7 +374,7 @@ function createKioskWindow() {
       clearTimeout(moveDebounce);
       moveDebounce = setTimeout(() => {
         notePanelActivity(key);
-        clampToPrimary(key);
+        clampToDisplay(key);
       }, 250);
     });
 
