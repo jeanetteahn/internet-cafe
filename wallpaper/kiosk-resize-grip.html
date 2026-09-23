@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 18px;
+      height: 18px;
+      overflow: hidden;
+      background: #1a1a1a;
+      user-select: none;
+      -webkit-user-select: none;
+      /* Prevent the browser's own pan/zoom gestures interfering with the drag */
+      touch-action: none;
+    }
+
+    .grip {
+      width: 18px;
+      height: 18px;
+      cursor: nwse-resize;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Three diagonal ridges in the bottom-right corner via a repeating gradient
+       clipped to the corner triangle */
+    .grip::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image: repeating-linear-gradient(
+        -45deg,
+        transparent 0px,
+        transparent 3px,
+        #606060 3px,
+        #606060 4.5px
+      );
+      clip-path: polygon(100% 0%, 100% 100%, 0% 100%);
+    }
+
+    /* Brighten ridges on hover and while a drag is in progress */
+    .grip:hover::after,
+    .grip.dragging::after {
+      background-image: repeating-linear-gradient(
+        -45deg,
+        transparent 0px,
+        transparent 3px,
+        #c8c8c8 3px,
+        #c8c8c8 4.5px
+      );
+    }
+  </style>
+</head>
+<body>
+  <div class="grip" id="grip"></div>
+
+  <script>
+    var grip      = document.getElementById('grip');
+    var dragging  = false;
+    var pointerId = null;
+    var rafId     = null;
+
+    grip.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      grip.setPointerCapture(e.pointerId);
+      pointerId = e.pointerId;
+      dragging  = true;
+      grip.classList.add('dragging');
+      if (window.kioskResize) {
+        window.kioskResize.startResize({ x: e.offsetX, y: e.offsetY });
+      }
+    });
+
+    grip.addEventListener('pointermove', function (e) {
+      if (!dragging || e.pointerId !== pointerId) return;
+      e.preventDefault();
+      if (rafId !== null) return; // already queued — skip until rAF fires
+      rafId = requestAnimationFrame(function () {
+        rafId = null;
+        if (dragging && window.kioskResize) {
+          window.kioskResize.moveResize();
+        }
+      });
+    });
+
+    function endDrag(e) {
+      if (!dragging) return;
+      if (e.pointerId !== undefined && e.pointerId !== pointerId) return;
+      dragging  = false;
+      pointerId = null;
+      grip.classList.remove('dragging');
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      if (window.kioskResize) {
+        window.kioskResize.endResize();
+      }
+    }
+
+    grip.addEventListener('pointerup',           endDrag);
+    grip.addEventListener('pointercancel',        endDrag);
+    grip.addEventListener('lostpointercapture',   endDrag);
+  </script>
+</body>
+</html>

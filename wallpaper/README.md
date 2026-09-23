@@ -182,13 +182,15 @@ treat that layer.
 Each panel window is **opaque** (`backgroundColor: '#1a1a1a'`) rather than
 transparent, so no compositor is required on the host. Each one has a 28 px
 drag strip (`kiosk-handle.html`) across the top: customers can grab it to
-reposition any panel anywhere on screen. A **Reset position** button in the
-strip snaps the panel back to its home position in the cluster. If
-`RETURN_HOME_WHEN_IDLE` is true (the default), panels also return home
-automatically when their inactivity timer expires. After any drag, each panel
-is clamped so at least `MIN_VISIBLE_PX` (120 px by default) of the strip
-remains horizontally visible and the strip stays fully on screen vertically —
-so a customer can always grab it again.
+reposition any panel anywhere on screen. An 18 × 18 px **resize grip**
+(`kiosk-resize-grip.html`) sits in each panel's bottom-right corner: customers
+can drag it to make a panel larger or smaller. A **Reset** button in the drag
+strip snaps the panel back to its home position **and** restores its original
+size. If `RETURN_HOME_WHEN_IDLE` is true (the default), panels also return home
+(size and position) automatically when their inactivity timer expires. After
+any drag, each panel is clamped so at least `MIN_VISIBLE_PX` (120 px by
+default) of the strip remains horizontally visible and the strip stays fully on
+screen vertically — so a customer can always grab it again.
 
 **It's also a separate *process*, not just a separate window** —
 `kiosk-main.js` is its own Electron entry point, launched alongside
@@ -220,9 +222,9 @@ jumps), hitting DuckDuckGo's plain HTML endpoint
 results page, since that endpoint tolerates repeated automated requests
 noticeably better — though "tolerates better" isn't "immune," so don't
 push `REFRESH_MS` much below a few minutes. The moment a customer clicks,
-types, or drags any panel (detected via `kiosk-preload.js` for clicks/keys,
-and the panel window's `move` event for drags), that panel's rotation stops
-and it becomes a normal browser for them — clicking search results navigates
+types, drags, or resizes any panel (detected via `kiosk-preload.js` for
+clicks/keys, the window's `move` event for drags, and resize start/end IPC for
+the grip), that panel's rotation stops and it becomes a normal browser for them — clicking search results navigates
 like any real browser, since it's a genuine, isolated `BrowserView`, not a
 simulation. After `INACTIVITY_TIMEOUT_MS` (2.5 minutes by default) with no
 further activity in that panel, it automatically goes back to auto-searching
@@ -256,17 +258,31 @@ rewrite drops the module-level Map, this exact symptom — processes alive in
 
 Other things worth knowing:
 
-- **Panels are movable.** Each panel window has a 28 px drag strip
-  (`kiosk-handle.html`) at the top, styled with `-webkit-app-region: drag`.
-  Customers can grab it to reposition any panel freely. A **Reset position**
-  button in the strip sends it back to its home position. If
-  `RETURN_HOME_WHEN_IDLE` is `true` (default), panels also return home
-  automatically when their inactivity timer fires.
+- **Panels are movable and resizable.** The 28 px drag strip
+  (`kiosk-handle.html`) at the top lets customers reposition any panel freely.
+  An 18 × 18 px resize grip (`kiosk-resize-grip.html`) in the bottom-right
+  corner lets them resize it. The grip uses `setPointerCapture` so dragging
+  works even if the cursor leaves the grip area. Resizing is driven entirely by
+  this custom grip; native window-manager edge resizing is not relied on (it is
+  unreliable for frameless windows on Cinnamon, and the `BrowserView` covers
+  the window edges anyway). `resizable: true` is set on the window so that
+  programmatic `setBounds()` calls are honoured on all platforms.
+- **Minimum sizes.** Each panel's minimum is `Math.min(MIN_PANEL_WIDTH,
+  homeWidth)` × `Math.min(MIN_PANEL_HEIGHT, homeHeight)` — capped at the home
+  size so that panels narrower than `MIN_PANEL_WIDTH` on small screens (e.g.
+  the bottomRight panel on 1366 × 768) can still be reset to their original
+  dimensions.
+- **Screen-edge limit while resizing.** The right and bottom edges of a panel
+  cannot be dragged beyond the display's work area.
+- **Reset restores size too.** The **Reset** button in the drag strip and the
+  idle return-home both call `sendPanelHome()`, which sets the full home bounds
+  (position + original size).
 - **Off-screen clamping.** After any drag, the panel is clamped so at least
   `MIN_VISIBLE_PX` (120 px) of the strip stays horizontally on screen, and
   the strip remains fully visible vertically — so there's always something to
-  grab. `HANDLE_HEIGHT`, `MIN_VISIBLE_PX`, and `RETURN_HOME_WHEN_IDLE` are
-  all tunables near the top of `kiosk-browsers.js`.
+  grab. `HANDLE_HEIGHT`, `MIN_VISIBLE_PX`, `RETURN_HOME_WHEN_IDLE`,
+  `GRIP_SIZE`, `MIN_PANEL_WIDTH`, and `MIN_PANEL_HEIGHT` are all tunables
+  near the top of `kiosk-browsers.js`.
 - **No compositor required.** Panels are now opaque (`backgroundColor:
   '#1a1a1a'`) rather than transparent, so there are no gaps to composite
   through and no compositor dependency.

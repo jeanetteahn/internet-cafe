@@ -4,8 +4,8 @@ const path = require('path');
 // ---- Tunables ---------------------------------------------------------------
 // All 5 panels (hub + 4 corners) behave identically: they auto-search
 // through this list on their own while idle, and the instant a customer
-// clicks, types, or drags a panel, it stops rotating and becomes a normal
-// browser for them — see notePanelActivity() below for that logic.
+// clicks, types, drags, or resizes a panel, it stops rotating and becomes a
+// normal browser for them — see notePanelActivity() below for that logic.
 const SEARCH_TERMS = [
   'weather today',
   'local news',
@@ -23,13 +23,17 @@ function buildSearchUrl(term) {
   return `https://html.duckduckgo.com/html/?q=${encodeURIComponent(term)}`;
 }
 
-const REFRESH_MS          = 4 * 60 * 1000; // how often an idle panel jumps to its next search
-const STAGGER_MS          = 20 * 1000;      // stagger initial idle starts across the 5 panels
+const REFRESH_MS            = 4 * 60 * 1000; // how often an idle panel jumps to its next search
+const STAGGER_MS            = 20 * 1000;      // stagger initial idle starts across the 5 panels
 const INACTIVITY_TIMEOUT_MS = 2.5 * 60 * 1000; // idle grace period before auto-search resumes
 
-const HANDLE_HEIGHT        = 28;   // px — height of the draggable title strip on each panel
-const RETURN_HOME_WHEN_IDLE = true; // move a panel back to its home position when it goes idle
-const MIN_VISIBLE_PX       = 120;  // minimum px of the drag strip that must stay on-screen
+const HANDLE_HEIGHT         = 28;   // px — height of the draggable title strip on each panel
+const RETURN_HOME_WHEN_IDLE = true; // send panel back to home position when it goes idle
+const MIN_VISIBLE_PX        = 120;  // minimum px of the drag strip that must stay on-screen
+
+const GRIP_SIZE             = 18;  // px — width/height of the bottom-right resize grip square
+const MIN_PANEL_WIDTH       = 320; // px — minimum panel window width
+const MIN_PANEL_HEIGHT      = 220; // px — minimum panel window height (includes the drag strip)
 
 // ---- Module-level state (GC protection + shared between helper functions) ---
 //
@@ -45,12 +49,16 @@ const MIN_VISIBLE_PX       = 120;  // minimum px of the drag strip that must sta
 const panelWindows    = new Map(); // key -> BrowserWindow
 const homeBounds      = new Map(); // key -> { x, y, width, height }
 const panelViews      = {};        // key -> BrowserView (for rotation + activity)
+const gripViews       = {};        // key -> BrowserView (the resize grip overlay)
 const panelStates     = new Map(); // key -> { mode, rotationIndex, intervalId, inactivityTimer }
 
 // Truthy while a programmatic setBounds is in flight for a given panel.
 // The 'move' event debounce handler checks this to avoid mistaking a
-// clamping or send-home move for a customer drag.
+// clamping, send-home, or resize-update move for a customer drag.
 const ignoreNextMoves = new Map(); // key -> timeout-id | null
+
+// Active resize drag state per panel.
+const resizeState     = new Map(); // key -> { startBounds, cornerDx, cornerDy } | null
 
 // ---- Layout -----------------------------------------------------------------
 
@@ -93,13 +101,24 @@ function makePanelView() {
   });
 }
 
-// ---- Programmatic move helpers ----------------------------------------------
+function makeGripView() {
+  return new BrowserView({
+    webPreferences: {
+      preload: path.join(__dirname, 'kiosk-resize-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+}
 
-// Call this instead of win.setBounds() for any move we initiate ourselves
-// (clamping, send-home).  Sets the ignoreNextMoves flag so the 'move' event
-// debounce handler doesn't treat the resulting OS move events as customer
-// drags.  The flag clears itself after 400 ms — long enough to outlast the
-// sequence of 'move' events that a single setBounds() call can produce.
+// ---- Programmatic move/resize helpers ---------------------------------------
+
+// Call this instead of win.setBounds() for any bounds change we initiate
+// ourselves (clamping, send-home, resize updates).  Sets the ignoreNextMoves
+// flag so the 'move' event debounce handler doesn't treat the resulting OS
+// events as customer drags.  The flag clears itself after 400 ms — long enough
+// to outlast the 'move' events a single setBounds() call can produce.
 function setPanelBoundsIgnored(key, bounds) {
   const existing = ignoreNextMoves.get(key);
   if (existing) clearTimeout(existing);
@@ -122,14 +141,10 @@ function clampToPrimary(key) {
   const { workArea } = screen.getPrimaryDisplay();
   const { x, y, width, height } = win.getBounds();
 
-  // Horizontal: window may slide off-screen, but at least MIN_VISIBLE_PX
-  // of its width must remain visible on each side.
   const cx = Math.max(
     workArea.x - width + MIN_VISIBLE_PX,
     Math.min(x, workArea.x + workArea.width - MIN_VISIBLE_PX)
   );
-  // Vertical: the drag strip (HANDLE_HEIGHT px) must remain fully on-screen
-  // so the customer can always re-grab the panel.
   const cy = Math.max(
     workArea.y,
     Math.min(y, workArea.y + workArea.height - HANDLE_HEIGHT)
@@ -140,11 +155,92 @@ function clampToPrimary(key) {
   }
 }
 
+// ---- Resize helpers ---------------------------------------------------------
+
+// Minimum size for a panel: the smaller of the fixed constants and that
+// panel's home size.  On small screens (e.g. 1366 × 768) some panels start
+// narrower than MIN_PANEL_WIDTH; using a hard floor would stop reset from
+// ever restoring the original size.
+function minSizeFor(key) {
+  const home = homeBounds.get(key);
+  return {
+    width:  home ? Math.min(MIN_PANEL_WIDTH,  home.width)  : MIN_PANEL_WIDTH,
+    height: home ? Math.min(MIN_PANEL_HEIGHT, home.height) : MIN_PANEL_HEIGHT,
+  };
+}
+
+// Pin the grip view to the bottom-right corner of its window.  Called once
+// at creation and again on every 'resize' event.
+function positionGrip(key) {
+  const win  = panelWindows.get(key);
+  const grip = gripViews[key];
+  if (!win || win.isDestroyed() || !grip) return;
+  const [w, h] = win.getContentSize();
+  grip.setBounds({ x: w - GRIP_SIZE, y: h - GRIP_SIZE, width: GRIP_SIZE, height: GRIP_SIZE });
+}
+
+function startResize(key, offset) {
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return;
+  // Clamp the in-grip offset so a press right at the edge doesn't produce a
+  // wildly wrong corner distance.
+  const ox = Math.max(0, Math.min(GRIP_SIZE, offset.x));
+  const oy = Math.max(0, Math.min(GRIP_SIZE, offset.y));
+  // Store the fixed distance from the press point to the window's
+  // bottom-right corner.  We do NOT record the cursor's screen position here:
+  // by the time this IPC message arrives the cursor may have already moved,
+  // and recording it would cause the first drag movement to be lost.
+  resizeState.set(key, {
+    startBounds: win.getBounds(),
+    cornerDx: GRIP_SIZE - ox,
+    cornerDy: GRIP_SIZE - oy,
+  });
+  notePanelActivity(key);
+}
+
+function updateResize(key) {
+  const state = resizeState.get(key);
+  if (!state) return;
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return;
+
+  const cursor   = screen.getCursorScreenPoint();
+  const { workArea } = screen.getPrimaryDisplay();
+  const { startBounds, cornerDx, cornerDy } = state;
+  const minSize  = minSizeFor(key);
+
+  // cursor.x + cornerDx is the desired right edge of the window.
+  // The top-left corner stays fixed at startBounds.x / startBounds.y.
+  let newW = cursor.x + cornerDx - startBounds.x;
+  let newH = cursor.y + cornerDy - startBounds.y;
+
+  newW = Math.max(minSize.width,  newW);
+  newH = Math.max(minSize.height, newH);
+
+  // Don't let the window extend past the right or bottom of the work area.
+  newW = Math.min(newW, workArea.x + workArea.width  - startBounds.x);
+  newH = Math.min(newH, workArea.y + workArea.height - startBounds.y);
+
+  setPanelBoundsIgnored(key, {
+    x:      startBounds.x,
+    y:      startBounds.y,
+    width:  Math.round(newW),
+    height: Math.round(newH),
+  });
+}
+
+function endResize(key) {
+  updateResize(key);
+  resizeState.set(key, null);
+  notePanelActivity(key);
+}
+
 // ---- Activity ---------------------------------------------------------------
 
 // Central activity handler — called from IPC (kiosk-preload.js click/keypress
-// in the panel view), the 'move' debounce (customer drag), and the reset-
-// position IPC.  Stops idle rotation if running, resets the inactivity clock.
+// in the panel view), the 'move' debounce (customer drag), resize start/end,
+// and the reset IPC.  Stops idle rotation if running, resets the inactivity
+// clock.
 function notePanelActivity(key) {
   const state = panelStates.get(key);
   if (!state) return;
@@ -164,12 +260,15 @@ function notePanelActivity(key) {
 // ---- Window creation --------------------------------------------------------
 
 /**
- * Creates five independent, movable panel windows — one per kiosk panel
- * (hub, topLeft, topRight, bottomLeft, bottomRight).  Each window is a
- * frameless, opaque BrowserWindow with a 28 px drag strip (kiosk-handle.html)
- * at the top and the panel's BrowserView content below it.  Panels are opaque
- * (#1a1a1a background) so no compositor is required on the host.
+ * Creates five independent, movable, resizable panel windows — one per kiosk
+ * panel (hub, topLeft, topRight, bottomLeft, bottomRight).  Each window is a
+ * frameless, opaque BrowserWindow with:
+ *   - a 28 px drag strip (kiosk-handle.html) at the top
+ *   - the panel's BrowserView content below it
+ *   - an 18 × 18 px resize grip (kiosk-resize-grip.html) overlaid on the
+ *     bottom-right corner
  *
+ * Panels are opaque (#1a1a1a background) so no compositor is required.
  * Hub is created first, so it sits behind the four corner windows wherever
  * the pinwheel layout causes them to overlap.
  *
@@ -204,7 +303,12 @@ function createKioskWindow() {
       width:  winW,
       height: winH,
       frame:       false,
-      resizable:   false,
+      // resizable: true is required so that programmatic setBounds() is
+      // honoured on all platforms.  Resizing is driven entirely by the custom
+      // grip; native window-manager edge dragging is not relied on (it's
+      // unreliable for frameless windows on Cinnamon, and the BrowserView
+      // covers the edges anyway).
+      resizable:   true,
       movable:     true,
       skipTaskbar: true,
       alwaysOnTop: true,
@@ -216,6 +320,15 @@ function createKioskWindow() {
         sandbox: true,
       },
     });
+
+    // Store in panelWindows early — positionGrip and event listeners need it.
+    panelWindows.set(key, win);
+
+    // Native minimum: belt-and-suspenders alongside the custom grip's clamp.
+    // Uses minSizeFor() which caps at the home size, so small-screen panels
+    // never get a native minimum that exceeds their home dimensions.
+    const minSize = minSizeFor(key);
+    win.setMinimumSize(minSize.width, minSize.height);
 
     win.loadFile(path.join(__dirname, 'kiosk-handle.html'));
 
@@ -230,8 +343,18 @@ function createKioskWindow() {
       if (!win.isDestroyed()) win.webContents.send('panel-title', title);
     });
 
-    panelViews[key]  = view;
-    panelWindows.set(key, win);
+    panelViews[key] = view;
+
+    // Resize grip — added AFTER the panel view so it sits on top of the
+    // page content in the bottom-right corner.
+    const grip = makeGripView();
+    win.addBrowserView(grip);
+    grip.loadFile(path.join(__dirname, 'kiosk-resize-grip.html'));
+    gripViews[key] = grip;
+    positionGrip(key);
+
+    // Keep the grip pinned to the corner as the window size changes.
+    win.on('resize', () => positionGrip(key));
 
     // Drag clamping: debounce 'move' events (the only drag event on Linux)
     // so we only clamp once per finished drag, not on every pixel.
@@ -248,6 +371,8 @@ function createKioskWindow() {
     win.on('closed', () => {
       panelWindows.delete(key);
       homeBounds.delete(key);
+      delete gripViews[key];
+      resizeState.delete(key);
     });
   }
 
@@ -260,15 +385,19 @@ function createKioskWindow() {
 // ---- IPC activity handling --------------------------------------------------
 
 function attachActivityHandling() {
-  // Map both the panel view's webContents id AND the handle window's
-  // webContents id to the panel key, so IPC messages from either context
-  // resolve to the right panel.
+  // Map each context's webContents id to its panel key: the panel view
+  // (kiosk-preload.js), the handle window (kiosk-handle-preload.js), and the
+  // grip view (kiosk-resize-preload.js) — so IPC from any of the three reaches
+  // the right panel.
   const webContentsIdToKey = new Map();
   for (const [key, view] of Object.entries(panelViews)) {
     webContentsIdToKey.set(view.webContents.id, key);
   }
   for (const [key, win] of panelWindows) {
     webContentsIdToKey.set(win.webContents.id, key);
+  }
+  for (const [key, grip] of Object.entries(gripViews)) {
+    webContentsIdToKey.set(grip.webContents.id, key);
   }
 
   // Sent by kiosk-preload.js on any click/keypress inside a panel view.
@@ -277,10 +406,26 @@ function attachActivityHandling() {
     if (key) notePanelActivity(key);
   });
 
-  // Sent by kiosk-handle-preload.js when the customer clicks "Reset position".
+  // Sent by kiosk-handle-preload.js when the customer clicks "Reset".
   ipcMain.on('panel-reset-position', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
     if (key) sendPanelHome(key);
+  });
+
+  // Resize IPC from kiosk-resize-preload.js.
+  ipcMain.on('panel-resize-start', (event, offset) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (key) startResize(key, offset);
+  });
+
+  ipcMain.on('panel-resize-move', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (key) updateResize(key);
+  });
+
+  ipcMain.on('panel-resize-end', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (key) endResize(key);
   });
 }
 
@@ -309,7 +454,7 @@ function startIdleRotation(key) {
   // (e.g., two inactivity timers firing in quick succession).
   clearInterval(state.intervalId);
   clearTimeout(state.inactivityTimer);
-  state.mode          = 'auto';
+  state.mode            = 'auto';
   state.inactivityTimer = null;
 
   const load = () => {
