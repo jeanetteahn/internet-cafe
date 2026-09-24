@@ -41,13 +41,14 @@ const ALLOWED_DOMAINS = [
 ];
 
 // ---- Tunables ---------------------------------------------------------------
-// At the page bottom the panel jumps to the top and re-scrolls.  If
-// MIN_SEARCH_INTERVAL_MS has elapsed since the last search, the next search
-// fires after a short BOTTOM_HOLD_MS delay instead.  SEARCH_INTERVAL_MS is a
-// safety-net ceiling for pages that never trigger bottom detection.
+// At the page bottom the panel jumps to the top and immediately moves to the
+// next search term.  MIN_SEARCH_INTERVAL_MS is a floor that adds a short extra
+// wait only when the page was very short (guards against DDG rate-limiting
+// across 5 panels).  SEARCH_INTERVAL_MS is a safety-net ceiling for pages
+// that never trigger bottom detection.
 const SEARCH_INTERVAL_MS     = 45 * 1000; // max time on a results page (safety net)
-const MIN_SEARCH_INTERVAL_MS = 20 * 1000; // min time between searches per panel — guards against DDG rate-limiting across 5 panels
-const BOTTOM_HOLD_MS         = 300;       // brief pause before loading next search (after MIN_SEARCH_INTERVAL_MS has elapsed)
+const MIN_SEARCH_INTERVAL_MS =  5 * 1000; // min time between searches per panel — floor for very short pages
+const BOTTOM_HOLD_MS         = 300;       // brief pause after jumping to top before loading next search
 const SCROLL_STEP_PX         = 80;        // px scrolled per tick
 const SCROLL_STEP_MS         = 250;       // ms between scroll ticks
 const INACTIVITY_TIMEOUT_MS  = 90 * 1000; // idle grace period before auto mode resumes
@@ -371,11 +372,10 @@ function setupViewEventHandlers(key, win, view) {
 //                                                    |
 //              scroll tick detects bottom ──────────>|
 //                                              scrollTo(0,0) — instant jump to top
-//                                                    |
-//                  MIN_SEARCH_INTERVAL_MS elapsed? ──┤
-//                  no → keep scrolling from top      |
-//                  yes → stopScrolling               |
-//                        → BOTTOM_HOLD_MS → doSearch …
+//                                              stopScrolling
+//                                              → Math.max(BOTTOM_HOLD_MS,
+//                                                  MIN_SEARCH_INTERVAL_MS - elapsed)
+//                                              → doSearch (next keyword) …
 
 function startScrolling(key) {
   const ps = panelStates.get(key);
@@ -413,24 +413,21 @@ function startScrolling(key) {
     // Re-check state after the second await.
     if (ps.mode !== 'auto' || ps.scrollTimer === null) return;
 
+    // Always advance to the next search term.  The hold is normally just
+    // BOTTOM_HOLD_MS (300 ms); MIN_SEARCH_INTERVAL_MS adds extra delay only
+    // when the page was scrolled through unusually fast (very short page).
     const sinceLastSearch = Date.now() - ps.lastSearchTime;
-    if (sinceLastSearch < MIN_SEARCH_INTERVAL_MS) {
-      // Not ready for a new search yet — keep the interval running so the
-      // panel scrolls down from the top again.
-      console.log(`[kiosk-auto] ${key} back to top, re-scrolling (${Math.round(sinceLastSearch / 1000)} s since last search)`);
-      return;
-    }
+    const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
 
-    // Ready for the next search term.
     stopScrolling(key);
     clearTimeout(ps.dwellTimer); // cancel the max-dwell safety net
     ps.dwellTimer = null;
-    console.log(`[kiosk-auto] ${key} back to top, next search in ${BOTTOM_HOLD_MS} ms`);
+    console.log(`[kiosk-auto] ${key} bottom — next search in ${holdMs} ms`);
 
     ps.dwellTimer = setTimeout(() => {
       ps.dwellTimer = null;
       if (ps.mode === 'auto') doSearch(key);
-    }, BOTTOM_HOLD_MS);
+    }, holdMs);
   }, SCROLL_STEP_MS);
 }
 
