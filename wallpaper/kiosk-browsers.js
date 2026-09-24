@@ -69,6 +69,8 @@ const BOTTOM_HOLD_MS         = 300;       // brief pause after jumping to top be
 const SCROLL_STEP_PX         = 80;        // px scrolled per tick
 const SCROLL_STEP_MS         = 250;       // ms between scroll ticks
 const INACTIVITY_TIMEOUT_MS  = 90 * 1000; // idle grace period before auto mode resumes
+const LOAD_TIMEOUT_MS        = 15 * 1000; // per-panel watchdog: abort and retry if a DDG load takes longer
+const GLOBAL_SEARCH_GAP_MS   =  2 * 1000; // minimum gap between any two panels starting a DDG search
 
 // ---- Window / layout tunables -----------------------------------------------
 const HANDLE_HEIGHT         = 28;
@@ -99,15 +101,20 @@ const ACTIVE_ANIM_MS      = 220;  // tween duration in ms (both enlarge and shri
 const TWEEN_INTERVAL_MS   = 16;   // step interval ms (~60 fps)
 const FIRST_CLICK_GRACE_MS = 1500; // grace window for first-click IPC race (see will-navigate comment)
 
-// "Loading…" placeholder shown immediately so panels are never a dark box.
+// "Loading…" placeholder shown immediately.  White background matches the
+// panel view's setBackgroundColor('#ffffff') so a slow panel looks like a
+// blank page rather than a broken black rectangle.
 const PLACEHOLDER_URL = 'data:text/html,' + encodeURIComponent(
-  '<body style="margin:0;background:#1a1a1a;color:#555;' +
+  '<body style="margin:0;background:#fff;color:#888;' +
   'font:14px/1 sans-serif;display:flex;align-items:center;' +
   'justify-content:center;height:100vh">Loading…</body>'
 );
 
 // ---- Startup timing ---------------------------------------------------------
 let _t0 = 0;
+// Timestamp of the last doSearch loadURL call across ALL panels.  Enforces
+// GLOBAL_SEARCH_GAP_MS so no two panels hit DDG within that window.
+let lastSearchStartedAt = 0;
 const timingMs = () => Date.now() - _t0;
 const firstLoadLogged = new Set();
 
@@ -194,6 +201,21 @@ function makeGripView() {
       sandbox: true,
     },
   });
+}
+
+// ---- Electron version compatibility -----------------------------------------
+// navigationHistory.canGoBack() / goBack() arrived in Electron 32.
+// Electron 31 exposes the same capability directly on webContents.
+// These helpers work on both.
+
+function canGoBack(wc) {
+  const nh = wc.navigationHistory;
+  return (nh && typeof nh.canGoBack === 'function') ? nh.canGoBack() : wc.canGoBack();
+}
+
+function goBack(wc) {
+  const nh = wc.navigationHistory;
+  if (nh && typeof nh.goBack === 'function') { nh.goBack(); } else { wc.goBack(); }
 }
 
 // ---- Content safety ---------------------------------------------------------
@@ -578,16 +600,40 @@ function setupViewEventHandlers(key, win, view) {
 
     if (!url.startsWith('data:') && url !== 'about:blank') {
       const ps = panelStates.get(key);
-      if (ps && ps.mode === 'auto') onSearchPageReady(key);
+      if (ps && ps.mode === 'auto') {
+        // Clear watchdog and reset backoff — this was a successful load.
+        clearTimeout(ps.loadTimer);
+        ps.loadTimer  = null;
+        ps.retryCount = 0;
+
+        // Per-search timing log.
+        if (ps.searchLoadStartedAt) {
+          const elapsed = Date.now() - ps.searchLoadStartedAt;
+          const status  = ps.lastNavStatus || 200;
+          console.log(`[kiosk-timing] ${key} search #${ps.searchIndex} took ${elapsed} ms (status ${status})`);
+          ps.searchLoadStartedAt = 0;
+          ps.lastNavStatus       = 0;
+        }
+
+        onSearchPageReady(key);
+      }
     }
   });
 
   view.webContents.on('did-fail-load', (_e, errorCode, _desc, failedUrl, isMainFrame) => {
     if (!isMainFrame) return; // subframe failures (ads, iframes) are not our problem
-    if (errorCode === -3) return; // ERR_ABORTED — cancelled navigation, not a real error
+    // ERR_ABORTED (-3): navigation was cancelled by our own stop() / loadURL()
+    // call or by a redirect chain.  The watchdog (if still armed) will handle
+    // the stop() case; a redirect-abort is not a real failure.  Skip retry here.
+    if (errorCode === -3) return;
     const ps = panelStates.get(key);
     if (!ps) return;
     if (!failedUrl || failedUrl.startsWith('data:')) return;
+
+    // Clear watchdog — the load definitely ended.
+    clearTimeout(ps.loadTimer);
+    ps.loadTimer = null;
+
     if (ps.mode === 'active') {
       console.log(`[kiosk-active] ${key} load failed (${errorCode}): ${failedUrl}`);
       view.webContents.loadURL(buildErrorPageUrl("This page couldn't be loaded.", failedUrl)).catch(() => {});
@@ -595,26 +641,41 @@ function setupViewEventHandlers(key, win, view) {
     }
     if (ps.mode !== 'auto') return;
     console.log(`[kiosk-auto] ${key} load failed (${errorCode}): ${failedUrl}`);
-    // Retry the same search after a brief pause.
-    clearTimeout(ps.dwellTimer);
-    ps.dwellTimer = setTimeout(() => {
-      ps.dwellTimer = null;
-      if (ps.mode === 'auto') doSearch(key);
-    }, 5_000);
+    scheduleRetry(key, `error-${errorCode}`);
   });
 
   // Update the handle's Back button after each top-level or in-page navigation.
-  view.webContents.on('did-navigate', (_e, url) => {
+  view.webContents.on('did-navigate', (_e, url, httpResponseCode, _statusText, isMainFrame) => {
     if (!url || url.startsWith('data:') || url === 'about:blank') return;
-    const canGoBack = view.webContents.navigationHistory.canGoBack();
+
+    if (isMainFrame) {
+      const ps = panelStates.get(key);
+      if (ps) {
+        ps.lastNavStatus = httpResponseCode;
+
+        // A non-200 response on a DDG search in auto mode means the request
+        // was throttled or rejected (e.g. HTTP 429).  Stop the load and retry
+        // with backoff rather than showing a partial / error page.
+        if (ps.mode === 'auto' && isDdgSearchUrl(url) && httpResponseCode !== 200) {
+          console.log(`[kiosk-auto] ${key} DDG search returned HTTP ${httpResponseCode} — retrying`);
+          clearTimeout(ps.loadTimer);
+          ps.loadTimer = null;
+          view.webContents.stop();
+          scheduleRetry(key, `http-${httpResponseCode}`);
+          return;
+        }
+      }
+    }
+
+    const backEnabled = canGoBack(view.webContents);
     const w = panelWindows.get(key);
-    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack });
+    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled });
   });
 
   view.webContents.on('did-navigate-in-page', () => {
-    const canGoBack = view.webContents.navigationHistory.canGoBack();
+    const backEnabled = canGoBack(view.webContents);
     const w = panelWindows.get(key);
-    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack });
+    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled });
   });
 
   // Navigation guard -- applies to all page-initiated navigations (meta-refresh,
@@ -831,11 +892,40 @@ function onSearchPageReady(key) {
   }, SEARCH_INTERVAL_MS);
 }
 
+// Schedules the next doSearch call with per-panel exponential backoff
+// (5 s, 10 s, 20 s, … capped at 60 s).  Resets to 0 on a successful load.
+function scheduleRetry(key, reason) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
+  const delay = Math.min(5_000 * Math.pow(2, ps.retryCount), 60_000);
+  ps.retryCount += 1;
+  clearTimeout(ps.dwellTimer);
+  ps.dwellTimer = setTimeout(() => {
+    ps.dwellTimer = null;
+    if (ps.mode === 'auto') doSearch(key);
+  }, delay);
+  console.log(`[kiosk-auto] ${key} retry in ${delay} ms (reason: ${reason}, attempt: ${ps.retryCount})`);
+}
+
 function doSearch(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
 
-  ps.lastSearchTime = Date.now();
+  // Global search gate: space out DDG hits across all panels.
+  const gapRemaining = GLOBAL_SEARCH_GAP_MS - (Date.now() - lastSearchStartedAt);
+  if (gapRemaining > 0) {
+    clearTimeout(ps.dwellTimer);
+    ps.dwellTimer = setTimeout(() => {
+      ps.dwellTimer = null;
+      if (ps.mode === 'auto') doSearch(key);
+    }, gapRemaining);
+    return;
+  }
+
+  const now = Date.now();
+  lastSearchStartedAt    = now;
+  ps.lastSearchTime      = now;
+  ps.searchLoadStartedAt = now;
 
   const term = SEARCH_TERMS[ps.searchIndex % SEARCH_TERMS.length];
   ps.searchIndex += 1;
@@ -846,13 +936,23 @@ function doSearch(key) {
   const view = panelViews[key];
   if (!view || view.webContents.isDestroyed()) return;
 
+  // Arm load watchdog — fires if neither did-finish-load nor did-fail-load
+  // arrives within LOAD_TIMEOUT_MS (e.g. request stalled before a response).
+  clearTimeout(ps.loadTimer);
+  ps.loadTimer = setTimeout(() => {
+    ps.loadTimer = null;
+    if (ps.mode !== 'auto') return;
+    const stuckUrl = view.webContents.isDestroyed() ? url : (view.webContents.getURL() || url);
+    console.log(`[kiosk-auto] ${key} load timed out after ${LOAD_TIMEOUT_MS} ms: ${stuckUrl}`);
+    view.webContents.stop();
+    scheduleRetry(key, 'timeout');
+  }, LOAD_TIMEOUT_MS);
+
   view.webContents.loadURL(url).catch(err => {
-    console.log(`[kiosk-auto] ${key} search load failed: ${err.message}`);
-    clearTimeout(ps.dwellTimer);
-    ps.dwellTimer = setTimeout(() => {
-      ps.dwellTimer = null;
-      if (ps.mode === 'auto') doSearch(key);
-    }, 5_000);
+    clearTimeout(ps.loadTimer);
+    ps.loadTimer = null;
+    console.log(`[kiosk-auto] ${key} search load rejected: ${err.message}`);
+    scheduleRetry(key, 'load-rejected');
   });
 }
 
@@ -871,9 +971,11 @@ function stopBrowsingLoop(key) {
   clearTimeout(ps.dwellTimer);
   clearInterval(ps.scrollTimer);
   clearTimeout(ps.rotationStartTimer);
-  ps.dwellTimer        = null;
-  ps.scrollTimer       = null;
+  clearTimeout(ps.loadTimer);
+  ps.dwellTimer         = null;
+  ps.scrollTimer        = null;
   ps.rotationStartTimer = null;
+  ps.loadTimer          = null;
 }
 
 // ---- Window creation --------------------------------------------------------
@@ -1063,8 +1165,8 @@ function attachActivityHandling() {
     if (!key) return;
     const view = panelViews[key];
     if (!view || view.webContents.isDestroyed()) return;
-    if (view.webContents.navigationHistory.canGoBack()) {
-      view.webContents.navigationHistory.goBack();
+    if (canGoBack(view.webContents)) {
+      goBack(view.webContents);
       notePanelActivity(key, 'click');
     }
   });
@@ -1105,6 +1207,10 @@ function startAllIdleRotation() {
       scrollTimer:        null,  // scroll setInterval
       rotationStartTimer: null,  // startup stagger setTimeout
       lastTrustedInputAt: 0,     // Date.now() of last panel-activity IPC; used to rescue first-click race
+      loadTimer:          null,  // LOAD_TIMEOUT_MS watchdog set in doSearch, cleared on load end
+      retryCount:         0,     // exponential-backoff attempt counter; reset on successful load
+      searchLoadStartedAt: 0,    // Date.now() when doSearch called loadURL; used for timing log
+      lastNavStatus:      0,     // HTTP response code from did-navigate; carried into did-finish-load log
     });
 
     // Stagger first loads by INITIAL_LOAD_STAGGER_MS so all five panels show
