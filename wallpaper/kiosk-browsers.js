@@ -41,10 +41,15 @@ const ALLOWED_DOMAINS = [
 ];
 
 // ---- Tunables ---------------------------------------------------------------
-const SEARCH_INTERVAL_MS    = 90 * 1000; // how long each search result page is shown
-const SCROLL_STEP_PX        = 80;        // px scrolled per tick while on a results page
-const SCROLL_STEP_MS        = 250;       // ms between scroll ticks
-const INACTIVITY_TIMEOUT_MS = 90 * 1000; // idle grace period before auto mode resumes
+// A results page stays visible until the bottom is reached, then BOTTOM_HOLD_MS
+// elapses before the next search.  SEARCH_INTERVAL_MS is a safety-net ceiling
+// in case the bottom is never detected (very long or dynamic page).
+const SEARCH_INTERVAL_MS     = 45 * 1000; // max time on a results page
+const MIN_SEARCH_INTERVAL_MS = 20 * 1000; // min time between searches per panel — guards against DDG rate-limiting when pages are very short
+const BOTTOM_HOLD_MS         = 3_000;     // pause at the page bottom before advancing to the next search
+const SCROLL_STEP_PX         = 80;        // px scrolled per tick
+const SCROLL_STEP_MS         = 250;       // ms between scroll ticks
+const INACTIVITY_TIMEOUT_MS  = 90 * 1000; // idle grace period before auto mode resumes
 
 // ---- Window / layout tunables -----------------------------------------------
 const HANDLE_HEIGHT         = 28;
@@ -78,7 +83,7 @@ const homeBounds      = new Map(); // key -> { x, y, width, height }
 const panelViews      = {};        // key -> BrowserView (visible panel content)
 const gripViews       = {};        // key -> BrowserView (resize grip overlay)
 const panelStates     = new Map(); // key -> { mode, inactivityTimer, searchIndex,
-                                   //          dwellTimer, scrollTimer, rotationStartTimer }
+                                   //          lastSearchTime, dwellTimer, scrollTimer, rotationStartTimer }
 const ignoreNextMoves = new Map(); // key -> timeout-id | null
 const resizeState     = new Map(); // key -> { startBounds, cornerDx, cornerDy } | null
 
@@ -361,22 +366,55 @@ function setupViewEventHandlers(key, win, view) {
 // no preloading.  The flow per panel is:
 //
 //   doSearch → page loads → onSearchPageReady → startScrolling
-//                                              → dwellTimer (SEARCH_INTERVAL_MS)
-//                                                    ↓
-//                                              stopScrolling → doSearch …
+//                                              → max-dwell timer (SEARCH_INTERVAL_MS)
+//                                                    |
+//              scroll tick detects bottom ──────────>|
+//                                              stopScrolling
+//                                              → hold BOTTOM_HOLD_MS (or MIN_SEARCH_INTERVAL_MS remainder)
+//                                              → doSearch …
 
 function startScrolling(key) {
   const ps = panelStates.get(key);
   if (!ps) return;
   stopScrolling(key);
-  ps.scrollTimer = setInterval(() => {
+  ps.scrollTimer = setInterval(async () => {
     if (ps.mode !== 'auto') { stopScrolling(key); return; }
     const view = panelViews[key];
     if (!view || view.webContents.isDestroyed()) return;
-    // window.scrollBy via executeJavaScript does NOT fire wheel events and
-    // therefore cannot trigger the panel-activity detector in kiosk-preload.js.
-    view.webContents.executeJavaScript(`window.scrollBy(0, ${SCROLL_STEP_PX})`, false)
-      .catch(() => {});
+
+    let atBottom = false;
+    try {
+      // Scroll one step and return whether the page bottom has been reached.
+      // executeJavaScript does NOT dispatch wheel events, so it cannot trigger
+      // the isTrusted customer-activity check in kiosk-preload.js.
+      atBottom = await view.webContents.executeJavaScript(`
+        (function () {
+          window.scrollBy(0, ${SCROLL_STEP_PX});
+          return window.scrollY + window.innerHeight >= document.body.scrollHeight - 4;
+        })()
+      `, false);
+    } catch {
+      return; // page is navigating — skip tick
+    }
+
+    // By the time the await resolves the panel may have changed state.
+    // ps.scrollTimer === null means stopBrowsingLoop already fired.
+    if (!atBottom || ps.mode !== 'auto' || ps.scrollTimer === null) return;
+
+    stopScrolling(key);
+    clearTimeout(ps.dwellTimer); // cancel the max-dwell safety net
+    ps.dwellTimer = null;
+
+    // Never search sooner than MIN_SEARCH_INTERVAL_MS since the last search,
+    // even when a page is very short.
+    const sinceLastSearch = Date.now() - ps.lastSearchTime;
+    const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+    console.log(`[kiosk-auto] ${key} bottom reached, next search in ${Math.round(holdMs / 1000)} s`);
+
+    ps.dwellTimer = setTimeout(() => {
+      ps.dwellTimer = null;
+      if (ps.mode === 'auto') doSearch(key);
+    }, holdMs);
   }, SCROLL_STEP_MS);
 }
 
@@ -388,6 +426,8 @@ function stopScrolling(key) {
 }
 
 // Called after the visible view finishes loading a DuckDuckGo results page.
+// Starts the scroll loop and arms a max-dwell safety net in case bottom
+// detection never fires (e.g. very long or dynamically loading pages).
 function onSearchPageReady(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
@@ -409,6 +449,8 @@ function onSearchPageReady(key) {
 function doSearch(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
+
+  ps.lastSearchTime = Date.now();
 
   const term = SEARCH_TERMS[ps.searchIndex % SEARCH_TERMS.length];
   ps.searchIndex += 1;
@@ -630,6 +672,7 @@ function startAllIdleRotation() {
       mode:               'auto',
       inactivityTimer:    null,
       searchIndex:        i,    // stagger topics: each panel starts on a different term
+      lastSearchTime:     0,    // Date.now() of last doSearch call; 0 = never searched
       dwellTimer:         null, // next-search setTimeout
       scrollTimer:        null, // scroll setInterval
       rotationStartTimer: null, // startup stagger setTimeout
