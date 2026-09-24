@@ -16,14 +16,15 @@ parts:
 2. **Live weather overlay** — temperature, condition, location, and clock,
    auto-refreshed every 15 minutes using IP-based geolocation (no
    permission prompt needed, since nobody may be at the keyboard).
-3. **5-panel kiosk browser cluster** — one large center panel plus four
-   smaller panels above/below/left/right, arranged in a cross shape and
-   layered on top of the video. Each panel is a real, usable browser:
-   left alone, it auto-searches a rotating list of topics; the moment a
-   customer clicks or types into it, it becomes theirs to browse normally
-   until they've been idle again for a while.
+3. **5-panel kiosk browser cluster** -- one larger hub panel and four
+   corner panels (topLeft, topRight, bottomLeft, bottomRight), arranged
+   in an overlapping pinwheel and layered on top of the video. Each panel
+   is a real, usable browser: left alone, it auto-searches a rotating list
+   of kid-friendly topics; the moment a customer clicks, types, drags, or
+   resizes a panel, it becomes theirs to browse normally until they've been
+   idle again for a while.
 
-## Architecture: two separate processes
+## Architecture: two processes
 
 This is the one architectural decision worth understanding before
 touching the code. The wallpaper and the kiosk cluster are **two
@@ -47,17 +48,74 @@ unwrapped.
 
 Since they're separate OS processes, two small coordination pieces exist:
 
-- **`process-pair.js`** — each process writes a PID file to a shared temp
+- **`process-pair.js`** -- each process writes a PID file to a shared temp
   directory on startup. The global keyboard shortcut `Ctrl+Alt+Q` (a
   hidden "quit everything" hatch, since the app can end up covering the
   whole screen) is only registerable by whichever process asks the OS
   first, so this lets that one process's handler kill the other one too.
-- **`linux/xwinwrap-launch.sh`** — the main launcher. Starts `xwinwrap`
+- **`linux/xwinwrap-launch.sh`** -- the main launcher. Starts `xwinwrap`
   (wrapping `main.js`) first, waits 15 seconds for it to fully claim its
-  window, *then* starts `kiosk-main.js`. That delay isn't cosmetic —
+  window, *then* starts `kiosk-main.js`. That delay isn't cosmetic --
   starting both windows close together confused `xwinwrap`'s window
   detection and reintroduced the crash even with the process split in
   place.
+
+## How the kiosk panels work
+
+**Five windows in a pinwheel.** `computeClusterLayout()` in
+`kiosk-browsers.js` sizes each panel as a fraction of 88% x 82% of the
+display work area and positions them in an overlapping arrangement around
+the hub. Each panel's starting bounds are saved in the module-level
+`homeBounds` Map on creation; the hub window is brought to the front with
+`moveTop()` after all five are created.
+
+**Three layers per panel.** Each `BrowserWindow` hosts, stacked in order:
+
+- `kiosk-handle.html` + `kiosk-handle-preload.js` -- a 28 px frameless
+  drag strip showing the page title and a Reset button. The strip is
+  draggable via `-webkit-app-region: drag`; the button overrides that to
+  `no-drag`. Clicking Reset calls `sendPanelHome()`, restoring both
+  position and original size.
+- A `BrowserView` loaded with `kiosk-preload.js` -- fills the remaining
+  height below the handle. This is the panel's live web content.
+- A `BrowserView` loaded with `kiosk-resize-grip.html` and
+  `kiosk-resize-preload.js` -- an 18 x 18 px corner resize handle. Uses
+  `setPointerCapture` so drags work even when the cursor leaves the grip;
+  sends `panel-resize-start`, `panel-resize-move`, and `panel-resize-end`
+  IPC to the main process.
+
+**Auto mode vs. active mode.** Each panel's state is tracked with a `mode`
+field:
+
+- `auto` -- the panel cycles through DuckDuckGo search results, scrolling
+  each page to the bottom, jumping back to the top, then loading the next
+  search term. Any page-initiated navigation away from `duckduckgo.com` is
+  blocked by a `will-navigate` guard.
+- `active` -- a customer is using the panel. Triggered by any `isTrusted`
+  input event (mousedown, click, keydown, wheel) forwarded from
+  `kiosk-preload.js`, or by starting a drag or resize. Customers can
+  follow links freely; a `did-navigate` guard redirects back to DuckDuckGo
+  if a navigation lands outside `ALLOWED_DOMAINS`.
+
+After `INACTIVITY_TIMEOUT_MS` (90 s) of no activity, the panel returns to
+its home position and size and switches back to auto mode.
+
+**Guardrails for anyone editing panel code:**
+
+- Every `BrowserWindow` and `BrowserView` must stay referenced in the
+  module-level Maps (`panelWindows`, `panelViews`, `gripViews`). V8
+  silently destroys unreferenced `BrowserWindow` instances with no error
+  -- see Known issue 4.
+- All programmatic window moves must go through `setPanelBoundsIgnored()`
+  to prevent the `move` event handler from treating the call as a customer
+  drag.
+- IPC from panel renderers is routed to the correct panel via
+  `webContentsIdToKey`, a module-level Map from `webContents.id` to panel
+  key, populated in `attachActivityHandling()`.
+
+**Dev helpers:** `Ctrl+Alt+D` prints a paste-ready `defs` block for
+`computeClusterLayout()` reflecting the current live window positions.
+`KIOSK_DISPLAY=N` (0-based) places the cluster on a specific monitor.
 
 ## Repo layout
 
@@ -71,7 +129,11 @@ internet-cafe/
     main.js                        — wallpaper process entry point
     kiosk-main.js                  — kiosk cluster process entry point
     kiosk-browsers.js              — kiosk window + panel logic
-    kiosk-preload.js               — detects clicks/typing inside a panel
+    kiosk-preload.js               — detects trusted input events inside a panel; sends panel-activity IPC
+    kiosk-handle.html              — 28 px drag strip (page title + Reset button) rendered into each panel
+    kiosk-handle-preload.js        — exposes title updates and reset-position IPC to the handle
+    kiosk-resize-grip.html         — 18 x 18 px corner resize handle rendered as a BrowserView overlay
+    kiosk-resize-preload.js        — exposes pointer-drag IPC to the resize grip
     process-pair.js                — cross-process PID coordination
     preload.js                     — shared preload (currently unused, reserved)
     renderer.js                    — clock + weather overlay logic
@@ -129,13 +191,15 @@ first since there's no transfer/round-trip involved.
 3. **Startup timing race** — starting the kiosk process too soon after
    `xwinwrap` confused its window detection even post-split. Fixed with
    the 15-second stagger in `xwinwrap-launch.sh`.
-4. **Kiosk window silently garbage-collected** — `kiosk-main.js` created
+4. **Kiosk window silently garbage-collected** -- `kiosk-main.js` created
    the kiosk window but never kept a reference to it, so V8 destroyed it
    automatically a few seconds after launch with no error. The process
    stayed alive (its `window-all-closed` handler is a deliberate no-op),
    so `ps aux` looked completely normal while nothing was ever on screen.
-   Fixed by keeping a module-level reference to the window in
-   `kiosk-browsers.js`.
+   Fixed by keeping all five windows in module-level Maps in
+   `kiosk-browsers.js` (`panelWindows` and companion maps for their
+   BrowserViews and grip views), with `kiosk-main.js` also holding the
+   returned window array in `kioskWindows` as belt-and-suspenders.
 
 ## Open / in progress
 

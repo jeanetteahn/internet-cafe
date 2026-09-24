@@ -231,8 +231,11 @@ Panels never navigate to individual result links.
 2. Once loaded (`onSearchPageReady`), the panel auto-scrolls the page via
    `window.scrollBy` (no wheel events fired — cannot trigger the customer-
    activity detector).
-3. After `SEARCH_INTERVAL_MS` (90 s), scrolling stops and the next topic
-   in `SEARCH_TERMS` is searched.  Repeat indefinitely.
+3. When scrolling reaches the page bottom, the panel instantly jumps back
+   to the top (`window.scrollTo(0, 0)`) and loads the next topic in
+   `SEARCH_TERMS` after a `BOTTOM_HOLD_MS` pause.  `SEARCH_INTERVAL_MS`
+   (45 s) is a safety-net ceiling for pages that never reach the bottom
+   due to dynamic loading.  Repeat indefinitely.
 
 **Navigation guard in auto mode** (`will-navigate`): any page-initiated
 navigation whose hostname is not `duckduckgo.com` or a subdomain is blocked
@@ -259,9 +262,12 @@ stop the loop instantly.
 
 | Constant | Default | Effect |
 |---|---|---|
-| `SEARCH_INTERVAL_MS` | 90 s | How long each results page is shown before the next search |
-| `SCROLL_STEP_PX` / `SCROLL_STEP_MS` | 80 px / 250 ms | Scroll speed — lower `SCROLL_STEP_PX` or raise `SCROLL_STEP_MS` for slower scroll |
+| `SEARCH_INTERVAL_MS` | 45 s | Safety-net max time per results page; bottom detection usually fires first |
+| `MIN_SEARCH_INTERVAL_MS` | 5 s | Minimum time between consecutive searches on one panel -- prevents hammering DDG when pages are very short |
+| `BOTTOM_HOLD_MS` | 300 ms | Brief pause after jumping back to the page top before loading the next search |
+| `SCROLL_STEP_PX` / `SCROLL_STEP_MS` | 80 px / 250 ms | Scroll speed -- lower `SCROLL_STEP_PX` or raise `SCROLL_STEP_MS` for slower scroll |
 | `INACTIVITY_TIMEOUT_MS` | 90 s | Idle time before auto mode resumes after a customer |
+| `INITIAL_LOAD_STAGGER_MS` | 1500 ms | Delay between each panel's first search at launch, so all five don't hit DDG simultaneously |
 | `ALLOWED_DOMAINS` | (15 sites) | Domains allowed for redirect guard in active mode |
 | `SEARCH_TERMS` | (10 topics) | Kid-friendly topics cycled during auto mode |
 
@@ -357,10 +363,27 @@ Other things worth knowing:
   they're on with no navigation controls of their own; customers browse by
   clicking links within the page. Worth adding if that's a problem in
   practice.
-- **Network load.** Idle panels each run one DuckDuckGo search every
-  `SEARCH_INTERVAL_MS` (90 s default) — about 1 request/90 s × 5 panels
-  = ~3 requests/min continuously while the app is running.  Raise
-  `SEARCH_INTERVAL_MS` to reduce load further.
+- **Guardrail: all windows and views must stay referenced.** Every
+  `BrowserWindow` and `BrowserView` must remain in the module-level Maps
+  (`panelWindows`, `panelViews`, `gripViews`).  V8 silently destroys any
+  `BrowserWindow` with no surviving JS reference -- the process keeps
+  running, nothing renders, no errors.  See the GC bug writeup below.
+- **Guardrail: programmatic moves go through `setPanelBoundsIgnored(key, bounds)`.** 
+  This arms a 400 ms flag checked by the `move` event handler so the
+  programmatic call is not treated as a customer drag.
+- **IPC routing via `webContentsIdToKey`.** All IPC from panel renderers
+  (activity, reset, resize) is dispatched to the correct panel by a
+  module-level `Map<webContents.id, key>` populated in
+  `attachActivityHandling()`.  If views are ever rebuilt, this Map must be
+  updated.
+- **Dev helper: `Ctrl+Alt+D` layout dump.** Prints the current window
+  positions as a paste-ready `defs` block for `computeClusterLayout()`.
+  Useful after manually dragging panels to a preferred arrangement.
+- **Network load.** Idle panels each run one DuckDuckGo search per
+  scroll-through.  At the default scroll speed, a typical results page
+  takes roughly 20-40 seconds to scroll, so expect on the order of 1-3
+  requests per panel per minute while auto mode is running.  To reduce
+  load, raise `SCROLL_STEP_MS` (slower scroll) or lower `SCROLL_STEP_PX`.
 
 ## Recommended workflow
 
@@ -390,13 +413,6 @@ Other things worth knowing:
 5. **Package for real deployment last, not during dev.** `npm run
    build:linux` bundles Electron and the app into a single AppImage —
    worth doing once things are settled, not on every iteration.
-
-One practical note while testing the browser wall specifically: it's
-useful to temporarily drop `SIDE_REFRESH_MS` in `browser-wall.js` to
-something short (a few seconds) so you can see the rotation working
-without waiting minutes — just remember to set it back to a
-multi-minute value before leaving it running for real, since a short
-interval is what risks getting rate-limited.
 
 ## Multi-monitor
 
