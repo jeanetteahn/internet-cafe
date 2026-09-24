@@ -22,10 +22,19 @@ if [ ! -x "$ELECTRON_BIN" ]; then
   exit 1
 fi
 
+# Wallpaper process starts first; the kiosk cluster follows after 15 s.
+# This matches the xwinwrap-launch.sh startup order -- the wallpaper window
+# must be established before the kiosk panels appear on top of it.
+"$ELECTRON_BIN" "$PROJECT_DIR" &
+
+sleep 15
+
 # Set ENABLE_KIOSK=0 to skip the kiosk cluster (e.g. while debugging the
 # wallpaper alone).
 if [ "${ENABLE_KIOSK:-1}" != "0" ]; then
   "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" &
 fi
 
-exec "$ELECTRON_BIN" "$PROJECT_DIR"
+# Keep this script alive so any wrapper or relaunch tooling that targets
+# this process continues to work correctly.
+wait

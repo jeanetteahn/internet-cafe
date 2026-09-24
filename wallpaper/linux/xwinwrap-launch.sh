@@ -63,13 +63,6 @@ GEOMETRY=$(xdotool getdisplaygeometry 2>/dev/null || echo "1920 1080")
 WIDTH=$(echo "$GEOMETRY" | awk '{print $1}')
 HEIGHT=$(echo "$GEOMETRY" | awk '{print $2}')
 
-# Kiosk cluster: separate, unwrapped, ordinary Electron process — see the
-# comment above. Set ENABLE_KIOSK=0 to skip it (handy while debugging
-# wallpaper placement on its own, the way we bisected the xwinwrap crash).
-if [ "${ENABLE_KIOSK:-1}" != "0" ]; then
-  "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" &
-fi
-
 # NOTE: deliberately no `-fs` here. xwinwrap's own usage text says `-ov`
 # (override_redirect, what makes this sit seamlessly in the background) is
 # intended for non-fullscreen mode; combining `-ov` with `-fs` triggers a
@@ -77,5 +70,23 @@ fi
 # combinations (confirmed on Cinnamon/Mutter-family setups). The explicit
 # `-g` geometry below already covers the full display, so dropping `-fs`
 # costs nothing.
-exec xwinwrap -ov -s -st -sp -nf -b -un -g "${WIDTH}x${HEIGHT}+0+0" -- \
-  "$ELECTRON_BIN" "$PROJECT_DIR"
+#
+# xwinwrap must start first and claim its desktop-layer window before the
+# kiosk cluster launches. Starting both simultaneously races with xwinwrap's
+# window-placement handshake and can leave the kiosk invisible or mis-layered
+# on Cinnamon. Sleep 15 s before starting the kiosk process.
+xwinwrap -ov -s -st -sp -nf -b -un -g "${WIDTH}x${HEIGHT}+0+0" -- \
+  "$ELECTRON_BIN" "$PROJECT_DIR" &
+
+sleep 15
+
+# Kiosk cluster: separate, unwrapped, ordinary Electron process -- see the
+# comment at the top of this file. Set ENABLE_KIOSK=0 to skip it (handy
+# while debugging wallpaper placement on its own).
+if [ "${ENABLE_KIOSK:-1}" != "0" ]; then
+  "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" &
+fi
+
+# Keep this script alive so relaunch.sh (which exec's into this script and
+# then kills it to restart) has a stable process to target.
+wait
