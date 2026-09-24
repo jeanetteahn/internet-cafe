@@ -8,9 +8,12 @@ const { ipcRenderer } = require('electron');
 // executeJavaScript from the main process), so those never look like customer
 // activity.  This prevents the auto-scroll and link-prefetch logic from
 // accidentally stopping itself.
+// Send the event type so the main process can distinguish deliberate input
+// (mousedown, click, keydown — triggers panel enlargement) from incidental
+// input (wheel — resets the idle timer but does not enlarge the panel).
 ['mousedown', 'keydown', 'click', 'wheel'].forEach((evt) => {
   window.addEventListener(evt, (event) => {
     if (!event.isTrusted) return;
-    ipcRenderer.send('panel-activity');
+    ipcRenderer.send('panel-activity', event.type);
   }, true);
 });

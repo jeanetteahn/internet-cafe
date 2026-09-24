@@ -9,6 +9,11 @@ contextBridge.exposeInMainWorld('kioskHandle', {
     ipcRenderer.on('panel-title', (_event, title) => fn(title));
   },
 
+  // Call fn('active' | 'auto') whenever the panel's mode changes.
+  onMode: (fn) => {
+    ipcRenderer.on('panel-mode', (_event, mode) => fn(mode));
+  },
+
   // Ask the main process to send this panel back to its home position.
   resetPosition: () => {
     ipcRenderer.send('panel-reset-position');

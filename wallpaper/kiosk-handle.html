@@ -99,6 +99,12 @@
     .reset-btn:active {
       background: #2a2a2a;
     }
+
+    /* Subtle accent shown while a customer is actively using the panel. */
+    .handle.active {
+      background: #1d2535;
+      box-shadow: inset 3px 0 0 #4a90d9;
+    }
   </style>
 </head>
 <body>
@@ -121,6 +127,9 @@
     if (window.kioskHandle) {
       window.kioskHandle.onTitle(function (title) {
         document.getElementById('title').textContent = title || '';
+      });
+      window.kioskHandle.onMode(function (mode) {
+        document.querySelector('.handle').classList.toggle('active', mode === 'active');
       });
       document.getElementById('resetBtn').addEventListener('click', function () {
         window.kioskHandle.resetPosition();

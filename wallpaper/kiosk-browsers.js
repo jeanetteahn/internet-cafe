@@ -62,6 +62,14 @@ const MIN_PANEL_WIDTH       = 320;
 const MIN_PANEL_HEIGHT      = 220;
 const INITIAL_LOAD_STAGGER_MS = 1500;
 
+// ---- Active-panel animation tunables ----------------------------------------
+// When a customer starts using a panel it grows to ACTIVE_SCALE × its home
+// size; when it goes idle it shrinks back.  The tween runs at ~60 fps via
+// setInterval (no platform-native animation API needed — works on Cinnamon).
+const ACTIVE_SCALE      = 1.25; // scale factor applied to home width and height
+const ACTIVE_ANIM_MS    = 220;  // tween duration in ms (both enlarge and shrink)
+const TWEEN_INTERVAL_MS = 16;   // step interval ms (~60 fps)
+
 // "Loading…" placeholder shown immediately so panels are never a dark box.
 const PLACEHOLDER_URL = 'data:text/html,' + encodeURIComponent(
   '<body style="margin:0;background:#1a1a1a;color:#555;' +
@@ -85,13 +93,22 @@ const homeBounds      = new Map(); // key -> { x, y, width, height }
 const panelViews      = {};        // key -> BrowserView (visible panel content)
 const gripViews       = {};        // key -> BrowserView (resize grip overlay)
 const panelStates     = new Map(); // key -> { mode, inactivityTimer, searchIndex,
-                                   //          lastSearchTime, dwellTimer, scrollTimer, rotationStartTimer }
+                                   //          lastSearchTime, manualLayout,
+                                   //          dwellTimer, scrollTimer, rotationStartTimer }
 const ignoreNextMoves = new Map(); // key -> timeout-id | null
 const resizeState     = new Map(); // key -> { startBounds, cornerDx, cornerDy } | null
 
 // webContentsIdToKey is module-level (not scoped to attachActivityHandling)
 // so it is available to any future code that needs to route IPC by view id.
 const webContentsIdToKey = new Map();
+
+// ---- Active-panel tween state -----------------------------------------------
+// tweenTimers holds the setInterval id for any in-flight size animation so it
+// can be cancelled cleanly.  enlargedKey is the one panel currently at active
+// size (at most one at a time); null means no panel is enlarged.
+// Both must be module-level so V8 cannot GC the interval references.
+const tweenTimers = new Map(); // key -> interval-id | null
+let   enlargedKey = null;      // panel key currently enlarged, or null
 
 // ---- Layout -----------------------------------------------------------------
 
@@ -224,7 +241,7 @@ function startResize(key, offset) {
     cornerDx: GRIP_SIZE - ox,
     cornerDy: GRIP_SIZE - oy,
   });
-  notePanelActivity(key);
+  notePanelActivity(key, 'resize');
 }
 
 function updateResize(key) {
@@ -255,26 +272,171 @@ function updateResize(key) {
 function endResize(key) {
   updateResize(key);
   resizeState.set(key, null);
-  notePanelActivity(key);
+  // Customer has manually resized while active — disable auto-size animations
+  // for the rest of this active session.
+  const ps = panelStates.get(key);
+  if (ps && ps.mode === 'active' && !ps.manualLayout) {
+    ps.manualLayout = true;
+    cancelTween(key);
+  }
+  notePanelActivity(key, 'resize');
+}
+
+// ---- Panel size animation ---------------------------------------------------
+//
+// Panels grow to ACTIVE_SCALE × home size when a customer starts using them,
+// and shrink back on idle.  The tween calls setPanelBoundsIgnored every
+// TWEEN_INTERVAL_MS so the move handler never mistakes programmatic motion for
+// a customer drag.  BrowserView setAutoResize and the 'resize' → positionGrip
+// chain handle the grip and content view automatically during the tween.
+
+function cancelTween(key) {
+  const id = tweenTimers.get(key);
+  if (id != null) {
+    clearInterval(id);
+    tweenTimers.set(key, null);
+  }
+}
+
+function tweenBounds(key, from, to, durationMs) {
+  cancelTween(key);
+  const steps = Math.max(1, Math.round(durationMs / TWEEN_INTERVAL_MS));
+  let   step  = 0;
+  const id = setInterval(() => {
+    step += 1;
+    const t    = Math.min(1, step / steps);
+    const ease = 1 - Math.pow(1 - t, 2); // quadratic ease-out
+    setPanelBoundsIgnored(key, {
+      x:      Math.round(from.x      + (to.x      - from.x)      * ease),
+      y:      Math.round(from.y      + (to.y      - from.y)      * ease),
+      width:  Math.round(from.width  + (to.width  - from.width)  * ease),
+      height: Math.round(from.height + (to.height - from.height) * ease),
+    });
+    if (t >= 1) {
+      clearInterval(id);
+      tweenTimers.set(key, null);
+    }
+  }, TWEEN_INTERVAL_MS);
+  tweenTimers.set(key, id);
+}
+
+// Returns enlarged bounds centred on the panel's current position, scaled
+// from home size, clamped so the whole window stays inside the work area.
+function computeActiveBounds(key) {
+  const home = homeBounds.get(key);
+  if (!home) return null;
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return null;
+
+  const cur        = win.getBounds();
+  const { workArea } = screen.getDisplayMatching(cur);
+
+  const newW = Math.round(home.width  * ACTIVE_SCALE);
+  const newH = Math.round(home.height * ACTIVE_SCALE);
+  const cx   = cur.x + cur.width  / 2;
+  const cy   = cur.y + cur.height / 2;
+
+  let nx = Math.round(cx - newW / 2);
+  let ny = Math.round(cy - newH / 2);
+  nx = Math.max(workArea.x, Math.min(nx, workArea.x + workArea.width  - newW));
+  ny = Math.max(workArea.y, Math.min(ny, workArea.y + workArea.height - newH));
+
+  return { x: nx, y: ny, width: newW, height: newH };
+}
+
+function enlargePanel(key) {
+  const activeBounds = computeActiveBounds(key);
+  if (!activeBounds) return;
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return;
+  tweenBounds(key, win.getBounds(), activeBounds, ACTIVE_ANIM_MS);
+  win.moveTop();
+}
+
+// Animate the panel back to its home bounds.  Skips animation if the panel is
+// already at home (e.g. was never enlarged or was snapped by sendPanelHome).
+function shrinkPanelToHome(key) {
+  const home = homeBounds.get(key);
+  if (!home) return;
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return;
+  const cur = win.getBounds();
+  if (cur.x === home.x && cur.y === home.y &&
+      cur.width === home.width && cur.height === home.height) {
+    cancelTween(key);
+    return;
+  }
+  tweenBounds(key, cur, home, ACTIVE_ANIM_MS);
+}
+
+// Send panel mode to the handle strip so it can show a visual accent.
+function sendModeToHandle(key, mode) {
+  const win = panelWindows.get(key);
+  if (win && !win.isDestroyed()) win.webContents.send('panel-mode', mode);
+}
+
+// Called by the Reset button IPC handler.  Cancels any in-flight tween,
+// clears the manual-layout flag, and snaps the panel back to home bounds.
+function resetPanelLayout(key) {
+  cancelTween(key);
+  if (enlargedKey === key) enlargedKey = null;
+  const ps = panelStates.get(key);
+  if (ps) ps.manualLayout = false;
+  sendPanelHome(key);
 }
 
 // ---- Activity ---------------------------------------------------------------
 
-function notePanelActivity(key) {
+// eventType is the DOM event type from kiosk-preload.js ('mousedown', 'click',
+// 'keydown', 'wheel') or a synthetic label from main-process callers ('move',
+// 'resize').  Only mousedown, click, and keydown trigger panel enlargement;
+// wheel still counts as activity (idle timer resets) but does not enlarge.
+function notePanelActivity(key, eventType) {
   const ps = panelStates.get(key);
   if (!ps) return;
 
   if (ps.mode === 'auto') {
     stopBrowsingLoop(key);
     ps.mode = 'active';
+    sendModeToHandle(key, 'active');
   }
 
   clearTimeout(ps.inactivityTimer);
   ps.inactivityTimer = setTimeout(() => {
-    if (RETURN_HOME_WHEN_IDLE) sendPanelHome(key);
-    ps.mode = 'auto';
+    // Return the panel to home bounds.  If the customer never dragged or
+    // resized during this active session, animate the shrink.  If they did
+    // (manualLayout), use an instant snap so we don't override their layout
+    // choice mid-animation, or skip entirely if RETURN_HOME_WHEN_IDLE is off.
+    if (!ps.manualLayout) {
+      shrinkPanelToHome(key);
+    } else if (RETURN_HOME_WHEN_IDLE) {
+      sendPanelHome(key);
+    }
+    if (enlargedKey === key) enlargedKey = null;
+    ps.mode        = 'auto';
+    ps.manualLayout = false;
+    sendModeToHandle(key, 'auto');
     startBrowsingLoop(key);
   }, INACTIVITY_TIMEOUT_MS);
+
+  // Only deliberate events enlarge the panel.
+  const isDeliberate = (eventType === 'mousedown' ||
+                        eventType === 'click'     ||
+                        eventType === 'keydown');
+  if (isDeliberate && !ps.manualLayout) {
+    // If a different panel is currently enlarged, shrink it (leave its mode
+    // and idle timer alone — it is still active until its own timeout fires).
+    if (enlargedKey !== null && enlargedKey !== key) {
+      const prevPs = panelStates.get(enlargedKey);
+      if (prevPs && !prevPs.manualLayout) shrinkPanelToHome(enlargedKey);
+      enlargedKey = null;
+    }
+    // Enlarge this panel if it isn't already.
+    if (enlargedKey !== key) {
+      enlargedKey = key;
+      enlargePanel(key);
+    }
+  }
 }
 
 // ---- View event handler setup -----------------------------------------------
@@ -589,17 +751,27 @@ function createKioskWindow() {
       if (ignoreNextMoves.get(key)) return;
       clearTimeout(moveDebounce);
       moveDebounce = setTimeout(() => {
-        notePanelActivity(key);
+        // Customer dragged the handle while already active — disable auto-size
+        // animations for the rest of this active session.
+        const ps = panelStates.get(key);
+        if (ps && ps.mode === 'active' && !ps.manualLayout) {
+          ps.manualLayout = true;
+          cancelTween(key);
+        }
+        notePanelActivity(key, 'move');
         clampToDisplay(key);
       }, 250);
     });
 
     win.on('closed', () => {
+      cancelTween(key);
+      if (enlargedKey === key) enlargedKey = null;
       panelWindows.delete(key);
       homeBounds.delete(key);
       delete panelViews[key];
       delete gripViews[key];
       resizeState.delete(key);
+      tweenTimers.delete(key);
     });
   }
 
@@ -650,14 +822,14 @@ function attachActivityHandling() {
     webContentsIdToKey.set(grip.webContents.id, key);
   }
 
-  ipcMain.on('panel-activity', (event) => {
+  ipcMain.on('panel-activity', (event, eventType) => {
     const key = webContentsIdToKey.get(event.sender.id);
-    if (key) notePanelActivity(key);
+    if (key) notePanelActivity(key, eventType || 'unknown');
   });
 
   ipcMain.on('panel-reset-position', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
-    if (key) sendPanelHome(key);
+    if (key) resetPanelLayout(key);
   });
 
   ipcMain.on('panel-resize-start', (event, offset) => {
@@ -684,11 +856,12 @@ function startAllIdleRotation() {
     panelStates.set(key, {
       mode:               'auto',
       inactivityTimer:    null,
-      searchIndex:        i,    // stagger topics: each panel starts on a different term
-      lastSearchTime:     0,    // Date.now() of last doSearch call; 0 = never searched
-      dwellTimer:         null, // next-search setTimeout
-      scrollTimer:        null, // scroll setInterval
-      rotationStartTimer: null, // startup stagger setTimeout
+      searchIndex:        i,     // stagger topics: each panel starts on a different term
+      lastSearchTime:     0,     // Date.now() of last doSearch call; 0 = never searched
+      manualLayout:       false, // true once customer drags/resizes while active; suppresses auto-size animations
+      dwellTimer:         null,  // next-search setTimeout
+      scrollTimer:        null,  // scroll setInterval
+      rotationStartTimer: null,  // startup stagger setTimeout
     });
 
     // Stagger first loads by INITIAL_LOAD_STAGGER_MS so all five panels show
