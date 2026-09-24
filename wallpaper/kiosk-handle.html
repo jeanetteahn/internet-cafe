@@ -100,6 +100,12 @@
       background: #2a2a2a;
     }
 
+    .reset-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+      pointer-events: none;
+    }
+
     /* Subtle accent shown while a customer is actively using the panel. */
     .handle.active {
       background: #1d2535;
@@ -118,6 +124,9 @@
       <div class="grip-dot"></div>
     </div>
     <span class="title" id="title">Loading…</span>
+    <button class="reset-btn" id="backBtn" disabled title="Go back to the previous page">
+      Back
+    </button>
     <button class="reset-btn" id="resetBtn" title="Restore panel to its default position and size">
       Reset
     </button>
@@ -130,6 +139,12 @@
       });
       window.kioskHandle.onMode(function (mode) {
         document.querySelector('.handle').classList.toggle('active', mode === 'active');
+      });
+      window.kioskHandle.onNavState(function (state) {
+        document.getElementById('backBtn').disabled = !state.canGoBack;
+      });
+      document.getElementById('backBtn').addEventListener('click', function () {
+        window.kioskHandle.goBack();
       });
       document.getElementById('resetBtn').addEventListener('click', function () {
         window.kioskHandle.resetPosition();

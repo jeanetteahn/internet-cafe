@@ -14,8 +14,19 @@ contextBridge.exposeInMainWorld('kioskHandle', {
     ipcRenderer.on('panel-mode', (_event, mode) => fn(mode));
   },
 
+  // Call fn({ canGoBack }) after each navigation so the Back button can
+  // enable or disable itself.
+  onNavState: (fn) => {
+    ipcRenderer.on('panel-nav-state', (_event, state) => fn(state));
+  },
+
   // Ask the main process to send this panel back to its home position.
   resetPosition: () => {
     ipcRenderer.send('panel-reset-position');
+  },
+
+  // Ask the main process to navigate the panel back one step in history.
+  goBack: () => {
+    ipcRenderer.send('panel-back');
   },
 });

@@ -18,10 +18,27 @@ const SEARCH_TERMS = [
 ];
 
 // ---- Content-safety lists ---------------------------------------------------
-// ALLOWED_DOMAINS is checked in did-navigate while a panel is in active
-// (customer) mode — if a redirect lands somewhere off this list the panel
-// returns to a DuckDuckGo search.  Auto mode never leaves DuckDuckGo at all
-// (the will-navigate guard below blocks it), so the list has no effect there.
+// BROWSING_POLICY controls what customers can navigate to while a panel is in
+// active mode.
+//   'open'      -- any http/https URL is allowed EXCEPT hosts in BLOCKED_DOMAINS.
+//   'allowlist' -- only ALLOWED_DOMAINS (strict curated list).
+// Non-http(s) schemes (file:, javascript:, chrome:, etc.) are always blocked.
+const BROWSING_POLICY = 'open';
+
+// BLOCKED_DOMAINS: hosts whose navigations are cancelled in active 'open' mode.
+// Matching is exact hostname or any subdomain.
+const BLOCKED_DOMAINS = [
+  'reddit.com',
+  'tumblr.com',
+  'twitter.com',
+  'x.com',
+  'tiktok.com',
+  '4chan.org',
+  'instagram.com',
+  'onlyfans.com',
+];
+
+// ALLOWED_DOMAINS is used when BROWSING_POLICY is 'allowlist'.
 const ALLOWED_DOMAINS = [
   'nasa.gov',
   'noaa.gov',
@@ -66,9 +83,10 @@ const INITIAL_LOAD_STAGGER_MS = 1500;
 // When a customer starts using a panel it grows to ACTIVE_SCALE × its home
 // size; when it goes idle it shrinks back.  The tween runs at ~60 fps via
 // setInterval (no platform-native animation API needed — works on Cinnamon).
-const ACTIVE_SCALE      = 1.25; // scale factor applied to home width and height
-const ACTIVE_ANIM_MS    = 220;  // tween duration in ms (both enlarge and shrink)
-const TWEEN_INTERVAL_MS = 16;   // step interval ms (~60 fps)
+const ACTIVE_SCALE        = 1.25; // scale factor applied to home width and height
+const ACTIVE_ANIM_MS      = 220;  // tween duration in ms (both enlarge and shrink)
+const TWEEN_INTERVAL_MS   = 16;   // step interval ms (~60 fps)
+const FIRST_CLICK_GRACE_MS = 1500; // grace window for first-click IPC race (see will-navigate comment)
 
 // "Loading…" placeholder shown immediately so panels are never a dark box.
 const PLACEHOLDER_URL = 'data:text/html,' + encodeURIComponent(
@@ -176,6 +194,38 @@ function isDomainAllowed(url) {
   } catch {
     return false;
   }
+}
+
+function isDdgHost(url) {
+  try {
+    const { hostname } = new URL(url);
+    return hostname === 'duckduckgo.com' || hostname.endsWith('.duckduckgo.com');
+  } catch { return false; }
+}
+
+function isDdgSearchUrl(url) {
+  // Matches DDG search URLs that carry a query term (q=...) so SafeSearch can
+  // be enforced.  Covers both https://duckduckgo.com/?q=... and the HTML
+  // endpoint https://html.duckduckgo.com/html/?q=...
+  try {
+    const parsed = new URL(url);
+    return isDdgHost(url) &&
+           (parsed.pathname === '/' || parsed.pathname === '/html/') &&
+           parsed.searchParams.has('q');
+  } catch { return false; }
+}
+
+function isPassesPolicy(url) {
+  // Returns true if the URL is allowed under the active BROWSING_POLICY.
+  // Non-http(s) schemes are always denied regardless of policy.
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (BROWSING_POLICY === 'allowlist') return isDomainAllowed(url);
+    // 'open': block only BLOCKED_DOMAINS.
+    const { hostname } = parsed;
+    return !BLOCKED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d));
+  } catch { return false; }
 }
 
 // ---- Programmatic move/resize helpers ---------------------------------------
@@ -475,51 +525,103 @@ function setupViewEventHandlers(key, win, view) {
     }, 5_000);
   });
 
-  // Active-mode guard: if a customer-driven navigation lands somewhere off the
-  // allowlist (e.g. a redirect chain from an approved site), send the panel
-  // back to a DuckDuckGo search rather than leaving it there.
+  // Update the handle's Back button after each top-level or in-page navigation.
   view.webContents.on('did-navigate', (_e, url) => {
     if (!url || url.startsWith('data:') || url === 'about:blank') return;
-    const ps = panelStates.get(key);
-    if (!ps || ps.mode !== 'active') return; // only relevant while a customer is browsing
-
-    try {
-      const { hostname } = new URL(url);
-      if (hostname === 'duckduckgo.com' || hostname.endsWith('.duckduckgo.com')) return;
-    } catch { return; }
-
-    if (isDomainAllowed(url)) return;
-
-    console.log(`[kiosk-auto] ${key} active-mode redirect off-allowlist: ${url}`);
-    const term = SEARCH_TERMS[ps.searchIndex % SEARCH_TERMS.length];
-    view.webContents.loadURL(buildSearchUrl(term)).catch(() => {});
+    const canGoBack = view.webContents.navigationHistory.canGoBack();
+    const w = panelWindows.get(key);
+    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack });
   });
 
-  // Auto-mode navigation guard: block any page-initiated navigation whose
-  // host is not duckduckgo.com while the panel is in auto mode.  This covers
-  // meta-refresh, JavaScript redirects, and anything else a results page
-  // might trigger.  webContents.loadURL() (used by doSearch) is exempt —
-  // will-navigate does not fire for programmatic main-process loads.
+  view.webContents.on('did-navigate-in-page', () => {
+    const canGoBack = view.webContents.navigationHistory.canGoBack();
+    const w = panelWindows.get(key);
+    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack });
+  });
+
+  // Navigation guard -- applies to all page-initiated navigations (meta-refresh,
+  // JS redirects, link clicks).  webContents.loadURL() from the main process is
+  // exempt: will-navigate does not fire for programmatic loads.
   view.webContents.on('will-navigate', (event, url) => {
     const ps = panelStates.get(key);
-    if (!ps || ps.mode !== 'auto') return;
+    if (!ps) return;
 
-    let allowed = false;
-    try {
-      const { hostname } = new URL(url);
-      allowed = hostname === 'duckduckgo.com' || hostname.endsWith('.duckduckgo.com');
-    } catch {}
-
-    if (!allowed) {
+    // Always block non-http(s) schemes regardless of mode.
+    let proto = '';
+    try { proto = new URL(url).protocol; } catch {}
+    if (proto !== 'http:' && proto !== 'https:') {
       event.preventDefault();
-      console.log(`[kiosk-auto] ${key} blocked auto-mode navigation: ${url}`);
+      console.log(`[kiosk-auto] ${key} blocked non-http navigation: ${url}`);
+      return;
+    }
+
+    // SafeSearch enforcement: any DDG search URL must carry kp=1.  If it
+    // doesn't (e.g. customer typed a raw search), cancel and reload with it.
+    if (isDdgSearchUrl(url)) {
+      const parsed = new URL(url);
+      if (parsed.searchParams.get('kp') !== '1') {
+        parsed.searchParams.set('kp', '1');
+        const safe = parsed.toString();
+        event.preventDefault();
+        console.log(`[kiosk-auto] ${key} SafeSearch rewrite: ${safe}`);
+        view.webContents.loadURL(safe).catch(() => {});
+        return;
+      }
+    }
+
+    if (ps.mode === 'auto') {
+      // First-click race: the renderer's panel-activity IPC (sent from
+      // kiosk-preload.js on mousedown/click) travels over an async IPC
+      // channel, while will-navigate is dispatched synchronously in the main
+      // process as soon as the renderer begins a navigation.  On some loads the
+      // will-navigate fires before the panel-activity IPC is processed, leaving
+      // ps.mode still 'auto' for what is actually a customer-initiated click.
+      // Fix: if trusted input was recorded within FIRST_CLICK_GRACE_MS, treat
+      // the panel as active and let the navigation through under active policy.
+      const sinceInput = Date.now() - (ps.lastTrustedInputAt || 0);
+      if (sinceInput <= FIRST_CLICK_GRACE_MS) {
+        console.log(`[kiosk-auto] ${key} first-click race rescued (${sinceInput} ms), activating panel`);
+        notePanelActivity(key, 'click'); // transitions ps.mode to 'active'
+        // Fall through to active-mode policy below.
+      } else {
+        // Auto mode with no recent trusted input: only DDG is permitted.
+        // This blocks meta-refresh, JS redirects, and link-prefetch navs.
+        if (!isDdgHost(url)) {
+          event.preventDefault();
+          console.log(`[kiosk-auto] ${key} blocked auto-mode navigation: ${url}`);
+        } else {
+          console.log(`[kiosk-auto] ${key} allowed DDG navigation in auto mode: ${url}`);
+        }
+        return;
+      }
+    }
+
+    // Active mode: apply BROWSING_POLICY.
+    if (!isPassesPolicy(url)) {
+      event.preventDefault();
+      try {
+        const { hostname } = new URL(url);
+        const onBlocklist = BLOCKED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d));
+        console.log(`[kiosk-auto] ${key} blocked active-mode navigation (${onBlocklist ? 'blocklist' : 'non-http scheme'}): ${url}`);
+      } catch {
+        console.log(`[kiosk-auto] ${key} blocked active-mode navigation (invalid URL): ${url}`);
+      }
+    } else {
+      console.log(`[kiosk-auto] ${key} allowed navigation: ${url}`);
     }
   });
 
-  // Block window.open() / target="_blank" in all modes — new windows have no
-  // place in a kiosk panel with no address bar or browser chrome.
+  // Block new windows (target=_blank, window.open).  In active mode, redirect
+  // the URL into the same panel view if it passes the browsing policy; in auto
+  // mode ignore it entirely.
   view.webContents.setWindowOpenHandler(({ url }) => {
-    console.log(`[kiosk-auto] ${key} blocked window.open: ${url}`);
+    const ps = panelStates.get(key);
+    if (ps && ps.mode === 'active' && isPassesPolicy(url)) {
+      console.log(`[kiosk-auto] ${key} new-tab link redirected to same panel: ${url}`);
+      setImmediate(() => view.webContents.loadURL(url).catch(() => {}));
+    } else {
+      console.log(`[kiosk-auto] ${key} blocked window.open: ${url}`);
+    }
     return { action: 'deny' };
   });
 }
@@ -824,7 +926,21 @@ function attachActivityHandling() {
 
   ipcMain.on('panel-activity', (event, eventType) => {
     const key = webContentsIdToKey.get(event.sender.id);
-    if (key) notePanelActivity(key, eventType || 'unknown');
+    if (!key) return;
+    const ps = panelStates.get(key);
+    if (ps) ps.lastTrustedInputAt = Date.now();
+    notePanelActivity(key, eventType || 'unknown');
+  });
+
+  ipcMain.on('panel-back', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (!key) return;
+    const view = panelViews[key];
+    if (!view || view.webContents.isDestroyed()) return;
+    if (view.webContents.navigationHistory.canGoBack()) {
+      view.webContents.navigationHistory.goBack();
+      notePanelActivity(key, 'click');
+    }
   });
 
   ipcMain.on('panel-reset-position', (event) => {
@@ -862,6 +978,7 @@ function startAllIdleRotation() {
       dwellTimer:         null,  // next-search setTimeout
       scrollTimer:        null,  // scroll setInterval
       rotationStartTimer: null,  // startup stagger setTimeout
+      lastTrustedInputAt: 0,     // Date.now() of last panel-activity IPC; used to rescue first-click race
     });
 
     // Stagger first loads by INITIAL_LOAD_STAGGER_MS so all five panels show

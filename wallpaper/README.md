@@ -242,16 +242,38 @@ navigation whose hostname is not `duckduckgo.com` or a subdomain is blocked
 before it happens.  This covers meta-refresh, JavaScript `window.location`
 assignments, and any other script the results page might trigger.
 `webContents.loadURL()` calls from the main process (used by `doSearch`) are
-exempt — `will-navigate` does not fire for programmatic main-process loads.
+exempt -- `will-navigate` does not fire for programmatic main-process loads.
 
-`window.open()` and `target="_blank"` links are denied in all modes via
-`setWindowOpenHandler`.
+A first-click race exists where `will-navigate` fires in the main process
+before the renderer's `panel-activity` IPC arrives (async channel vs.
+synchronous navigation dispatch).  The guard rescues this: if a trusted input
+was recorded within `FIRST_CLICK_GRACE_MS` (1500 ms), the panel is treated as
+already active.  This only affects genuine user clicks -- page-initiated
+navigations with no recent input are still blocked.
 
-**Customer (active) mode** is unrestricted: the customer can click any
-result and browse freely.  One guard remains: if a redirect lands the panel
-on a hostname outside `ALLOWED_DOMAINS` while in active mode, `did-navigate`
-returns the panel to a DuckDuckGo search.  Manual browsing within the
-allowlist is otherwise unfiltered.
+**Customer (active) mode** -- `BROWSING_POLICY` controls what customers can
+reach:
+
+- `'open'` (default): any `http`/`https` URL is allowed **except** hosts in
+  `BLOCKED_DOMAINS`.  Customers can click search results and browse freely.
+- `'allowlist'`: only hostnames in `ALLOWED_DOMAINS` are permitted.
+
+Non-`http(s)` schemes (`file:`, `javascript:`, `chrome:`, etc.) are always
+blocked regardless of policy.
+
+**SafeSearch enforcement**: any navigation to a DuckDuckGo search URL (whether
+triggered by auto mode or a customer typing a query) must carry `kp=1`.  If
+`kp=1` is absent or different, the navigation is cancelled and reloaded with
+`kp=1` added.
+
+**New-tab links** (`window.open`, `target="_blank"`): new windows are never
+opened.  In active mode the requested URL is loaded in the same panel if it
+passes the browsing policy; in auto mode the link is silently ignored.
+
+**Back button**: the handle strip shows a Back button (left of Reset) that is
+enabled whenever the panel's navigation history has an entry to go back to.
+Clicking Back counts as customer activity (resets the idle timer) and uses
+`webContents.navigationHistory.goBack()` (Electron 31 API).
 
 **Activity detection:** `kiosk-preload.js` checks `event.isTrusted` before
 sending `panel-activity` IPC, so programmatic scroll via `executeJavaScript`
@@ -268,7 +290,12 @@ stop the loop instantly.
 | `SCROLL_STEP_PX` / `SCROLL_STEP_MS` | 80 px / 250 ms | Scroll speed -- lower `SCROLL_STEP_PX` or raise `SCROLL_STEP_MS` for slower scroll |
 | `INACTIVITY_TIMEOUT_MS` | 90 s | Idle time before auto mode resumes after a customer |
 | `INITIAL_LOAD_STAGGER_MS` | 1500 ms | Delay between each panel's first search at launch, so all five don't hit DDG simultaneously |
-| `ALLOWED_DOMAINS` | (15 sites) | Domains allowed for redirect guard in active mode |
+| `ACTIVE_SCALE` | 1.25 | How much larger an active panel grows (fraction of its home size) |
+| `ACTIVE_ANIM_MS` | 220 ms | Duration of the enlarge/shrink tween |
+| `BROWSING_POLICY` | `'open'` | `'open'` allows all http/https except `BLOCKED_DOMAINS`; `'allowlist'` restricts to `ALLOWED_DOMAINS` |
+| `BLOCKED_DOMAINS` | (8 sites) | Hosts blocked in active `'open'` mode |
+| `ALLOWED_DOMAINS` | (15 sites) | Hosts allowed in active `'allowlist'` mode |
+| `FIRST_CLICK_GRACE_MS` | 1500 ms | Grace window for rescuing first-click IPC race in auto mode |
 | `SEARCH_TERMS` | (10 topics) | Kid-friendly topics cycled during auto mode |
 
 **Removed constants** (were present when auto mode did link-following; no
