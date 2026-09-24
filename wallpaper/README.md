@@ -215,82 +215,61 @@ coordinated between them via small PID files (`process-pair.js`) so it
 still quits both together.
 
 **All 5 panels behave identically, and the behavior is idle vs. active,
-not decorative vs. interactive.** Left alone, each panel runs a continuous
-browsing loop that keeps a new page visible roughly every 10 seconds. The
-moment a customer clicks, types, drags, or resizes a panel, it stops and
-becomes their browser until they've been idle for `INACTIVITY_TIMEOUT_MS`
-(90 seconds by default), at which point auto-browsing resumes.
+not decorative vs. interactive.** Left alone, each panel cycles through
+kid-friendly DuckDuckGo search results pages.  The moment a customer
+clicks, types, drags, or resizes a panel, it stops and becomes their
+browser until they've been idle for `INACTIVITY_TIMEOUT_MS` (90 s by
+default), at which point auto mode resumes.
 
-**Idle browsing loop** (`kiosk-browsers.js` — `startBrowsingLoop`):
+**Auto mode — search-only loop** (`kiosk-browsers.js` — `startBrowsingLoop`):
 
-1. **Search.** The panel runs a DuckDuckGo HTML search (`&kp=1` strict
-   SafeSearch) for the next term in `SEARCH_TERMS` (kid-friendly topics
-   only; 'local news' and 'world news' removed).
-2. **Collect links.** After the results page loads, all `<a href>` links
-   are extracted via `executeJavaScript` (never via `.click()`, so it can't
-   trigger the customer-activity detector) and filtered through three content-
-   safety layers (see below).  Passing links are shuffled into the panel's
-   **link pool** (capped at `POOL_MAX = 30`).
-3. **Dwell + scroll.** The panel auto-scrolls the page via
-   `window.scrollBy` (no wheel events fired), then waits a random
-   `PAGE_DWELL_MIN_MS`–`PAGE_DWELL_MAX_MS` (8–12 s).
-4. **Hop.** When dwell ends, the panel navigates to the next link from the
-   pool.  Each page it visits also contributes more links to the pool, so
-   browsing continues at speed without triggering a new search every hop.
-   After `MAX_LINK_HOPS` (5) hops, or when the pool empties, the panel
-   runs a new search — but never sooner than `SEARCH_INTERVAL_MS` (90 s)
-   after the previous one.  If the interval hasn't passed yet, the panel
-   keeps scrolling the current page and retries once it has.
-5. **Preloading.** When `PRELOAD_NEXT_PAGE` is true (default), the next
-   page begins loading in a hidden second `BrowserView` during the current
-   dwell.  When dwell ends the two views are swapped (old visible →
-   offscreen, preloaded → visible), so load time is invisible.  If the
-   preload hasn't finished within `PRELOAD_TIMEOUT_MS` (10 s) of the dwell
-   ending, the panel falls back to loading directly.  The hidden view is
-   held in the module-level `preloadViews` object for GC protection.
+Auto mode shows DuckDuckGo HTML search result pages and **nothing else**.
+Panels never navigate to individual result links.
 
-**Three content-safety layers** (idle auto-browsing only; manual customer
-browsing is not filtered):
+1. `doSearch` navigates the panel to `buildSearchUrl(term)` — DuckDuckGo's
+   plain HTML endpoint with `&kp=1` (strict SafeSearch).
+2. Once loaded (`onSearchPageReady`), the panel auto-scrolls the page via
+   `window.scrollBy` (no wheel events fired — cannot trigger the customer-
+   activity detector).
+3. After `SEARCH_INTERVAL_MS` (90 s), scrolling stops and the next topic
+   in `SEARCH_TERMS` is searched.  Repeat indefinitely.
 
-- **Layer 1 — DuckDuckGo strict SafeSearch** (`&kp=1` query parameter on
-  every search URL).
-- **Layer 2 — Domain allowlist** (`ALLOWED_DOMAINS` in `kiosk-browsers.js`).
-  Only hostnames that exactly match or are a subdomain of an entry are
-  navigated to.  Starts with: nasa.gov, noaa.gov, weather.gov,
-  nationalgeographic.com, smithsonianmag.com, si.edu, pbs.org, npr.org,
-  bbc.com, bbc.co.uk, britannica.com, kids.nationalgeographic.com,
-  sciencenewsexplores.org, space.com, earthobservatory.nasa.gov.
-- **Layer 3 — Keyword blocklist** (`BLOCKED_KEYWORDS`).  Links whose title
-  or URL contains any blocked term (violence, crime, adult/explicit, drugs,
-  gambling, login/account pages, etc.) are skipped.  Every skip is logged
-  as `[kiosk-auto] blocked: …` in the terminal.
+**Navigation guard in auto mode** (`will-navigate`): any page-initiated
+navigation whose hostname is not `duckduckgo.com` or a subdomain is blocked
+before it happens.  This covers meta-refresh, JavaScript `window.location`
+assignments, and any other script the results page might trigger.
+`webContents.loadURL()` calls from the main process (used by `doSearch`) are
+exempt — `will-navigate` does not fire for programmatic main-process loads.
 
-**Redirect guard:** after each auto-navigation, the `did-navigate` event
-checks the final URL (after any server-side redirects).  If it has left the
-allowlist, the panel immediately advances to the next pool link or triggers
-a new search.  This applies to both the visible and preload views.
+`window.open()` and `target="_blank"` links are denied in all modes via
+`setWindowOpenHandler`.
 
-**Activity detection safety:** `kiosk-preload.js` now checks
-`event.isTrusted` before sending `panel-activity` IPC, so programmatically
-dispatched events (scroll, link-harvest via `executeJavaScript`) never look
-like customer activity.  Real customer clicks/typing still stop the loop
-instantly, exactly as before.
+**Customer (active) mode** is unrestricted: the customer can click any
+result and browse freely.  One guard remains: if a redirect lands the panel
+on a hostname outside `ALLOWED_DOMAINS` while in active mode, `did-navigate`
+returns the panel to a DuckDuckGo search.  Manual browsing within the
+allowlist is otherwise unfiltered.
 
-**Tunables to adjust** (`kiosk-browsers.js` top section):
+**Activity detection:** `kiosk-preload.js` checks `event.isTrusted` before
+sending `panel-activity` IPC, so programmatic scroll via `executeJavaScript`
+can never look like customer activity.  Real customer clicks/typing still
+stop the loop instantly.
+
+**Tunables** (`kiosk-browsers.js` top section):
 
 | Constant | Default | Effect |
 |---|---|---|
-| `SEARCH_INTERVAL_MS` | 90 s | Min gap between DuckDuckGo searches per panel — lower to search more often, raise to reduce external load |
-| `PAGE_DWELL_MIN_MS` / `PAGE_DWELL_MAX_MS` | 8–12 s | How long each page stays visible — raise both to slow things down |
+| `SEARCH_INTERVAL_MS` | 90 s | How long each results page is shown before the next search |
 | `SCROLL_STEP_PX` / `SCROLL_STEP_MS` | 80 px / 250 ms | Scroll speed — lower `SCROLL_STEP_PX` or raise `SCROLL_STEP_MS` for slower scroll |
-| `MAX_LINK_HOPS` | 5 | Hops before a new search is forced — raise to reduce search frequency |
-| `POOL_MAX` | 30 | Max links buffered per panel |
-| `PRELOAD_NEXT_PAGE` | true | Set false to disable the background preload (saves one renderer process per panel at the cost of visible load time) |
-| `PRELOAD_TIMEOUT_MS` | 10 s | How long to wait for a preload before loading directly |
-| `INACTIVITY_TIMEOUT_MS` | 90 s | Idle time before auto-browsing resumes after a customer |
-| `ALLOWED_DOMAINS` | (list above) | Add or remove domains to widen or tighten the allowlist |
-| `BLOCKED_KEYWORDS` | (list above) | Add terms to strengthen keyword filtering |
-| `SEARCH_TERMS` | (10 topics) | Kid-friendly topics for idle searches |
+| `INACTIVITY_TIMEOUT_MS` | 90 s | Idle time before auto mode resumes after a customer |
+| `ALLOWED_DOMAINS` | (15 sites) | Domains allowed for redirect guard in active mode |
+| `SEARCH_TERMS` | (10 topics) | Kid-friendly topics cycled during auto mode |
+
+**Removed constants** (were present when auto mode did link-following; no
+longer applicable):
+`PAGE_DWELL_MIN_MS`, `PAGE_DWELL_MAX_MS`, `MAX_LINK_HOPS`, `POOL_MAX`,
+`RECENT_URL_MAX`, `PRELOAD_NEXT_PAGE`, `PRELOAD_TIMEOUT_MS`,
+`BLOCKED_KEYWORDS`.
 
 **Known bug (fixed): kiosk windows silently garbage-collected — process
 alive, nothing on screen.** After the process split above, `kiosk-main.js`
@@ -378,12 +357,10 @@ Other things worth knowing:
   they're on with no navigation controls of their own; customers browse by
   clicking links within the page. Worth adding if that's a problem in
   practice.
-- **Network load.** Idle panels each load a new page roughly every 10
-  seconds and run a DuckDuckGo search at most once every 90 seconds.
-  That is roughly 6 page loads/min × 5 panels = ~30 HTTP requests/min
-  continuously while the app is running — worth keeping in mind on a
-  metered or slow connection.  Raise `PAGE_DWELL_MIN/MAX_MS` or
-  `SEARCH_INTERVAL_MS` to reduce load.
+- **Network load.** Idle panels each run one DuckDuckGo search every
+  `SEARCH_INTERVAL_MS` (90 s default) — about 1 request/90 s × 5 panels
+  = ~3 requests/min continuously while the app is running.  Raise
+  `SEARCH_INTERVAL_MS` to reduce load further.
 
 ## Recommended workflow
 
