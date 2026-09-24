@@ -1,5 +1,24 @@
 const { BrowserWindow, BrowserView, screen, ipcMain, globalShortcut, session } = require('electron');
 const path = require('path');
+const fs   = require('fs');
+
+// ---- Spoon cursor -----------------------------------------------------------
+// Pre-computed once at module init so every renderer can get the same rule.
+const _spoonSvg = fs.readFileSync(path.join(__dirname, 'assets/utensils/spoon-cursor.svg'), 'utf8')
+  .replace(/<\?xml[^?]*\?>\n?/, '')
+  .replace(/<defs>[\s\S]*?<\/defs>\n?/, '')
+  .replace(/\s+id="[^"]+"/g, '')
+  .replace(/\s+data-name="[^"]+"/g, '')
+  .replace(/class="cls-1"/g, 'fill="#ea4b00"')
+  .replace(/<svg /, '<svg width="32" height="32" ')
+  .replace(/\n\s*\n/g, '\n')
+  .trim();
+const SPOON_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSvg).toString('base64');
+// hotspot pixel (3,0): spoon bowl tip at (3.47,0) in viewBox 37.78×37.77, rendered at 32×32
+const _spoonRule     = `*{cursor:url('${SPOON_CURSOR_URI}') 3 0,auto!important}input,textarea{cursor:text!important}`;
+const PANEL_CURSOR_CSS  = _spoonRule;
+const HANDLE_CURSOR_CSS = _spoonRule + '#strip{cursor:grab!important}';
+const GRIP_CURSOR_CSS   = _spoonRule + '.grip{cursor:nwse-resize!important}';
 
 // ---- Search topics ----------------------------------------------------------
 // Kid-friendly only.  Panels cycle through the list in order, staggered so
@@ -216,6 +235,16 @@ function canGoBack(wc) {
 function goBack(wc) {
   const nh = wc.navigationHistory;
   if (nh && typeof nh.goBack === 'function') { nh.goBack(); } else { wc.goBack(); }
+}
+
+function canGoForward(wc) {
+  const nh = wc.navigationHistory;
+  return (nh && typeof nh.canGoForward === 'function') ? nh.canGoForward() : wc.canGoForward();
+}
+
+function goForward(wc) {
+  const nh = wc.navigationHistory;
+  if (nh && typeof nh.goForward === 'function') { nh.goForward(); } else { wc.goForward(); }
 }
 
 // ---- Content safety ---------------------------------------------------------
@@ -668,14 +697,16 @@ function setupViewEventHandlers(key, win, view) {
     }
 
     const backEnabled = canGoBack(view.webContents);
+    const fwdEnabled  = canGoForward(view.webContents);
     const w = panelWindows.get(key);
-    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled });
+    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled, canGoForward: fwdEnabled });
   });
 
   view.webContents.on('did-navigate-in-page', () => {
     const backEnabled = canGoBack(view.webContents);
+    const fwdEnabled  = canGoForward(view.webContents);
     const w = panelWindows.get(key);
-    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled });
+    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled, canGoForward: fwdEnabled });
   });
 
   // Navigation guard -- applies to all page-initiated navigations (meta-refresh,
@@ -778,6 +809,10 @@ function setupViewEventHandlers(key, win, view) {
       console.log(`[kiosk-auto] ${key} blocked window.open: ${url}`);
     }
     return { action: 'deny' };
+  });
+
+  view.webContents.on('dom-ready', () => {
+    view.webContents.insertCSS(PANEL_CURSOR_CSS).catch(() => {});
   });
 
   view.webContents.on('render-process-gone', (_e, details) => {
@@ -1044,6 +1079,9 @@ function createKioskWindow() {
     const minSize = minSizeFor(key);
     win.setMinimumSize(minSize.width, minSize.height);
     win.loadFile(path.join(__dirname, 'kiosk-handle.html'));
+    win.webContents.on('dom-ready', () => {
+      win.webContents.insertCSS(HANDLE_CURSOR_CSS).catch(() => {});
+    });
     win.webContents.once('did-finish-load', () => {
       win.webContents.send('panel-hardware', { key, margin: M });
       updateWindowShape(key);
@@ -1064,6 +1102,9 @@ function createKioskWindow() {
     const grip = makeGripView();
     win.addBrowserView(grip);
     grip.webContents.loadFile(path.join(__dirname, 'kiosk-resize-grip.html'));
+    grip.webContents.on('dom-ready', () => {
+      grip.webContents.insertCSS(GRIP_CURSOR_CSS).catch(() => {});
+    });
     gripViews[key] = grip;
     positionGrip(key);
 
@@ -1167,6 +1208,17 @@ function attachActivityHandling() {
     if (!view || view.webContents.isDestroyed()) return;
     if (canGoBack(view.webContents)) {
       goBack(view.webContents);
+      notePanelActivity(key, 'click');
+    }
+  });
+
+  ipcMain.on('panel-forward', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (!key) return;
+    const view = panelViews[key];
+    if (!view || view.webContents.isDestroyed()) return;
+    if (canGoForward(view.webContents)) {
+      goForward(view.webContents);
       notePanelActivity(key, 'click');
     }
   });

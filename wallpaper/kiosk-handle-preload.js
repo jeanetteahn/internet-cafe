@@ -30,6 +30,11 @@ contextBridge.exposeInMainWorld('kioskHandle', {
     ipcRenderer.send('panel-back');
   },
 
+  // Ask the main process to navigate the panel forward one step in history.
+  goForward: () => {
+    ipcRenderer.send('panel-forward');
+  },
+
   // Call fn({ key, margin }) once after the handle loads and again after
   // each window resize.  Use this to position the border and hinges.
   onHardware: (fn) => {
