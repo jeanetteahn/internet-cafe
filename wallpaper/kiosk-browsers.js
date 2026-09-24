@@ -159,7 +159,7 @@ function computeClusterLayout(screenW, screenH) {
 }
 
 function makePanelView() {
-  return new BrowserView({
+  const view = new BrowserView({
     webPreferences: {
       preload: path.join(__dirname, 'kiosk-preload.js'),
       contextIsolation: true,
@@ -167,6 +167,11 @@ function makePanelView() {
       sandbox: true,
     },
   });
+  // Electron 30+ BrowserView defaults to transparent; without this, pages
+  // that don't paint their own background (including DDG's /l/ redirect)
+  // show the panel window's dark #1a1a1a backdrop instead of white.
+  view.setBackgroundColor('#ffffff');
+  return view;
 }
 
 function makeGripView() {
@@ -226,6 +231,41 @@ function isPassesPolicy(url) {
     const { hostname } = parsed;
     return !BLOCKED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d));
   } catch { return false; }
+}
+
+function unwrapDdgRedirect(url) {
+  // DuckDuckGo routes every result click through https://duckduckgo.com/l/?uddg=<encoded>
+  // for click-tracking.  That page renders nothing itself, causing a black
+  // panel until the redirect resolves.  Pull the real destination out of the
+  // 'uddg' param and return it so the panel can load the target directly.
+  // Returns null if the URL is not a DDG /l/ redirect or the target is not http/https.
+  try {
+    if (!isDdgHost(url)) return null;
+    const parsed = new URL(url);
+    if (parsed.pathname !== '/l/') return null;
+    const raw = parsed.searchParams.get('uddg');
+    if (!raw) return null;
+    const target = decodeURIComponent(raw);
+    const { protocol } = new URL(target);
+    return (protocol === 'http:' || protocol === 'https:') ? target : null;
+  } catch { return null; }
+}
+
+function buildErrorPageUrl(message, failedUrl) {
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const html =
+    '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+    '<style>body{margin:0;background:#fff;display:flex;flex-direction:column;' +
+    'align-items:center;justify-content:center;height:100vh;' +
+    'font-family:sans-serif;color:#333;}' +
+    'p{margin:8px 0;}' +
+    'small{color:#999;font-size:12px;word-break:break-all;max-width:80%;text-align:center;}' +
+    '</style></head><body>' +
+    `<p>${esc(message)}</p>` +
+    (failedUrl ? `<small>${esc(failedUrl)}</small>` : '') +
+    '<p>Use the Back button above to go back.</p>' +
+    '</body></html>';
+  return 'data:text/html,' + encodeURIComponent(html);
 }
 
 // ---- Programmatic move/resize helpers ---------------------------------------
@@ -511,11 +551,18 @@ function setupViewEventHandlers(key, win, view) {
     }
   });
 
-  view.webContents.on('did-fail-load', (_e, errorCode, _desc, failedUrl) => {
+  view.webContents.on('did-fail-load', (_e, errorCode, _desc, failedUrl, isMainFrame) => {
+    if (!isMainFrame) return; // subframe failures (ads, iframes) are not our problem
     if (errorCode === -3) return; // ERR_ABORTED — cancelled navigation, not a real error
     const ps = panelStates.get(key);
-    if (!ps || ps.mode !== 'auto') return;
+    if (!ps) return;
     if (!failedUrl || failedUrl.startsWith('data:')) return;
+    if (ps.mode === 'active') {
+      console.log(`[kiosk-active] ${key} load failed (${errorCode}): ${failedUrl}`);
+      view.webContents.loadURL(buildErrorPageUrl("This page couldn't be loaded.", failedUrl)).catch(() => {});
+      return;
+    }
+    if (ps.mode !== 'auto') return;
     console.log(`[kiosk-auto] ${key} load failed (${errorCode}): ${failedUrl}`);
     // Retry the same search after a brief pause.
     clearTimeout(ps.dwellTimer);
@@ -597,6 +644,22 @@ function setupViewEventHandlers(key, win, view) {
     }
 
     // Active mode: apply BROWSING_POLICY.
+    // DDG wraps every result link through /l/?uddg=<encoded-url> for
+    // click-tracking; unwrap to the real target before the policy check so
+    // the panel loads the destination directly instead of waiting for the
+    // DDG redirect page (which renders nothing and causes a black panel).
+    const unwrapped = unwrapDdgRedirect(url);
+    if (unwrapped !== null) {
+      event.preventDefault();
+      if (isPassesPolicy(unwrapped)) {
+        console.log(`[kiosk-auto] ${key} DDG redirect unwrapped: ${unwrapped}`);
+        view.webContents.loadURL(unwrapped).catch(() => {});
+      } else {
+        console.log(`[kiosk-auto] ${key} blocked active-mode navigation (blocklist): ${unwrapped}`);
+      }
+      return;
+    }
+
     if (!isPassesPolicy(url)) {
       event.preventDefault();
       try {
@@ -623,6 +686,20 @@ function setupViewEventHandlers(key, win, view) {
       console.log(`[kiosk-auto] ${key} blocked window.open: ${url}`);
     }
     return { action: 'deny' };
+  });
+
+  view.webContents.on('render-process-gone', (_e, details) => {
+    console.log(`[kiosk] ${key} render process gone (reason: ${details.reason}, exitCode: ${details.exitCode})`);
+    setTimeout(() => {
+      if (view.webContents.isDestroyed()) return;
+      const ps = panelStates.get(key);
+      if (!ps) return;
+      if (ps.mode === 'auto') {
+        doSearch(key);
+      } else {
+        view.webContents.loadURL(buildErrorPageUrl('This page stopped working.', '')).catch(() => {});
+      }
+    }, 500);
   });
 }
 
