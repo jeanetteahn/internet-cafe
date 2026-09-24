@@ -79,6 +79,17 @@ const MIN_PANEL_WIDTH       = 320;
 const MIN_PANEL_HEIGHT      = 220;
 const INITIAL_LOAD_STAGGER_MS = 1500;
 
+// ---- Hardware-overlay tunables ----------------------------------------------
+// HARDWARE_MARGIN: transparent padding (px) on every side of each panel window.
+// The frame page (kiosk-handle.html) draws the orange border and hinge SVGs
+// inside this margin so they appear to float around the browser content.
+const HARDWARE_MARGIN  = 18;
+// USE_WINDOW_SHAPE: on Linux, call win.setShape() to cut out the four opaque
+// corner squares (HARDWARE_MARGIN × HARDWARE_MARGIN each) so clicks in those
+// areas fall through to the wallpaper rather than landing on the transparent
+// window surface.  Set to false if setShape() causes compositor artefacts.
+const USE_WINDOW_SHAPE = true;
+
 // ---- Active-panel animation tunables ----------------------------------------
 // When a customer starts using a panel it grows to ACTIVE_SCALE × its home
 // size; when it goes idle it shrinks back.  The tween runs at ~60 fps via
@@ -307,9 +318,12 @@ function clampToDisplay(key) {
 
 function minSizeFor(key) {
   const home = homeBounds.get(key);
+  const M    = HARDWARE_MARGIN;
+  const minW = MIN_PANEL_WIDTH  + 2 * M;
+  const minH = MIN_PANEL_HEIGHT + HANDLE_HEIGHT + 2 * M;
   return {
-    width:  home ? Math.min(MIN_PANEL_WIDTH,  home.width)  : MIN_PANEL_WIDTH,
-    height: home ? Math.min(MIN_PANEL_HEIGHT, home.height) : MIN_PANEL_HEIGHT,
+    width:  home ? Math.min(minW, home.width)  : minW,
+    height: home ? Math.min(minH, home.height) : minH,
   };
 }
 
@@ -318,7 +332,24 @@ function positionGrip(key) {
   const grip = gripViews[key];
   if (!win || win.isDestroyed() || !grip) return;
   const [w, h] = win.getContentSize();
-  grip.setBounds({ x: w - GRIP_SIZE, y: h - GRIP_SIZE, width: GRIP_SIZE, height: GRIP_SIZE });
+  const M = HARDWARE_MARGIN;
+  grip.setBounds({ x: w - GRIP_SIZE - M, y: h - GRIP_SIZE - M, width: GRIP_SIZE, height: GRIP_SIZE });
+}
+
+function updateWindowShape(key) {
+  if (!USE_WINDOW_SHAPE || process.platform !== 'linux') return;
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return;
+  const [w, h] = win.getContentSize();
+  const M = HARDWARE_MARGIN;
+  // Exclude the four transparent corner squares (M×M each) so clicks there
+  // fall through to the wallpaper.  Three overlapping rects form a cross that
+  // covers everything else including all hinge positions on the edge strips.
+  win.setShape([
+    { x: M,     y: 0, width: w - 2 * M, height: h         },
+    { x: 0,     y: M, width: M,         height: h - 2 * M },
+    { x: w - M, y: M, width: M,         height: h - 2 * M },
+  ]);
 }
 
 function startResize(key, offset) {
@@ -850,9 +881,11 @@ function stopBrowsingLoop(key) {
 /**
  * Creates five independent, movable, resizable panel windows — one per kiosk
  * panel (hub, topLeft, topRight, bottomLeft, bottomRight).  Each window has:
- *   - a 28 px drag strip (kiosk-handle.html) at the top
- *   - a BrowserView for panel content
- *   - an 18 × 18 px resize grip (kiosk-resize-grip.html) on the bottom-right
+ *   - a transparent HARDWARE_MARGIN-px border on all sides (for the hinge
+ *     overlay rendered by kiosk-handle.html)
+ *   - a 28 px drag strip at the top of the browser area
+ *   - a BrowserView inset by HARDWARE_MARGIN on every side
+ *   - an 18 × 18 px resize grip inset from the window's bottom-right corner
  *
  * Returns an array of the five BrowserWindow instances.  Callers should store
  * this array — belt-and-suspenders GC protection alongside panelWindows.
@@ -877,10 +910,13 @@ function createKioskWindow() {
 
   for (const key of order) {
     const pLayout = layout[key];
-    const winW    = pLayout.width;
-    const winH    = pLayout.height + HANDLE_HEIGHT;
-    const homeX   = originX + pLayout.x;
-    const homeY   = originY + pLayout.y;
+    const M      = HARDWARE_MARGIN;
+    const panelW = pLayout.width;
+    const panelH = pLayout.height;
+    const winW   = panelW + 2 * M;
+    const winH   = panelH + HANDLE_HEIGHT + 2 * M;
+    const homeX  = originX + pLayout.x - M;
+    const homeY  = originY + pLayout.y - M;
 
     homeBounds.set(key, { x: homeX, y: homeY, width: winW, height: winH });
 
@@ -891,7 +927,7 @@ function createKioskWindow() {
       movable:     true,
       skipTaskbar: true,
       alwaysOnTop: true,
-      backgroundColor: '#1a1a1a',
+      transparent: true,
       webPreferences: {
         preload: path.join(__dirname, 'kiosk-handle-preload.js'),
         contextIsolation: true,
@@ -906,11 +942,17 @@ function createKioskWindow() {
     const minSize = minSizeFor(key);
     win.setMinimumSize(minSize.width, minSize.height);
     win.loadFile(path.join(__dirname, 'kiosk-handle.html'));
+    win.webContents.once('did-finish-load', () => {
+      win.webContents.send('panel-hardware', { key, margin: M });
+      updateWindowShape(key);
+    });
 
-    // Panel content view.
+    // Panel content view — inset by HARDWARE_MARGIN on all sides so the
+    // transparent border is visible.  setAutoResize keeps the right and
+    // bottom edges tracking the window edges (distance M preserved).
     const view = makePanelView();
     win.addBrowserView(view);
-    view.setBounds({ x: 0, y: HANDLE_HEIGHT, width: winW, height: winH - HANDLE_HEIGHT });
+    view.setBounds({ x: M, y: HANDLE_HEIGHT + M, width: panelW, height: panelH });
     view.setAutoResize({ width: true, height: true });
     view.webContents.loadURL(PLACEHOLDER_URL);
     panelViews[key] = view;
@@ -923,7 +965,11 @@ function createKioskWindow() {
     gripViews[key] = grip;
     positionGrip(key);
 
-    win.on('resize', () => positionGrip(key));
+    win.on('resize', () => {
+      positionGrip(key);
+      updateWindowShape(key);
+      if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
+    });
 
     let moveDebounce = null;
     win.on('move', () => {
@@ -968,10 +1014,13 @@ function createKioskWindow() {
       const win = panelWindows.get(key);
       if (!win || win.isDestroyed()) return `    ${key}: (window gone)`;
       const { x, y, width, height } = win.getBounds();
-      const rx = ((x - originX) / layout.totalWidth ).toFixed(3);
-      const ry = ((y - originY) / layout.totalHeight).toFixed(3);
-      const rw = (width              / layout.totalWidth ).toFixed(3);
-      const rh = ((height - HANDLE_HEIGHT) / layout.totalHeight).toFixed(3);
+      const M  = HARDWARE_MARGIN;
+      // Report browser-area fractions (margin stripped) so values paste
+      // directly into computeClusterLayout's defs without adjustment.
+      const rx = ((x + M - originX) / layout.totalWidth ).toFixed(3);
+      const ry = ((y + M - originY) / layout.totalHeight).toFixed(3);
+      const rw = ((width  - 2 * M)  / layout.totalWidth ).toFixed(3);
+      const rh = ((height - 2 * M - HANDLE_HEIGHT) / layout.totalHeight).toFixed(3);
       const pad = ' '.repeat(12 - key.length);
       return `    ${key}:${pad}{ rx: ${rx}, ry: ${ry}, rw: ${rw}, rh: ${rh} },`;
     });

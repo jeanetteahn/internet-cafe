@@ -20,9 +20,9 @@
 
     html, body {
       width: 100%;
-      height: 28px;
+      height: 100%;
       overflow: hidden;
-      background: #1a1a1a;
+      background: transparent;
       color: #c0c0c0;
       font-family: 'Apercu', ui-sans-serif, system-ui, -apple-system, sans-serif;
       font-size: 12px;
@@ -30,18 +30,22 @@
       -webkit-user-select: none;
     }
 
-    /* The full strip is draggable; the button overrides that below. */
-    .handle {
+    /* Drag strip — positioned absolutely inside the top margin */
+    #strip {
+      position: absolute;
       display: flex;
       align-items: center;
-      height: 28px;
       padding: 0 8px 0 6px;
       gap: 6px;
       -webkit-app-region: drag;
       cursor: grab;
     }
 
-    /* 2 × 3 grid of dotted dots — purely visual grip indicator */
+    #strip.active {
+      background: #1d2535;
+      box-shadow: inset 3px 0 0 #4a90d9;
+    }
+
     .grip {
       flex-shrink: 0;
       display: grid;
@@ -70,7 +74,7 @@
       -webkit-app-region: drag;
     }
 
-    .reset-btn {
+    .btn {
       flex-shrink: 0;
       padding: 2px 8px;
       background: transparent;
@@ -81,40 +85,44 @@
       font-size: 11px;
       line-height: 1.4;
       cursor: pointer;
-      /* must not inherit the drag region from .handle */
       -webkit-app-region: no-drag;
       transition: border-color 0.12s, color 0.12s;
     }
 
-    .reset-btn:hover {
-      border-color: #777;
-      color: #ccc;
-    }
+    .btn:hover { border-color: #777; color: #ccc; }
 
-    .reset-btn:focus-visible {
+    .btn:focus-visible {
       outline: 2px solid #5a8fd8;
       outline-offset: 2px;
     }
 
-    .reset-btn:active {
-      background: #2a2a2a;
-    }
+    .btn:active { background: #2a2a2a; }
 
-    .reset-btn:disabled {
+    .btn:disabled {
       opacity: 0.35;
       cursor: default;
       pointer-events: none;
     }
 
-    /* Subtle accent shown while a customer is actively using the panel. */
-    .handle.active {
-      background: #1d2535;
-      box-shadow: inset 3px 0 0 #4a90d9;
+    /* Orange 1 px border around the browser area */
+    #border {
+      position: absolute;
+      border: 1px solid #e74e25;
+      pointer-events: none;
+      box-sizing: border-box;
+    }
+
+    /* Hinge overlay — fills the window, hinges positioned inside */
+    #hinges {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: visible;
     }
   </style>
 </head>
 <body>
-  <div class="handle">
+  <div id="strip">
     <div class="grip" aria-hidden="true">
       <div class="grip-dot"></div>
       <div class="grip-dot"></div>
@@ -123,25 +131,205 @@
       <div class="grip-dot"></div>
       <div class="grip-dot"></div>
     </div>
-    <span class="title" id="title">Loading…</span>
-    <button class="reset-btn" id="backBtn" disabled title="Go back to the previous page">
-      Back
-    </button>
-    <button class="reset-btn" id="resetBtn" title="Restore panel to its default position and size">
-      Reset
-    </button>
+    <span class="title" id="title">Loading...</span>
+    <button class="btn" id="backBtn" disabled title="Go back to the previous page">Back</button>
+    <button class="btn" id="resetBtn" title="Restore panel to its default position and size">Reset</button>
   </div>
+  <div id="border"></div>
+  <div id="hinges"></div>
 
   <script>
+    // Inline SVG definitions.  White fill polygons are replaced with
+    // transparent so the hinge interiors don't block the wallpaper in the
+    // transparent margin areas.
+    var SVGS = {
+      'corner-hinge': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34.35 34.35">' +
+        '<polygon fill="transparent" points="10.79 11.16 31.12 11.16 31.12 3.25 3.42 3.25 3.42 3.42 2.88 3.42 2.88 31.12 10.79 31.12 10.79 11.16"/>' +
+        '<path fill="#e74e25" d="M28.41,1.16V0s-14.21,0-14.21,0H0s0,14.21,0,14.21v14.21s1.16,0,1.16,0c0,3.28,2.66,5.94,5.94,5.94,3.28,0,5.94-2.66,5.94-5.94h1.16s14.21-14.21,14.21-14.21v-1.16c3.28,0,5.94-2.66,5.94-5.94s-2.66-5.94-5.94-5.94ZM7.1,30.39c-1.09,0-1.98-.89-1.98-1.98s.89-1.98,1.98-1.98,1.98.89,1.98,1.98-.89,1.98-1.98,1.98ZM28.41,9.08c-1.09,0-1.98-.89-1.98-1.98s.89-1.98,1.98-1.98,1.98.89,1.98,1.98-.89,1.98-1.98,1.98Z"/>' +
+        '</svg>',
+      'strap-hinge': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 89.98 13.94">' +
+        '<path fill="#e74e25" d="M84.1.94v-.94H5.88v1.14C2.63,1.14,0,3.73,0,6.91s2.63,5.77,5.88,5.77v1.25h78.22v-1.46c3.25,0,5.88-2.58,5.88-5.77s-2.63-5.77-5.88-5.77ZM5.88,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM21.53,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM37.17,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM52.81,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM68.46,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM84.1,8.71c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94Z"/>' +
+        '</svg>',
+      'edge-hinge': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34.35 54.5">' +
+        '<polygon fill="transparent" points="22.96 31.28 22.96 51.61 30.86 51.61 30.86 23.91 30.69 23.91 30.69 23.37 2.99 23.37 2.99 31.28 22.96 31.28"/>' +
+        '<path fill="#e74e25" d="M21.31,5.94h-1.16v14.21H5.94v1.16c-3.28,0-5.94,2.66-5.94,5.94s2.66,5.94,5.94,5.94v1.16h14.21v14.21h1.16c0,3.28,2.66,5.94,5.94,5.94s5.94-2.66,5.94-5.94h1.16v-14.21h0V5.94h-1.16c0-3.28-2.66-5.94-5.94-5.94s-5.94,2.66-5.94,5.94ZM29.23,48.56c0,1.09-.89,1.98-1.98,1.98s-1.98-.89-1.98-1.98.89-1.98,1.98-1.98,1.98.89,1.98,1.98ZM7.92,27.25c0,1.09-.89,1.98-1.98,1.98s-1.98-.89-1.98-1.98.89-1.98,1.98-1.98,1.98.89,1.98,1.98ZM29.23,5.94c0,1.09-.89,1.98-1.98,1.98s-1.98-.89-1.98-1.98.89-1.98,1.98-1.98,1.98.89,1.98,1.98Z"/>' +
+        '</svg>',
+    };
+
+    // Natural pixel dimensions for each piece
+    var DIMS = {
+      'corner-hinge': { w: 34, h: 34 },
+      'strap-hinge':  { w: 90, h: 14 },
+      'edge-hinge':   { w: 34, h: 55 },
+    };
+
+    // Per-panel hinge layout.
+    // edge: 'corner-tl' | 'corner-tr' | 'corner-bl' | 'corner-br'
+    //       | 'top' | 'bottom' | 'left' | 'right'
+    // pct:  0–1 position along the edge (ignored for corner edges)
+    var PANEL_HINGES = {
+      hub: [
+        { piece: 'corner-hinge', edge: 'corner-tl' },
+        { piece: 'corner-hinge', edge: 'corner-bl' },
+        { piece: 'strap-hinge',  edge: 'top',  pct: 0.45 },
+        { piece: 'edge-hinge',   edge: 'left', pct: 0.25 },
+        { piece: 'edge-hinge',   edge: 'left', pct: 0.52 },
+        { piece: 'edge-hinge',   edge: 'left', pct: 0.78 },
+      ],
+      topLeft: [
+        { piece: 'corner-hinge', edge: 'corner-tl' },
+        { piece: 'corner-hinge', edge: 'corner-bl' },
+        { piece: 'strap-hinge',  edge: 'top', pct: 0.5 },
+      ],
+      topRight: [
+        { piece: 'corner-hinge', edge: 'corner-tr' },
+        { piece: 'corner-hinge', edge: 'corner-br' },
+        { piece: 'strap-hinge',  edge: 'top',   pct: 0.6 },
+        { piece: 'strap-hinge',  edge: 'right', pct: 0.5 },
+      ],
+      bottomLeft: [
+        { piece: 'corner-hinge', edge: 'corner-bl' },
+        { piece: 'corner-hinge', edge: 'corner-tl' },
+        { piece: 'strap-hinge',  edge: 'bottom', pct: 0.45 },
+        { piece: 'edge-hinge',   edge: 'right',  pct: 0.8 },
+      ],
+      bottomRight: [
+        { piece: 'corner-hinge', edge: 'corner-br' },
+        { piece: 'corner-hinge', edge: 'corner-bl' },
+        { piece: 'strap-hinge',  edge: 'right',  pct: 0.5 },
+        { piece: 'strap-hinge',  edge: 'bottom', pct: 0.45 },
+      ],
+    };
+
+    var HANDLE_H      = 28;
+    var currentMargin = 18;
+    var currentKey    = null;
+
+    // Sets position, size, and optional CSS transform on an element
+    function place(el, dims, left, top, transform) {
+      el.style.position  = 'absolute';
+      el.style.width     = dims.w + 'px';
+      el.style.height    = dims.h + 'px';
+      el.style.left      = left + 'px';
+      el.style.top       = top + 'px';
+      if (transform) el.style.transform = transform;
+    }
+
+    function renderHinges(M, H, W, Wh, panelW, panelH) {
+      var container = document.getElementById('hinges');
+      container.innerHTML = '';
+      var hinges = PANEL_HINGES[currentKey];
+      if (!hinges) return;
+
+      hinges.forEach(function (h) {
+        var dims = DIMS[h.piece];
+        var el   = document.createElement('div');
+        el.innerHTML = SVGS[h.piece];
+        var pct = (h.pct !== undefined) ? h.pct : 0.5;
+
+        switch (h.edge) {
+          case 'corner-tl':
+            // L inner corner at window top-left; arms go right and down
+            place(el, dims, 0, 0);
+            break;
+
+          case 'corner-tr':
+            // Mirror horizontally: inner corner at top-right, arms go left and down
+            place(el, dims, W - dims.w, 0, 'scaleX(-1)');
+            break;
+
+          case 'corner-bl':
+            // Mirror vertically: inner corner at bottom-left, arms go right and up
+            place(el, dims, 0, Wh - dims.h, 'scaleY(-1)');
+            break;
+
+          case 'corner-br':
+            // Mirror both axes: inner corner at bottom-right, arms go left and up
+            place(el, dims, W - dims.w, Wh - dims.h, 'scale(-1,-1)');
+            break;
+
+          case 'top': {
+            // Strap centered horizontally at pct, vertically centered in top margin
+            var cx = M + pct * panelW;
+            place(el, dims, cx - dims.w / 2, M / 2 - dims.h / 2);
+            break;
+          }
+
+          case 'bottom': {
+            // Strap centered horizontally at pct, vertically centered in bottom margin
+            var cx2 = M + pct * panelW;
+            place(el, dims, cx2 - dims.w / 2, Wh - M / 2 - dims.h / 2);
+            break;
+          }
+
+          case 'left': {
+            var cy = M + H + pct * panelH;
+            if (h.piece === 'strap-hinge') {
+              // Rotate 90 deg; center the visual bar in the left margin strip
+              place(el, dims, M / 2 - dims.w / 2, cy - dims.h / 2, 'rotate(90deg)');
+            } else {
+              // edge-hinge: center at border, scaleX(-1) so arm extends inward
+              place(el, dims, M - dims.w / 2, cy - dims.h / 2, 'scaleX(-1)');
+            }
+            break;
+          }
+
+          case 'right': {
+            var cy2 = M + H + pct * panelH;
+            if (h.piece === 'strap-hinge') {
+              // Rotate 90 deg; center the visual bar in the right margin strip
+              place(el, dims, W - M / 2 - dims.w / 2, cy2 - dims.h / 2, 'rotate(90deg)');
+            } else {
+              // edge-hinge: center at border, natural orientation (arm extends left)
+              place(el, dims, W - M - dims.w / 2, cy2 - dims.h / 2);
+            }
+            break;
+          }
+        }
+
+        container.appendChild(el);
+      });
+    }
+
+    function render() {
+      var M      = currentMargin;
+      var H      = HANDLE_H;
+      var W      = window.innerWidth;
+      var Wh     = window.innerHeight;
+      var panelW = W  - 2 * M;
+      var panelH = Wh - 2 * M - H;
+
+      var strip = document.getElementById('strip');
+      strip.style.left   = M + 'px';
+      strip.style.top    = M + 'px';
+      strip.style.width  = panelW + 'px';
+      strip.style.height = H + 'px';
+
+      var border = document.getElementById('border');
+      border.style.left   = M + 'px';
+      border.style.top    = (M + H) + 'px';
+      border.style.width  = panelW + 'px';
+      border.style.height = panelH + 'px';
+
+      renderHinges(M, H, W, Wh, panelW, panelH);
+    }
+
+    window.addEventListener('resize', render);
+
     if (window.kioskHandle) {
       window.kioskHandle.onTitle(function (title) {
         document.getElementById('title').textContent = title || '';
       });
       window.kioskHandle.onMode(function (mode) {
-        document.querySelector('.handle').classList.toggle('active', mode === 'active');
+        document.getElementById('strip').classList.toggle('active', mode === 'active');
       });
       window.kioskHandle.onNavState(function (state) {
         document.getElementById('backBtn').disabled = !state.canGoBack;
+      });
+      window.kioskHandle.onHardware(function (cfg) {
+        currentKey    = cfg.key;
+        currentMargin = cfg.margin;
+        render();
       });
       document.getElementById('backBtn').addEventListener('click', function () {
         window.kioskHandle.goBack();

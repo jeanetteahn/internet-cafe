@@ -29,4 +29,10 @@ contextBridge.exposeInMainWorld('kioskHandle', {
   goBack: () => {
     ipcRenderer.send('panel-back');
   },
+
+  // Call fn({ key, margin }) once after the handle loads and again after
+  // each window resize.  Use this to position the border and hinges.
+  onHardware: (fn) => {
+    ipcRenderer.on('panel-hardware', (_event, config) => fn(config));
+  },
 });

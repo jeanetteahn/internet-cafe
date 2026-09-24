@@ -17,6 +17,15 @@ const { app, globalShortcut } = require('electron');
 const { createKioskWindow } = require('./kiosk-browsers');
 const { registerSelf, killOthers } = require('./process-pair');
 
+// X11/Cinnamon: transparent: true BrowserWindows need an ARGB visual from
+// the X server.  Cinnamon's Mutter compositor provides one, but Chromium
+// only requests it when this switch is set — and it must be set before the
+// app is ready or it has no effect.  Guard with a platform check so the line
+// is a no-op on macOS/Windows where transparent windows work out of the box.
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('enable-transparent-visuals');
+}
+
 // Log all otherwise-silent failures with a clear prefix so startup errors
 // (like calling a non-existent method on a BrowserView) appear in the
 // terminal rather than being swallowed as unhandled promise rejections.

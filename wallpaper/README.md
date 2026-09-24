@@ -374,9 +374,17 @@ Other things worth knowing:
   grab. `HANDLE_HEIGHT`, `MIN_VISIBLE_PX`, `RETURN_HOME_WHEN_IDLE`,
   `GRIP_SIZE`, `MIN_PANEL_WIDTH`, and `MIN_PANEL_HEIGHT` are all tunables
   near the top of `kiosk-browsers.js`.
-- **No compositor required.** Panels are now opaque (`backgroundColor:
-  '#1a1a1a'`) rather than transparent, so there are no gaps to composite
-  through and no compositor dependency.
+- **Compositor required on Linux.** Each panel window uses `transparent:
+  true` so the orange hinge/frame overlay in `kiosk-handle.html` floats
+  around the browser content in the transparent margin. On X11/Cinnamon,
+  Chromium only requests an ARGB visual when
+  `app.commandLine.appendSwitch('enable-transparent-visuals')` is set
+  before `app.whenReady()` (done in `kiosk-main.js`). Without Cinnamon's
+  Mutter-based compositor running, transparent windows render as a solid
+  black rectangle instead of showing the wallpaper through the margin.
+  If you need to run without a compositor, set `HARDWARE_MARGIN = 0` and
+  `transparent: false` (add `backgroundColor: '#1a1a1a'`) in
+  `kiosk-browsers.js` to revert to opaque panels.
 - **Multi-display kiosk.** The cluster lands on the primary display by default.
   Set `KIOSK_DISPLAY=N` (a 0-based index into `screen.getAllDisplays()`) before
   launching to place it on a different monitor — e.g.
