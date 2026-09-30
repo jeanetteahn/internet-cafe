@@ -239,59 +239,61 @@
 
         switch (h.edge) {
           case 'corner-tl':
-            // L inner corner at window top-left; arms go right and down
-            place(el, dims, 0, 0);
+            // Inner corner at frame (M,M); scale(-1,-1) flips arms to extend up-left
+            place(el, dims, M - dims.w, M - dims.h, 'scale(-1,-1)');
             break;
 
           case 'corner-tr':
-            // Mirror horizontally: inner corner at top-right, arms go left and down
-            place(el, dims, W - dims.w, 0, 'scaleX(-1)');
+            // Inner corner at frame (W-M,M); scaleY(-1) flips arms to extend up-right
+            place(el, dims, W - M, M - dims.h, 'scaleY(-1)');
             break;
 
           case 'corner-bl':
-            // Mirror vertically: inner corner at bottom-left, arms go right and up
-            place(el, dims, 0, Wh - dims.h, 'scaleY(-1)');
+            // Inner corner at frame (M,Wh-M); scaleX(-1) flips arms to extend down-left
+            place(el, dims, M - dims.w, Wh - M, 'scaleX(-1)');
             break;
 
           case 'corner-br':
-            // Mirror both axes: inner corner at bottom-right, arms go left and up
-            place(el, dims, W - dims.w, Wh - dims.h, 'scale(-1,-1)');
+            // Inner corner at frame (W-M,Wh-M); natural orientation, arms extend down-right
+            place(el, dims, W - M, Wh - M);
             break;
 
           case 'top': {
-            // Strap centered horizontally at pct, vertically centered in top margin
+            // Bottom edge of strap sits on border (y=M); pct from frame left corner
             var cx = M + pct * panelW;
-            place(el, dims, cx - dims.w / 2, M / 2 - dims.h / 2);
+            place(el, dims, cx - dims.w / 2, M - dims.h);
             break;
           }
 
           case 'bottom': {
-            // Strap centered horizontally at pct, vertically centered in bottom margin
+            // Top edge of strap sits on border (y=Wh-M); pct from frame left corner
             var cx2 = M + pct * panelW;
-            place(el, dims, cx2 - dims.w / 2, Wh - M / 2 - dims.h / 2);
+            place(el, dims, cx2 - dims.w / 2, Wh - M);
             break;
           }
 
           case 'left': {
-            var cy = M + H + pct * panelH;
+            // pct from frame top corner; piece extends leftward from border (x=M)
+            var cy = M + pct * panelH;
             if (h.piece === 'strap-hinge') {
-              // Rotate 90 deg; center the visual bar in the left margin strip
-              place(el, dims, M / 2 - dims.w / 2, cy - dims.h / 2, 'rotate(90deg)');
+              // Rotated 90deg: visual right edge at x=M → left = M - w/2 - h/2
+              place(el, dims, M - dims.w / 2 - dims.h / 2, cy - dims.h / 2, 'rotate(90deg)');
             } else {
-              // edge-hinge: center at border, scaleX(-1) so arm extends inward
-              place(el, dims, M - dims.w / 2, cy - dims.h / 2, 'scaleX(-1)');
+              // edge-hinge scaleX(-1): right edge of element at x=M
+              place(el, dims, M - dims.w, cy - dims.h / 2, 'scaleX(-1)');
             }
             break;
           }
 
           case 'right': {
-            var cy2 = M + H + pct * panelH;
+            // pct from frame top corner; piece extends rightward from border (x=W-M)
+            var cy2 = M + pct * panelH;
             if (h.piece === 'strap-hinge') {
-              // Rotate 90 deg; center the visual bar in the right margin strip
-              place(el, dims, W - M / 2 - dims.w / 2, cy2 - dims.h / 2, 'rotate(90deg)');
+              // Rotated 90deg: visual left edge at x=W-M → left = W-M - w/2 + h/2
+              place(el, dims, W - M - dims.w / 2 + dims.h / 2, cy2 - dims.h / 2, 'rotate(90deg)');
             } else {
-              // edge-hinge: center at border, natural orientation (arm extends left)
-              place(el, dims, W - M - dims.w / 2, cy2 - dims.h / 2);
+              // edge-hinge natural: left edge of element at x=W-M
+              place(el, dims, W - M, cy2 - dims.h / 2);
             }
             break;
           }
@@ -317,11 +319,11 @@
 
       var border = document.getElementById('border');
       border.style.left   = M + 'px';
-      border.style.top    = (M + H) + 'px';
+      border.style.top    = M + 'px';
       border.style.width  = panelW + 'px';
-      border.style.height = panelH + 'px';
+      border.style.height = (Wh - 2 * M) + 'px';
 
-      renderHinges(M, H, W, Wh, panelW, panelH);
+      renderHinges(M, H, W, Wh, panelW, Wh - 2 * M);
     }
 
     window.addEventListener('resize', render);
