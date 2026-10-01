@@ -135,6 +135,7 @@ const PLACEHOLDER_URL = 'data:text/html,' + encodeURIComponent(
 
 // ---- Startup timing ---------------------------------------------------------
 let _t0 = 0;
+let windowsCreatedAt = 0; // set when createKioskWindow finishes; move events within 5 s are ignored
 // Timestamp of the last doSearch loadURL call across ALL panels.  Enforces
 // GLOBAL_SEARCH_GAP_MS so no two panels hit DDG within that window.
 let lastSearchStartedAt = 0;
@@ -589,6 +590,7 @@ function notePanelActivity(key, eventType) {
   if (!ps) return;
 
   if (ps.mode === 'auto') {
+    console.log(`[kiosk-auto] ${key} -> active (reason: ${eventType})`);
     stopBrowsingLoop(key);
     ps.mode = 'active';
     sendModeToHandle(key, 'active');
@@ -1176,6 +1178,10 @@ function createKioskWindow() {
     let moveDebounce = null;
     win.on('move', () => {
       if (ignoreNextMoves.get(key)) return;
+      if (Date.now() - windowsCreatedAt < 5_000) {
+        console.log(`[kiosk-auto] ${key} startup move ignored`);
+        return;
+      }
       clearTimeout(moveDebounce);
       moveDebounce = setTimeout(() => {
         // Customer dragged the handle while already active — disable auto-size
@@ -1335,6 +1341,7 @@ function startAllIdleRotation() {
 
     panelStates.get(key).rotationStartTimer = timer;
   });
+  windowsCreatedAt = Date.now();
 }
 
 // ---- Exports ----------------------------------------------------------------
