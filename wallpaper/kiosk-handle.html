@@ -177,37 +177,32 @@
     // edge: 'corner-tl' | 'corner-tr' | 'corner-bl' | 'corner-br'
     //       | 'top' | 'bottom' | 'left' | 'right'
     // pct:  0–1 position along the edge (ignored for corner edges)
+    // corner-t pieces also take dir: 'up'|'down'|'left'|'right' (which way the stem points)
     var PANEL_HINGES = {
       hub: [
-        { piece: 'corner-hinge', edge: 'corner-tl' },
-        { piece: 'corner-hinge', edge: 'corner-bl' },
-        { piece: 'strap-hinge',  edge: 'top',  pct: 0.45 },
-        { piece: 'edge-hinge',   edge: 'left', pct: 0.25 },
-        { piece: 'edge-hinge',   edge: 'left', pct: 0.52 },
-        { piece: 'edge-hinge',   edge: 'left', pct: 0.78 },
+        { piece: 'strap-hinge', edge: 'top',         pct: 0.5  },
+        { piece: 'strap-hinge', edge: 'left',        pct: 0.5  },
+        { piece: 'corner-t',    edge: 'corner-br',   dir: 'down' },
       ],
       topLeft: [
-        { piece: 'corner-hinge', edge: 'corner-tl' },
-        { piece: 'corner-hinge', edge: 'corner-bl' },
-        { piece: 'strap-hinge',  edge: 'top', pct: 0.5 },
+        { piece: 'strap-hinge', edge: 'top',         pct: 0.83 },
+        { piece: 'strap-hinge', edge: 'left',        pct: 0.2  },
+        { piece: 'corner-t',    edge: 'corner-bl',   dir: 'left' },
       ],
       topRight: [
-        { piece: 'corner-hinge', edge: 'corner-tr' },
-        { piece: 'corner-hinge', edge: 'corner-br' },
-        { piece: 'strap-hinge',  edge: 'top',   pct: 0.6 },
-        { piece: 'strap-hinge',  edge: 'right', pct: 0.5 },
+        { piece: 'corner-hinge', edge: 'corner-tl'               },
+        { piece: 'corner-t',     edge: 'corner-tr',  dir: 'up'   },
+        { piece: 'strap-hinge',  edge: 'bottom',     pct: 0.7    },
       ],
       bottomLeft: [
-        { piece: 'corner-hinge', edge: 'corner-bl' },
-        { piece: 'corner-hinge', edge: 'corner-tl' },
-        { piece: 'strap-hinge',  edge: 'bottom', pct: 0.45 },
-        { piece: 'edge-hinge',   edge: 'right',  pct: 0.8 },
+        { piece: 'corner-t',     edge: 'corner-tl',  dir: 'down' },
+        { piece: 'strap-hinge',  edge: 'left',       pct: 0.7    },
+        { piece: 'corner-hinge', edge: 'corner-br'               },
       ],
       bottomRight: [
-        { piece: 'corner-hinge', edge: 'corner-br' },
-        { piece: 'corner-hinge', edge: 'corner-bl' },
-        { piece: 'strap-hinge',  edge: 'right',  pct: 0.5 },
-        { piece: 'strap-hinge',  edge: 'bottom', pct: 0.45 },
+        { piece: 'strap-hinge', edge: 'top',         pct: 0.55 },
+        { piece: 'strap-hinge', edge: 'right',       pct: 0.7  },
+        { piece: 'corner-t',    edge: 'corner-bl',   dir: 'down' },
       ],
     };
 
@@ -232,30 +227,49 @@
       if (!hinges) return;
 
       hinges.forEach(function (h) {
-        var dims = DIMS[h.piece];
+        var dims = (h.piece === 'corner-t') ? DIMS['edge-hinge'] : DIMS[h.piece];
         var el   = document.createElement('div');
-        el.innerHTML = SVGS[h.piece];
+        el.innerHTML = (h.piece === 'corner-t') ? SVGS['edge-hinge'] : SVGS[h.piece];
         var pct = (h.pct !== undefined) ? h.pct : 0.5;
 
         switch (h.edge) {
           case 'corner-tl':
-            // Inner corner at frame (M,M); scale(-1,-1) flips arms to extend up-left
-            place(el, dims, M - dims.w, M - dims.h, 'scale(-1,-1)');
+            if (h.piece === 'corner-t') {
+              // T-junction at (M,M). dir 'down': stem vertical, arm extends left.
+              if (h.dir === 'down') place(el, dims, M - 20, M - 27);
+            } else {
+              place(el, dims, M - dims.w, M - dims.h, 'scale(-1,-1)');
+            }
             break;
 
           case 'corner-tr':
-            // Inner corner at frame (W-M,M); scaleY(-1) flips arms to extend up-right
-            place(el, dims, W - M, M - dims.h, 'scaleY(-1)');
+            if (h.piece === 'corner-t') {
+              // T-junction at (W-M,M). dir 'up': scaleX(-1) flips arm rightward, stem vertical.
+              if (h.dir === 'up') place(el, dims, W - M - 14, M - 27, 'scaleX(-1)');
+            } else {
+              place(el, dims, W - M, M - dims.h, 'scaleY(-1)');
+            }
             break;
 
           case 'corner-bl':
-            // Inner corner at frame (M,Wh-M); scaleX(-1) flips arms to extend down-left
-            place(el, dims, M - dims.w, Wh - M, 'scaleX(-1)');
+            if (h.piece === 'corner-t') {
+              // T-junction at (M,Wh-M).
+              // dir 'left': rotate(90deg) scaleY(-1) → stem horizontal going left, arm down.
+              // dir 'down': natural orientation, arm extends left.
+              if (h.dir === 'left') place(el, dims, M - 17.5, Wh - M - 24.5, 'rotate(90deg) scaleY(-1)');
+              if (h.dir === 'down') place(el, dims, M - 20,   Wh - M - 27);
+            } else {
+              place(el, dims, M - dims.w, Wh - M, 'scaleX(-1)');
+            }
             break;
 
           case 'corner-br':
-            // Inner corner at frame (W-M,Wh-M); natural orientation, arms extend down-right
-            place(el, dims, W - M, Wh - M);
+            if (h.piece === 'corner-t') {
+              // T-junction at (W-M,Wh-M). dir 'down': scaleX(-1) flips arm rightward, stem vertical.
+              if (h.dir === 'down') place(el, dims, W - M - 14, Wh - M - 27, 'scaleX(-1)');
+            } else {
+              place(el, dims, W - M, Wh - M);
+            }
             break;
 
           case 'top': {
