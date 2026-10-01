@@ -104,7 +104,7 @@ const INITIAL_LOAD_STAGGER_MS = 1500;
 // HARDWARE_MARGIN: transparent padding (px) on every side of each panel window.
 // The frame page (kiosk-handle.html) draws the orange border and hinge SVGs
 // inside this margin so they appear to float around the browser content.
-const HARDWARE_MARGIN  = 30;
+const HARDWARE_MARGIN  = 36;
 // USE_WINDOW_SHAPE: on Linux, call win.setShape() to cut out the four opaque
 // corner squares (HARDWARE_MARGIN × HARDWARE_MARGIN each) so clicks in those
 // areas fall through to the wallpaper rather than landing on the transparent
@@ -391,11 +391,11 @@ function positionGrip(key) {
 // Corners listed here are included in the window shape so clicks on the
 // pieces register rather than falling through to the wallpaper.
 const PANEL_CORNER_PIECES = {
-  hub:         ['corner-br'],
-  topLeft:     ['corner-bl'],
-  topRight:    ['corner-tl', 'corner-tr'],
-  bottomLeft:  ['corner-tl', 'corner-br'],
-  bottomRight: ['corner-bl'],
+  hub:         [],
+  topLeft:     [],
+  topRight:    [],
+  bottomLeft:  [],
+  bottomRight: [],
 };
 
 function updateWindowShape(key) {

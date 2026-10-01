@@ -179,30 +179,35 @@
     // pct:  0–1 position along the edge (ignored for corner edges)
     // corner-t pieces also take dir: 'up'|'down'|'left'|'right' (which way the stem points)
     var PANEL_HINGES = {
-      hub: [
-        { piece: 'strap-hinge', edge: 'top',         pct: 0.5  },
-        { piece: 'strap-hinge', edge: 'left',        pct: 0.5  },
-        { piece: 'corner-t',    edge: 'corner-br',   dir: 'down' },
-      ],
       topLeft: [
-        { piece: 'strap-hinge', edge: 'top',         pct: 0.83 },
-        { piece: 'strap-hinge', edge: 'left',        pct: 0.2  },
-        { piece: 'corner-t',    edge: 'corner-bl',   dir: 'left' },
+        { piece: 'strap-hinge', edge: 'top',    pct: 0.70 },
+        { piece: 'edge-hinge',  edge: 'right',  pct: 0.30 },
+        { piece: 'strap-hinge', edge: 'bottom', pct: 0.20 },
+        { piece: 'strap-hinge', edge: 'left',   pct: 0.60 },
+      ],
+      hub: [
+        { piece: 'strap-hinge', edge: 'top',    pct: 0.35 },
+        { piece: 'strap-hinge', edge: 'right',  pct: 0.65 },
+        { piece: 'edge-hinge',  edge: 'bottom', pct: 0.75 },
+        { piece: 'strap-hinge', edge: 'left',   pct: 0.45 },
       ],
       topRight: [
-        { piece: 'corner-hinge', edge: 'corner-tl'               },
-        { piece: 'corner-t',     edge: 'corner-tr',  dir: 'up'   },
-        { piece: 'strap-hinge',  edge: 'bottom',     pct: 0.7    },
+        { piece: 'strap-hinge', edge: 'top',    pct: 0.25 },
+        { piece: 'strap-hinge', edge: 'right',  pct: 0.55 },
+        { piece: 'strap-hinge', edge: 'bottom', pct: 0.80 },
+        { piece: 'edge-hinge',  edge: 'left',   pct: 0.70 },
       ],
       bottomLeft: [
-        { piece: 'corner-t',     edge: 'corner-tl',  dir: 'down' },
-        { piece: 'strap-hinge',  edge: 'left',       pct: 0.7    },
-        { piece: 'corner-hinge', edge: 'corner-br'               },
+        { piece: 'edge-hinge',  edge: 'top',    pct: 0.30 },
+        { piece: 'strap-hinge', edge: 'right',  pct: 0.40 },
+        { piece: 'strap-hinge', edge: 'bottom', pct: 0.65 },
+        { piece: 'strap-hinge', edge: 'left',   pct: 0.75 },
       ],
       bottomRight: [
-        { piece: 'strap-hinge', edge: 'top',         pct: 0.55 },
-        { piece: 'strap-hinge', edge: 'right',       pct: 0.7  },
-        { piece: 'corner-t',    edge: 'corner-bl',   dir: 'down' },
+        { piece: 'strap-hinge', edge: 'top',    pct: 0.80 },
+        { piece: 'edge-hinge',  edge: 'right',  pct: 0.35 },
+        { piece: 'strap-hinge', edge: 'bottom', pct: 0.30 },
+        { piece: 'strap-hinge', edge: 'left',   pct: 0.60 },
       ],
     };
 
@@ -273,16 +278,28 @@
             break;
 
           case 'top': {
-            // Bottom edge of strap sits on border (y=M); pct from frame left corner
+            // pct from frame left corner
             var cx = M + pct * panelW;
-            place(el, dims, cx - dims.w / 2, M - dims.h);
+            if (h.piece === 'strap-hinge') {
+              // Bottom edge of strap sits on border (y=M)
+              place(el, dims, cx - dims.w / 2, M - dims.h);
+            } else {
+              // edge-hinge rotate(90deg): crossbar at bottom flush against border, stem up
+              place(el, dims, cx - 17, M - 44.5, 'rotate(90deg)');
+            }
             break;
           }
 
           case 'bottom': {
-            // Top edge of strap sits on border (y=Wh-M); pct from frame left corner
+            // pct from frame left corner
             var cx2 = M + pct * panelW;
-            place(el, dims, cx2 - dims.w / 2, Wh - M);
+            if (h.piece === 'strap-hinge') {
+              // Top edge of strap sits on border (y=Wh-M)
+              place(el, dims, cx2 - dims.w / 2, Wh - M);
+            } else {
+              // edge-hinge rotate(-90deg): crossbar at top flush against border, stem down
+              place(el, dims, cx2 - 17, Wh - M - 10.5, 'rotate(-90deg)');
+            }
             break;
           }
 
@@ -293,8 +310,8 @@
               // Rotated 90deg: visual right edge at x=M → left = M - w/2 - h/2
               place(el, dims, M - dims.w / 2 - dims.h / 2, cy - dims.h / 2, 'rotate(90deg)');
             } else {
-              // edge-hinge scaleX(-1): right edge of element at x=M
-              place(el, dims, M - dims.w, cy - dims.h / 2, 'scaleX(-1)');
+              // edge-hinge natural: crossbar flush against border, stem points left
+              place(el, dims, M - 34, cy - 27.5);
             }
             break;
           }
@@ -306,8 +323,8 @@
               // Rotated 90deg: visual left edge at x=W-M → left = W-M - w/2 + h/2
               place(el, dims, W - M - dims.w / 2 + dims.h / 2, cy2 - dims.h / 2, 'rotate(90deg)');
             } else {
-              // edge-hinge natural: left edge of element at x=W-M
-              place(el, dims, W - M, cy2 - dims.h / 2);
+              // edge-hinge scaleX(-1): crossbar flush against border, stem points right
+              place(el, dims, W - M, cy2 - 27.5, 'scaleX(-1)');
             }
             break;
           }
