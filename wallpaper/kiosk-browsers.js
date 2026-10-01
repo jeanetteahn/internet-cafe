@@ -83,13 +83,13 @@ const ALLOWED_DOMAINS = [
 // across 5 panels).  SEARCH_INTERVAL_MS is a safety-net ceiling for pages
 // that never trigger bottom detection.
 const SEARCH_INTERVAL_MS     = 45 * 1000; // max time on a results page (safety net)
-const MIN_SEARCH_INTERVAL_MS =  5 * 1000; // min time between searches per panel — floor for very short pages
+const MIN_SEARCH_INTERVAL_MS = 20 * 1000; // min time between searches per panel — floor for very short pages
 const BOTTOM_HOLD_MS         = 300;       // brief pause after jumping to top before loading next search
 const SCROLL_STEP_PX         = 80;        // px scrolled per tick
-const SCROLL_STEP_MS         = 250;       // ms between scroll ticks
+const SCROLL_STEP_MS         = 400;       // ms between scroll ticks
 const INACTIVITY_TIMEOUT_MS  = 90 * 1000; // idle grace period before auto mode resumes
 const LOAD_TIMEOUT_MS        = 15 * 1000; // per-panel watchdog: abort and retry if a DDG load takes longer
-const GLOBAL_SEARCH_GAP_MS   =  2 * 1000; // minimum gap between any two panels starting a DDG search
+const GLOBAL_SEARCH_GAP_MS   =  6 * 1000; // minimum gap between any two panels starting a DDG search
 
 // ---- Window / layout tunables -----------------------------------------------
 const HANDLE_HEIGHT         = 28;
@@ -98,7 +98,7 @@ const MIN_VISIBLE_PX        = 120;
 const GRIP_SIZE             = 18;
 const MIN_PANEL_WIDTH       = 320;
 const MIN_PANEL_HEIGHT      = 220;
-const INITIAL_LOAD_STAGGER_MS = 1500;
+const INITIAL_LOAD_STAGGER_MS = 3000;
 
 // ---- Hardware-overlay tunables ----------------------------------------------
 // HARDWARE_MARGIN: transparent padding (px) on every side of each panel window.
@@ -945,11 +945,11 @@ function onSearchPageReady(key) {
 }
 
 // Schedules the next doSearch call with per-panel exponential backoff
-// (5 s, 10 s, 20 s, … capped at 60 s).  Resets to 0 on a successful load.
+// (5 s, 10 s, 20 s, … capped at 30 s).  Resets to 0 on a successful load.
 function scheduleRetry(key, reason) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
-  const delay = Math.min(5_000 * Math.pow(2, ps.retryCount), 60_000);
+  const delay = Math.min(5_000 * Math.pow(2, ps.retryCount), 30_000);
   ps.retryCount += 1;
   clearTimeout(ps.dwellTimer);
   ps.dwellTimer = setTimeout(() => {
