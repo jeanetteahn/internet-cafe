@@ -1,6 +1,10 @@
-const { BrowserWindow, BrowserView, screen, ipcMain, globalShortcut, session } = require('electron');
+const { app, BrowserWindow, BrowserView, screen, ipcMain, globalShortcut, session } = require('electron');
 const path = require('path');
 const fs   = require('fs');
+
+// DDG result cache — one HTML file per panel, loaded as the startup placeholder.
+const cacheDir = path.join(app.getPath('userData'), 'ddg-cache');
+try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) {}
 
 // ---- Spoon cursor -----------------------------------------------------------
 // Pre-computed once at module init so every renderer can get the same rule.
@@ -638,13 +642,16 @@ function setupViewEventHandlers(key, win, view) {
   view.webContents.on('did-finish-load', () => {
     const url = view.webContents.getURL();
 
+    // Ignore placeholder/cache loads — they are not real search results.
+    if (url.startsWith('data:') || url.startsWith('file:') || url === 'about:blank') return;
+
     // [kiosk-timing] first real page per panel.
-    if (!firstLoadLogged.has(key) && !url.startsWith('data:')) {
+    if (!firstLoadLogged.has(key)) {
       firstLoadLogged.add(key);
       console.log(`[kiosk-timing] ${key} did-finish-load: +${timingMs()} ms`);
     }
 
-    if (!url.startsWith('data:') && url !== 'about:blank') {
+    if (true) {
       const ps = panelStates.get(key);
       if (ps && ps.mode === 'auto') {
         // Clear watchdog and reset backoff — this was a successful load.
@@ -662,6 +669,16 @@ function setupViewEventHandlers(key, win, view) {
         }
 
         onSearchPageReady(key);
+
+        // Persist this DDG page so the next startup can show it immediately.
+        if (url.startsWith('https://html.duckduckgo.com/')) {
+          view.webContents.executeJavaScript('document.documentElement.outerHTML')
+            .then(html => {
+              const withBase = html.replace('<head>', '<head><base href="https://html.duckduckgo.com/">');
+              fs.writeFile(path.join(cacheDir, `${key}.html`), withBase, () => {});
+            })
+            .catch(() => {});
+        }
       }
     }
   });
@@ -674,7 +691,7 @@ function setupViewEventHandlers(key, win, view) {
     if (errorCode === -3) return;
     const ps = panelStates.get(key);
     if (!ps) return;
-    if (!failedUrl || failedUrl.startsWith('data:')) return;
+    if (!failedUrl || failedUrl.startsWith('data:') || failedUrl.startsWith('file:')) return;
 
     // Clear watchdog — the load definitely ended.
     clearTimeout(ps.loadTimer);
@@ -949,7 +966,9 @@ function onSearchPageReady(key) {
 function scheduleRetry(key, reason) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
-  const delay = Math.min(5_000 * Math.pow(2, ps.retryCount), 30_000);
+  const delay = reason === 'timeout-first'
+    ? 2_000
+    : Math.min(5_000 * Math.pow(2, ps.retryCount), 30_000);
   ps.retryCount += 1;
   clearTimeout(ps.dwellTimer);
   ps.dwellTimer = setTimeout(() => {
@@ -994,15 +1013,18 @@ function doSearch(key) {
 
   // Arm load watchdog — fires if neither did-finish-load nor did-fail-load
   // arrives within LOAD_TIMEOUT_MS (e.g. request stalled before a response).
+  // Use a shorter timeout for the first search so a stalled panel recovers fast.
+  const isFirst    = (ps.retryCount === 0 && ps.searchIndex === 1);
+  const timeoutMs  = isFirst ? 8_000 : LOAD_TIMEOUT_MS;
   clearTimeout(ps.loadTimer);
   ps.loadTimer = setTimeout(() => {
     ps.loadTimer = null;
     if (ps.mode !== 'auto') return;
     const stuckUrl = view.webContents.isDestroyed() ? url : (view.webContents.getURL() || url);
-    console.log(`[kiosk-auto] ${key} load timed out after ${LOAD_TIMEOUT_MS} ms: ${stuckUrl}`);
+    console.log(`[kiosk-auto] ${key} load timed out after ${timeoutMs} ms: ${stuckUrl}`);
     view.webContents.stop();
-    scheduleRetry(key, 'timeout');
-  }, LOAD_TIMEOUT_MS);
+    scheduleRetry(key, isFirst ? 'timeout-first' : 'timeout');
+  }, timeoutMs);
 
   view.webContents.loadURL(url).catch(err => {
     clearTimeout(ps.loadTimer);
@@ -1115,7 +1137,12 @@ function createKioskWindow() {
     win.addBrowserView(view);
     view.setBounds({ x: M, y: HANDLE_HEIGHT + M, width: panelW, height: panelH });
     view.setAutoResize({ width: true, height: true });
-    view.webContents.loadURL(PLACEHOLDER_URL);
+    const cachedPage = path.join(cacheDir, `${key}.html`);
+    if (fs.existsSync(cachedPage)) {
+      view.webContents.loadFile(cachedPage);
+    } else {
+      view.webContents.loadURL(PLACEHOLDER_URL);
+    }
     panelViews[key] = view;
     setupViewEventHandlers(key, win, view);
 
