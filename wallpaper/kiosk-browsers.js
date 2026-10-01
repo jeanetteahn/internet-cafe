@@ -642,8 +642,15 @@ function setupViewEventHandlers(key, win, view) {
   view.webContents.on('did-finish-load', () => {
     const url = view.webContents.getURL();
 
-    // Ignore placeholder/cache loads — they are not real search results.
-    if (url.startsWith('data:') || url.startsWith('file:') || url === 'about:blank') return;
+    // Placeholder and blank pages are never real content.
+    if (url.startsWith('data:') || url === 'about:blank') return;
+    // Cached file — start scrolling immediately but don't treat it as a
+    // completed search (watchdog, retryCount, and timing logs stay untouched).
+    if (url.startsWith('file:')) {
+      const ps = panelStates.get(key);
+      if (ps && ps.mode === 'auto') startScrolling(key);
+      return;
+    }
 
     // [kiosk-timing] first real page per panel.
     if (!firstLoadLogged.has(key)) {
@@ -915,6 +922,10 @@ function startScrolling(key) {
     // Re-check state after the second await.
     if (ps.mode !== 'auto' || ps.scrollTimer === null) return;
 
+    // A live search is already in-flight — keep scrolling and let
+    // onSearchPageReady take over when it lands.
+    if (ps.loadTimer) return;
+
     // Always advance to the next search term.  The hold is normally just
     // BOTTOM_HOLD_MS (300 ms); MIN_SEARCH_INTERVAL_MS adds extra delay only
     // when the page was scrolled through unusually fast (very short page).
@@ -995,6 +1006,7 @@ function doSearch(key) {
       return;
     }
   }
+  const isFirst      = !ps.firstSearchDone; // capture before setting — true only on each panel's first search
   ps.firstSearchDone = true;
 
   const now = Date.now();
@@ -1014,7 +1026,6 @@ function doSearch(key) {
   // Arm load watchdog — fires if neither did-finish-load nor did-fail-load
   // arrives within LOAD_TIMEOUT_MS (e.g. request stalled before a response).
   // Use a shorter timeout for the first search so a stalled panel recovers fast.
-  const isFirst    = (ps.retryCount === 0 && ps.searchIndex === 1);
   const timeoutMs  = isFirst ? 8_000 : LOAD_TIMEOUT_MS;
   clearTimeout(ps.loadTimer);
   ps.loadTimer = setTimeout(() => {
