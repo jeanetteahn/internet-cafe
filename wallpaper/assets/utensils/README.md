@@ -1,6 +1,6 @@
 # assets/utensils
 
-UI icon SVGs for the kiosk panels. Sits alongside `assets/hardware/`
+UI icon SVGs for the kiosk. Sits alongside `assets/hardware/`
 (the orange hinge and bracket pieces) and follows the same conventions:
 no raster content, no text elements, fill color `#ea4b00`.
 
@@ -9,15 +9,16 @@ no raster content, no text elements, fill color `#ea4b00`.
 ### spoon-cursor.svg
 Custom mouse cursor for the kiosk process. Replaces the system arrow
 cursor so the pointer matches the utensil aesthetic of the panels.
+Hot spot: `3 0` (spoon bowl tip at approximately `(3.47, 0)` in the
+`0 0 37.78 37.77` viewBox, rendered at 32 × 32 px).
 
 ### forkknife.svg
-Source file containing both utensil shapes as separate paths:
-- **Top path** — fork (will be exported / split into `fork.svg`)
-- **Bottom path** — knife (will be exported / split into `knife.svg`)
+Combined fork-and-knife graphic used as the standalone navigation
+control (`kiosk-forkknife.html`):
+- **Top half** — fork shape → Forward button
+- **Bottom half** — knife shape → Back button
 
-Once split:
-- `fork.svg` — **forward** navigation button on each panel handle
-- `knife.svg` — **back** navigation button on each panel handle
-
-Both derived icons use the `#ea4b00` fill, matching `spoon-cursor.svg`
-and complementing the `#e74e25` hardware pieces.
+The control is a separate always-on-top transparent window managed by
+`kiosk-browsers.js` (`createForkKnifeWindow`). It tracks whichever
+panel was most recently active and shows that panel's back/forward
+state.

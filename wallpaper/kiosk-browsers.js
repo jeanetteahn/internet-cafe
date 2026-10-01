@@ -16,9 +16,10 @@ const _spoonSvg = fs.readFileSync(path.join(__dirname, 'assets/utensils/spoon-cu
 const SPOON_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSvg).toString('base64');
 // hotspot pixel (3,0): spoon bowl tip at (3.47,0) in viewBox 37.78×37.77, rendered at 32×32
 const _spoonRule     = `*{cursor:url('${SPOON_CURSOR_URI}') 3 0,auto!important}input,textarea{cursor:text!important}`;
-const PANEL_CURSOR_CSS  = _spoonRule;
-const HANDLE_CURSOR_CSS = _spoonRule + '#strip{cursor:grab!important}';
-const GRIP_CURSOR_CSS   = _spoonRule + '.grip{cursor:nwse-resize!important}';
+const PANEL_CURSOR_CSS     = _spoonRule;
+const HANDLE_CURSOR_CSS    = _spoonRule + '#strip{cursor:grab!important}';
+const GRIP_CURSOR_CSS      = _spoonRule + '.grip{cursor:nwse-resize!important}';
+const FORKKNIFE_CURSOR_CSS = _spoonRule + '#grip{cursor:grab!important}';
 
 // ---- Search topics ----------------------------------------------------------
 // Kid-friendly only.  Panels cycle through the list in order, staggered so
@@ -111,6 +112,18 @@ const HARDWARE_MARGIN  = 18;
 // window surface.  Set to false if setShape() causes compositor artefacts.
 const USE_WINDOW_SHAPE = true;
 
+// ---- Forkknife nav control --------------------------------------------------
+// Scale matches the spoon cursor: 32 px rendered for a 37.78-unit viewBox.
+const UTENSIL_PX_PER_UNIT = 32 / 37.78;
+const FK_GRAPHIC_W = Math.round(61.72 * UTENSIL_PX_PER_UNIT); // ~52 px
+const FK_GRAPHIC_H = Math.round(21.86 * UTENSIL_PX_PER_UNIT); // ~19 px
+const FK_GRIP_W    = 8;  // dotted drag-grip column width (px)
+const FK_PAD       = 4;  // padding: top, bottom, and right of graphic (px)
+// Default position (px) from the top-left corner of the kiosk display's work area.
+const FORKKNIFE_POSITION = { x: 24, y: 24 };
+const FORKKNIFE_WIN_W    = FK_GRIP_W + FK_GRAPHIC_W + FK_PAD; // ~64 px
+const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD;         // ~27 px
+
 // ---- Active-panel animation tunables ----------------------------------------
 // When a customer starts using a panel it grows to ACTIVE_SCALE × its home
 // size; when it goes idle it shrinks back.  The tween runs at ~60 fps via
@@ -164,6 +177,9 @@ const webContentsIdToKey = new Map();
 // Both must be module-level so V8 cannot GC the interval references.
 const tweenTimers = new Map(); // key -> interval-id | null
 let   enlargedKey = null;      // panel key currently enlarged, or null
+let forkKnifeWindow     = null; // standalone forkknife nav control window
+let forkKnifeDragOffset = null; // { dx, dy } set at drag-start, cleared at drag-end
+let forkKnifeHomePos    = null; // starting position, restored on double-click
 
 // ---- Layout -----------------------------------------------------------------
 
@@ -557,6 +573,34 @@ function resetPanelLayout(key) {
   sendPanelHome(key);
 }
 
+// ---- Forkknife nav helpers --------------------------------------------------
+
+// Returns the key of the most recently active panel, or 'hub' as fallback.
+function getActiveKey() {
+  let bestKey  = 'hub';
+  let bestTime = -1;
+  for (const [k, ps] of panelStates) {
+    if (ps.mode === 'active' && ps.lastTrustedInputAt > bestTime) {
+      bestKey  = k;
+      bestTime = ps.lastTrustedInputAt;
+    }
+  }
+  return bestKey;
+}
+
+// Sends the current nav state of the active panel to the forkknife window.
+function pushForkKnifeNavState() {
+  if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+  const key  = getActiveKey();
+  const view = panelViews[key];
+  if (!view || view.webContents.isDestroyed()) return;
+  const state = {
+    canGoBack:    canGoBack(view.webContents),
+    canGoForward: canGoForward(view.webContents),
+  };
+  forkKnifeWindow.webContents.send('forkknife-nav-state', state);
+}
+
 // ---- Activity ---------------------------------------------------------------
 
 // eventType is the DOM event type from kiosk-preload.js ('mousedown', 'click',
@@ -571,6 +615,7 @@ function notePanelActivity(key, eventType) {
     stopBrowsingLoop(key);
     ps.mode = 'active';
     sendModeToHandle(key, 'active');
+    pushForkKnifeNavState();
   }
 
   clearTimeout(ps.inactivityTimer);
@@ -589,6 +634,7 @@ function notePanelActivity(key, eventType) {
     ps.manualLayout = false;
     sendModeToHandle(key, 'auto');
     startBrowsingLoop(key);
+    pushForkKnifeNavState();
   }, INACTIVITY_TIMEOUT_MS);
 
   // Only deliberate events enlarge the panel.
@@ -696,17 +742,11 @@ function setupViewEventHandlers(key, win, view) {
       }
     }
 
-    const backEnabled = canGoBack(view.webContents);
-    const fwdEnabled  = canGoForward(view.webContents);
-    const w = panelWindows.get(key);
-    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled, canGoForward: fwdEnabled });
+    pushForkKnifeNavState();
   });
 
   view.webContents.on('did-navigate-in-page', () => {
-    const backEnabled = canGoBack(view.webContents);
-    const fwdEnabled  = canGoForward(view.webContents);
-    const w = panelWindows.get(key);
-    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled, canGoForward: fwdEnabled });
+    pushForkKnifeNavState();
   });
 
   // Navigation guard -- applies to all page-initiated navigations (meta-refresh,
@@ -1013,6 +1053,48 @@ function stopBrowsingLoop(key) {
   ps.loadTimer          = null;
 }
 
+// ---- Forkknife window -------------------------------------------------------
+
+function createForkKnifeWindow(workArea) {
+  if (forkKnifeWindow && !forkKnifeWindow.isDestroyed()) {
+    forkKnifeWindow.destroy();
+  }
+  const homeX = workArea.x + FORKKNIFE_POSITION.x;
+  const homeY = workArea.y + FORKKNIFE_POSITION.y;
+  forkKnifeHomePos = { x: homeX, y: homeY };
+
+  forkKnifeWindow = new BrowserWindow({
+    x:           homeX,
+    y:           homeY,
+    width:       FORKKNIFE_WIN_W,
+    height:      FORKKNIFE_WIN_H,
+    frame:       false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable:   false,
+    movable:     true,
+    webPreferences: {
+      preload:          path.join(__dirname, 'kiosk-forkknife-preload.js'),
+      contextIsolation: true,
+      nodeIntegration:  false,
+      sandbox:          true,
+    },
+  });
+  forkKnifeWindow.loadFile(path.join(__dirname, 'kiosk-forkknife.html'));
+  forkKnifeWindow.webContents.on('dom-ready', () => {
+    forkKnifeWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS).catch(() => {});
+  });
+  forkKnifeWindow.webContents.once('did-finish-load', () => {
+    if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+      forkKnifeWindow.setShape([
+        { x: 0, y: 0, width: FORKKNIFE_WIN_W, height: FORKKNIFE_WIN_H },
+      ]);
+    }
+    pushForkKnifeNavState();
+  });
+}
+
 // ---- Window creation --------------------------------------------------------
 
 /**
@@ -1176,6 +1258,8 @@ function createKioskWindow() {
     console.error('[kiosk] Ctrl+Alt+D already claimed — layout dump unavailable');
   }
 
+  createForkKnifeWindow(workArea);
+
   return order.map(key => panelWindows.get(key));
 }
 
@@ -1201,9 +1285,10 @@ function attachActivityHandling() {
     notePanelActivity(key, eventType || 'unknown');
   });
 
-  ipcMain.on('panel-back', (event) => {
-    const key = webContentsIdToKey.get(event.sender.id);
-    if (!key) return;
+  ipcMain.on('forkknife-back', (event) => {
+    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+    if (event.sender !== forkKnifeWindow.webContents) return;
+    const key = getActiveKey();
     const view = panelViews[key];
     if (!view || view.webContents.isDestroyed()) return;
     if (canGoBack(view.webContents)) {
@@ -1212,14 +1297,53 @@ function attachActivityHandling() {
     }
   });
 
-  ipcMain.on('panel-forward', (event) => {
-    const key = webContentsIdToKey.get(event.sender.id);
-    if (!key) return;
+  ipcMain.on('forkknife-forward', (event) => {
+    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+    if (event.sender !== forkKnifeWindow.webContents) return;
+    const key = getActiveKey();
     const view = panelViews[key];
     if (!view || view.webContents.isDestroyed()) return;
     if (canGoForward(view.webContents)) {
       goForward(view.webContents);
       notePanelActivity(key, 'click');
+    }
+  });
+
+  ipcMain.on('forkknife-drag-start', (event) => {
+    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+    if (event.sender !== forkKnifeWindow.webContents) return;
+    const cursor = screen.getCursorScreenPoint();
+    const pos    = forkKnifeWindow.getPosition();
+    forkKnifeDragOffset = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
+  });
+
+  ipcMain.on('forkknife-drag-move', (event) => {
+    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+    if (event.sender !== forkKnifeWindow.webContents) return;
+    if (!forkKnifeDragOffset) return;
+    const cursor       = screen.getCursorScreenPoint();
+    const { workArea } = screen.getDisplayMatching(forkKnifeWindow.getBounds());
+    const MIN_VIS      = 20;
+    let nx = cursor.x - forkKnifeDragOffset.dx;
+    let ny = cursor.y - forkKnifeDragOffset.dy;
+    nx = Math.max(workArea.x - FORKKNIFE_WIN_W + MIN_VIS,
+                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS));
+    ny = Math.max(workArea.y,
+                  Math.min(ny, workArea.y + workArea.height - FORKKNIFE_WIN_H));
+    forkKnifeWindow.setPosition(Math.round(nx), Math.round(ny));
+  });
+
+  ipcMain.on('forkknife-drag-end', (event) => {
+    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+    if (event.sender !== forkKnifeWindow.webContents) return;
+    forkKnifeDragOffset = null;
+  });
+
+  ipcMain.on('forkknife-drag-reset', (event) => {
+    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+    if (event.sender !== forkKnifeWindow.webContents) return;
+    if (forkKnifeHomePos) {
+      forkKnifeWindow.setPosition(forkKnifeHomePos.x, forkKnifeHomePos.y);
     }
   });
 
