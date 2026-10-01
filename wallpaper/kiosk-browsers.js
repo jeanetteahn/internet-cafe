@@ -98,7 +98,7 @@ const MIN_VISIBLE_PX        = 120;
 const GRIP_SIZE             = 18;
 const MIN_PANEL_WIDTH       = 320;
 const MIN_PANEL_HEIGHT      = 220;
-const INITIAL_LOAD_STAGGER_MS = 3000;
+const INITIAL_LOAD_STAGGER_MS = 300;
 
 // ---- Hardware-overlay tunables ----------------------------------------------
 // HARDWARE_MARGIN: transparent padding (px) on every side of each panel window.
@@ -964,15 +964,19 @@ function doSearch(key) {
   if (!ps || ps.mode !== 'auto') return;
 
   // Global search gate: space out DDG hits across all panels.
-  const gapRemaining = GLOBAL_SEARCH_GAP_MS - (Date.now() - lastSearchStartedAt);
-  if (gapRemaining > 0) {
-    clearTimeout(ps.dwellTimer);
-    ps.dwellTimer = setTimeout(() => {
-      ps.dwellTimer = null;
-      if (ps.mode === 'auto') doSearch(key);
-    }, gapRemaining);
-    return;
+  // Skipped for each panel's very first search so windows fill immediately.
+  if (ps.firstSearchDone) {
+    const gapRemaining = GLOBAL_SEARCH_GAP_MS - (Date.now() - lastSearchStartedAt);
+    if (gapRemaining > 0) {
+      clearTimeout(ps.dwellTimer);
+      ps.dwellTimer = setTimeout(() => {
+        ps.dwellTimer = null;
+        if (ps.mode === 'auto') doSearch(key);
+      }, gapRemaining);
+      return;
+    }
   }
+  ps.firstSearchDone = true;
 
   const now = Date.now();
   lastSearchStartedAt    = now;
@@ -1278,6 +1282,7 @@ function startAllIdleRotation() {
       lastTrustedInputAt: 0,     // Date.now() of last panel-activity IPC; used to rescue first-click race
       loadTimer:          null,  // LOAD_TIMEOUT_MS watchdog set in doSearch, cleared on load end
       retryCount:         0,     // exponential-backoff attempt counter; reset on successful load
+      firstSearchDone:    false, // set true after first search; skips global gap on first load
       searchLoadStartedAt: 0,    // Date.now() when doSearch called loadURL; used for timing log
       lastNavStatus:      0,     // HTTP response code from did-navigate; carried into did-finish-load log
     });
