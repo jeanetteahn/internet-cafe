@@ -10,4 +10,8 @@ contextBridge.exposeInMainWorld('kioskForkKnife', {
   goForward: () => {
     ipcRenderer.send('forkknife-forward');
   },
+  dragStart: () => { ipcRenderer.send('forkknife-drag-start'); },
+  dragMove:  () => { ipcRenderer.send('forkknife-drag-move'); },
+  dragEnd:   () => { ipcRenderer.send('forkknife-drag-end'); },
+  dragReset: () => { ipcRenderer.send('forkknife-drag-reset'); },
 });
