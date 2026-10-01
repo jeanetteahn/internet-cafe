@@ -104,7 +104,7 @@ const INITIAL_LOAD_STAGGER_MS = 1500;
 // HARDWARE_MARGIN: transparent padding (px) on every side of each panel window.
 // The frame page (kiosk-handle.html) draws the orange border and hinge SVGs
 // inside this margin so they appear to float around the browser content.
-const HARDWARE_MARGIN  = 18;
+const HARDWARE_MARGIN  = 30;
 // USE_WINDOW_SHAPE: on Linux, call win.setShape() to cut out the four opaque
 // corner squares (HARDWARE_MARGIN × HARDWARE_MARGIN each) so clicks in those
 // areas fall through to the wallpaper rather than landing on the transparent
@@ -387,20 +387,37 @@ function positionGrip(key) {
   grip.setBounds({ x: w - GRIP_SIZE - M, y: h - GRIP_SIZE - M, width: GRIP_SIZE, height: GRIP_SIZE });
 }
 
+// Which frame corners have hinge pieces (corner-t or corner-hinge) per panel.
+// Corners listed here are included in the window shape so clicks on the
+// pieces register rather than falling through to the wallpaper.
+const PANEL_CORNER_PIECES = {
+  hub:         ['corner-br'],
+  topLeft:     ['corner-bl'],
+  topRight:    ['corner-tl', 'corner-tr'],
+  bottomLeft:  ['corner-tl', 'corner-br'],
+  bottomRight: ['corner-bl'],
+};
+
 function updateWindowShape(key) {
   if (!USE_WINDOW_SHAPE || process.platform !== 'linux') return;
   const win = panelWindows.get(key);
   if (!win || win.isDestroyed()) return;
   const [w, h] = win.getContentSize();
   const M = HARDWARE_MARGIN;
-  // Exclude the four transparent corner squares (M×M each) so clicks there
-  // fall through to the wallpaper.  Three overlapping rects form a cross that
-  // covers everything else including all hinge positions on the edge strips.
-  win.setShape([
+  // Base cross: three rects that cover the frame and edge strips, leaving the
+  // four M×M corner areas excluded so clicks there fall through to wallpaper.
+  const rects = [
     { x: M,     y: 0, width: w - 2 * M, height: h         },
     { x: 0,     y: M, width: M,         height: h - 2 * M },
     { x: w - M, y: M, width: M,         height: h - 2 * M },
-  ]);
+  ];
+  // Add back any corners that have hinge pieces so those pieces are clickable.
+  const corners = PANEL_CORNER_PIECES[key] || [];
+  if (corners.includes('corner-tl')) rects.push({ x: 0,     y: 0,     width: M, height: M });
+  if (corners.includes('corner-tr')) rects.push({ x: w - M, y: 0,     width: M, height: M });
+  if (corners.includes('corner-bl')) rects.push({ x: 0,     y: h - M, width: M, height: M });
+  if (corners.includes('corner-br')) rects.push({ x: w - M, y: h - M, width: M, height: M });
+  win.setShape(rects);
 }
 
 function startResize(key, offset) {
