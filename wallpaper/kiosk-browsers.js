@@ -111,6 +111,12 @@ const HARDWARE_MARGIN  = 18;
 // window surface.  Set to false if setShape() causes compositor artefacts.
 const USE_WINDOW_SHAPE = true;
 
+// ---- Forkknife nav control --------------------------------------------------
+// Position (px) from the top-left corner of the kiosk display's work area.
+const FORKKNIFE_POSITION = { x: 24, y: 24 };
+const FORKKNIFE_WIN_W    = 248; // 61.72 SVG units × ~4
+const FORKKNIFE_WIN_H    =  88; // 21.86 SVG units × ~4
+
 // ---- Active-panel animation tunables ----------------------------------------
 // When a customer starts using a panel it grows to ACTIVE_SCALE × its home
 // size; when it goes idle it shrinks back.  The tween runs at ~60 fps via
@@ -164,6 +170,7 @@ const webContentsIdToKey = new Map();
 // Both must be module-level so V8 cannot GC the interval references.
 const tweenTimers = new Map(); // key -> interval-id | null
 let   enlargedKey = null;      // panel key currently enlarged, or null
+let forkKnifeWindow = null;    // standalone forkknife nav control window
 
 // ---- Layout -----------------------------------------------------------------
 
@@ -557,6 +564,34 @@ function resetPanelLayout(key) {
   sendPanelHome(key);
 }
 
+// ---- Forkknife nav helpers --------------------------------------------------
+
+// Returns the key of the most recently active panel, or 'hub' as fallback.
+function getActiveKey() {
+  let bestKey  = 'hub';
+  let bestTime = -1;
+  for (const [k, ps] of panelStates) {
+    if (ps.mode === 'active' && ps.lastTrustedInputAt > bestTime) {
+      bestKey  = k;
+      bestTime = ps.lastTrustedInputAt;
+    }
+  }
+  return bestKey;
+}
+
+// Sends the current nav state of the active panel to the forkknife window.
+function pushForkKnifeNavState() {
+  if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+  const key  = getActiveKey();
+  const view = panelViews[key];
+  if (!view || view.webContents.isDestroyed()) return;
+  const state = {
+    canGoBack:    canGoBack(view.webContents),
+    canGoForward: canGoForward(view.webContents),
+  };
+  forkKnifeWindow.webContents.send('forkknife-nav-state', state);
+}
+
 // ---- Activity ---------------------------------------------------------------
 
 // eventType is the DOM event type from kiosk-preload.js ('mousedown', 'click',
@@ -571,6 +606,7 @@ function notePanelActivity(key, eventType) {
     stopBrowsingLoop(key);
     ps.mode = 'active';
     sendModeToHandle(key, 'active');
+    pushForkKnifeNavState();
   }
 
   clearTimeout(ps.inactivityTimer);
@@ -589,6 +625,7 @@ function notePanelActivity(key, eventType) {
     ps.manualLayout = false;
     sendModeToHandle(key, 'auto');
     startBrowsingLoop(key);
+    pushForkKnifeNavState();
   }, INACTIVITY_TIMEOUT_MS);
 
   // Only deliberate events enlarge the panel.
@@ -696,17 +733,11 @@ function setupViewEventHandlers(key, win, view) {
       }
     }
 
-    const backEnabled = canGoBack(view.webContents);
-    const fwdEnabled  = canGoForward(view.webContents);
-    const w = panelWindows.get(key);
-    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled, canGoForward: fwdEnabled });
+    pushForkKnifeNavState();
   });
 
   view.webContents.on('did-navigate-in-page', () => {
-    const backEnabled = canGoBack(view.webContents);
-    const fwdEnabled  = canGoForward(view.webContents);
-    const w = panelWindows.get(key);
-    if (w && !w.isDestroyed()) w.webContents.send('panel-nav-state', { canGoBack: backEnabled, canGoForward: fwdEnabled });
+    pushForkKnifeNavState();
   });
 
   // Navigation guard -- applies to all page-initiated navigations (meta-refresh,
@@ -1013,6 +1044,39 @@ function stopBrowsingLoop(key) {
   ps.loadTimer          = null;
 }
 
+// ---- Forkknife window -------------------------------------------------------
+
+function createForkKnifeWindow(workArea) {
+  if (forkKnifeWindow && !forkKnifeWindow.isDestroyed()) {
+    forkKnifeWindow.destroy();
+  }
+  forkKnifeWindow = new BrowserWindow({
+    x:           workArea.x + FORKKNIFE_POSITION.x,
+    y:           workArea.y + FORKKNIFE_POSITION.y,
+    width:       FORKKNIFE_WIN_W,
+    height:      FORKKNIFE_WIN_H,
+    frame:       false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable:   false,
+    movable:     false,
+    webPreferences: {
+      preload:          path.join(__dirname, 'kiosk-forkknife-preload.js'),
+      contextIsolation: true,
+      nodeIntegration:  false,
+      sandbox:          true,
+    },
+  });
+  forkKnifeWindow.loadFile(path.join(__dirname, 'kiosk-forkknife.html'));
+  forkKnifeWindow.webContents.on('dom-ready', () => {
+    forkKnifeWindow.webContents.insertCSS(PANEL_CURSOR_CSS).catch(() => {});
+  });
+  forkKnifeWindow.webContents.once('did-finish-load', () => {
+    pushForkKnifeNavState();
+  });
+}
+
 // ---- Window creation --------------------------------------------------------
 
 /**
@@ -1176,6 +1240,8 @@ function createKioskWindow() {
     console.error('[kiosk] Ctrl+Alt+D already claimed — layout dump unavailable');
   }
 
+  createForkKnifeWindow(workArea);
+
   return order.map(key => panelWindows.get(key));
 }
 
@@ -1201,9 +1267,10 @@ function attachActivityHandling() {
     notePanelActivity(key, eventType || 'unknown');
   });
 
-  ipcMain.on('panel-back', (event) => {
-    const key = webContentsIdToKey.get(event.sender.id);
-    if (!key) return;
+  ipcMain.on('forkknife-back', (event) => {
+    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+    if (event.sender !== forkKnifeWindow.webContents) return;
+    const key = getActiveKey();
     const view = panelViews[key];
     if (!view || view.webContents.isDestroyed()) return;
     if (canGoBack(view.webContents)) {
@@ -1212,9 +1279,10 @@ function attachActivityHandling() {
     }
   });
 
-  ipcMain.on('panel-forward', (event) => {
-    const key = webContentsIdToKey.get(event.sender.id);
-    if (!key) return;
+  ipcMain.on('forkknife-forward', (event) => {
+    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+    if (event.sender !== forkKnifeWindow.webContents) return;
+    const key = getActiveKey();
     const view = panelViews[key];
     if (!view || view.webContents.isDestroyed()) return;
     if (canGoForward(view.webContents)) {
