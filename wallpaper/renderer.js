@@ -1,13 +1,3 @@
-// ---- Clock ----------------------------------------------------------------
-function updateClock() {
-  const el = document.getElementById('clock');
-  el.textContent = new Date().toLocaleString(undefined, {
-    weekday: 'long', hour: 'numeric', minute: '2-digit',
-  });
-}
-updateClock();
-setInterval(updateClock, 30 * 1000);
-
 // ---- Weather ---------------------------------------------------------------
 // Weather codes -> plain-language condition (WMO codes, used by Open-Meteo)
 const WEATHER_CODES = {

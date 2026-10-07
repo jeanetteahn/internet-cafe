@@ -75,7 +75,7 @@ installing on the target machine beforehand.
 
 ## Font
 
-The weather overlay (temperature, condition, city, clock) uses Apercu,
+The weather overlay (temperature, condition, city) uses Apercu,
 loaded from `assets/fonts/Apercu.otf` via an `@font-face` rule in
 `index.html`. It only applies to text this app directly controls — the
 overlay text, not the browser wall's four search panels, since those load
