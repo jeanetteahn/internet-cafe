@@ -94,6 +94,11 @@ const SCROLL_STEP_MS         = 250;       // ms between scroll ticks
 const INACTIVITY_TIMEOUT_MS  = 90 * 1000; // idle grace period before auto mode resumes
 const LOAD_TIMEOUT_MS        = 15 * 1000; // per-panel watchdog: abort and retry if a DDG load takes longer
 const GLOBAL_SEARCH_GAP_MS   =  2 * 1000; // minimum gap between any two panels starting a DDG search
+const FOLLOW_RESULT_PROBABILITY = 1.0;        // chance of clicking a result after a search scroll; < 1 mixes in plain searches
+const RESULT_DWELL_MS           = 25 * 1000;  // max time on a result page before returning to search
+const RESULT_LOAD_TIMEOUT_MS    = 12 * 1000;  // watchdog: abort a stalled result page load, move to next search
+const RESULT_HIGHLIGHT_MS       = 600;         // visual highlight duration (ms) on the chosen anchor before navigating
+const AUTO_LINK_POLICY          = 'allowlist'; // 'allowlist' = only ALLOWED_DOMAINS; 'browsing' = use isPassesPolicy
 
 // ---- Window / layout tunables -----------------------------------------------
 const HANDLE_HEIGHT         = 28;
@@ -154,7 +159,9 @@ const panelViews      = {};        // key -> BrowserView (visible panel content)
 const gripViews       = {};        // key -> BrowserView (resize grip overlay)
 const panelStates     = new Map(); // key -> { mode, inactivityTimer, searchIndex,
                                    //          lastSearchTime, manualLayout,
-                                   //          dwellTimer, scrollTimer, rotationStartTimer }
+                                   //          dwellTimer, scrollTimer, rotationStartTimer,
+                                   //          autoPhase, recentResultUrls,
+                                   //          highlightTimer, resultDwellTimer }
 const ignoreNextMoves = new Map(); // key -> timeout-id | null
 const resizeState     = new Map(); // key -> { startBounds, cornerDx, cornerDy } | null
 
@@ -305,8 +312,11 @@ function unwrapDdgRedirect(url) {
   // for click-tracking.  That page renders nothing itself, causing a black
   // panel until the redirect resolves.  Pull the real destination out of the
   // 'uddg' param and return it so the panel can load the target directly.
+  // Also handles protocol-relative hrefs (//duckduckgo.com/l/?...) that the
+  // browser may return as-is before fully resolving them.
   // Returns null if the URL is not a DDG /l/ redirect or the target is not http/https.
   try {
+    if (typeof url === 'string' && url.startsWith('//')) url = 'https:' + url;
     if (!isDdgHost(url)) return null;
     const parsed = new URL(url);
     if (parsed.pathname !== '/l/') return null;
@@ -593,6 +603,8 @@ function notePanelActivity(key, eventType) {
     console.log(`[kiosk-auto] ${key} -> active (reason: ${eventType})`);
     stopBrowsingLoop(key);
     ps.mode = 'active';
+    const _v = panelViews[key];
+    if (_v && !_v.webContents.isDestroyed()) _v.webContents.setAudioMuted(false);
     sendModeToHandle(key, 'active');
   }
 
@@ -646,11 +658,13 @@ function setupViewEventHandlers(key, win, view) {
 
     // Placeholder and blank pages are never real content.
     if (url.startsWith('data:') || url === 'about:blank') return;
-    // Cached file — start scrolling immediately but don't treat it as a
-    // completed search (watchdog, retryCount, and timing logs stay untouched).
+    // Cached file — start the scroll+dwell loop immediately but don't treat it
+    // as a completed DDG search (watchdog, retryCount, and timing logs stay
+    // untouched).  We still go through onSearchPageReady so the follow-a-result
+    // step is reachable even while waiting for the real DDG response.
     if (url.startsWith('file:')) {
       const ps = panelStates.get(key);
-      if (ps && ps.mode === 'auto') startScrolling(key);
+      if (ps && ps.mode === 'auto') onSearchPageReady(key);
       return;
     }
 
@@ -660,33 +674,36 @@ function setupViewEventHandlers(key, win, view) {
       console.log(`[kiosk-timing] ${key} did-finish-load: +${timingMs()} ms`);
     }
 
-    if (true) {
+    {
       const ps = panelStates.get(key);
       if (ps && ps.mode === 'auto') {
-        // Clear watchdog and reset backoff — this was a successful load.
         clearTimeout(ps.loadTimer);
-        ps.loadTimer  = null;
-        ps.retryCount = 0;
+        ps.loadTimer = null;
 
-        // Per-search timing log.
-        if (ps.searchLoadStartedAt) {
-          const elapsed = Date.now() - ps.searchLoadStartedAt;
-          const status  = ps.lastNavStatus || 200;
-          console.log(`[kiosk-timing] ${key} search #${ps.searchIndex} took ${elapsed} ms (status ${status})`);
-          ps.searchLoadStartedAt = 0;
-          ps.lastNavStatus       = 0;
-        }
+        if (ps.autoPhase === 'result') {
+          // Result page loaded — do not touch retryCount or write ddg-cache.
+          onResultPageReady(key);
+        } else {
+          // Successful DDG search load — reset backoff and log timing.
+          ps.retryCount = 0;
+          if (ps.searchLoadStartedAt) {
+            const elapsed = Date.now() - ps.searchLoadStartedAt;
+            const status  = ps.lastNavStatus || 200;
+            console.log(`[kiosk-timing] ${key} search #${ps.searchIndex} took ${elapsed} ms (status ${status})`);
+            ps.searchLoadStartedAt = 0;
+            ps.lastNavStatus       = 0;
+          }
+          onSearchPageReady(key);
 
-        onSearchPageReady(key);
-
-        // Persist this DDG page so the next startup can show it immediately.
-        if (url.startsWith('https://html.duckduckgo.com/')) {
-          view.webContents.executeJavaScript('document.documentElement.outerHTML')
-            .then(html => {
-              const withBase = html.replace('<head>', '<head><base href="https://html.duckduckgo.com/">');
-              fs.writeFile(path.join(cacheDir, `${key}.html`), withBase, () => {});
-            })
-            .catch(() => {});
+          // Persist this DDG page so the next startup can show it immediately.
+          if (url.startsWith('https://html.duckduckgo.com/')) {
+            view.webContents.executeJavaScript('document.documentElement.outerHTML')
+              .then(html => {
+                const withBase = html.replace('<head>', '<head><base href="https://html.duckduckgo.com/">');
+                fs.writeFile(path.join(cacheDir, `${key}.html`), withBase, () => {});
+              })
+              .catch(() => {});
+          }
         }
       }
     }
@@ -713,7 +730,13 @@ function setupViewEventHandlers(key, win, view) {
     }
     if (ps.mode !== 'auto') return;
     console.log(`[kiosk-auto] ${key} load failed (${errorCode}): ${failedUrl}`);
-    scheduleRetry(key, `error-${errorCode}`);
+    if (ps.autoPhase === 'result') {
+      // A broken third-party page should not slow down DDG searches — skip backoff.
+      console.log(`[kiosk-auto] ${key} result failed, skipping`);
+      doSearch(key);
+    } else {
+      scheduleRetry(key, `error-${errorCode}`);
+    }
   });
 
   // Update the handle's Back button after each top-level or in-page navigation.
@@ -796,8 +819,19 @@ function setupViewEventHandlers(key, win, view) {
         console.log(`[kiosk-auto] ${key} first-click race rescued (${sinceInput} ms), activating panel`);
         notePanelActivity(key, 'click'); // transitions ps.mode to 'active'
         // Fall through to active-mode policy below.
+      } else if (ps.autoPhase === 'result') {
+        // Result page: allow page-initiated redirects (http→https, meta-refresh)
+        // that pass AUTO_LINK_POLICY; block everything else.
+        const _allowed = (AUTO_LINK_POLICY === 'allowlist') ? isDomainAllowed(url) : isPassesPolicy(url);
+        if (_allowed) {
+          console.log(`[kiosk-auto] ${key} allowed result-phase navigation: ${url}`);
+        } else {
+          event.preventDefault();
+          console.log(`[kiosk-auto] ${key} blocked result-phase navigation (policy): ${url}`);
+        }
+        return;
       } else {
-        // Auto mode with no recent trusted input: only DDG is permitted.
+        // Search phase with no recent trusted input: only DDG is permitted.
         // This blocks meta-refresh, JS redirects, and link-prefetch navs.
         if (!isDdgHost(url)) {
           event.preventDefault();
@@ -873,20 +907,38 @@ function setupViewEventHandlers(key, win, view) {
   });
 }
 
-// ---- Browsing loop (search-only) -------------------------------------------
+// ---- Browsing loop (search → result → search) --------------------------------
 //
-// Auto mode shows DuckDuckGo result pages ONLY.  No link following, no pool,
-// no preloading.  The flow per panel is:
+// Auto mode alternates between DuckDuckGo results pages and individual result
+// pages.  The per-panel flow is:
 //
-//   doSearch → page loads → onSearchPageReady → startScrolling
-//                                              → max-dwell timer (SEARCH_INTERVAL_MS)
-//                                                    |
-//              scroll tick detects bottom ──────────>|
-//                                              scrollTo(0,0) — instant jump to top
-//                                              stopScrolling
-//                                              → Math.max(BOTTOM_HOLD_MS,
-//                                                  MIN_SEARCH_INTERVAL_MS - elapsed)
-//                                              → doSearch (next keyword) …
+//   doSearch → DDG page loads → onSearchPageReady → startScrolling
+//              (or cached file)                   → SEARCH_INTERVAL_MS dwell cap
+//              scroll tick detects bottom ─────────>|
+//                                             scrollTo(0,0)
+//                                             stopScrolling
+//                                             → onSearchBottom
+//                                               (respects FOLLOW_RESULT_PROBABILITY)
+//                                               ├─ pick eligible result (AUTO_LINK_POLICY,
+//                                               │   ad-skip, recentResultUrls filter)
+//                                               │  highlight anchor (RESULT_HIGHLIGHT_MS)
+//                                               │  ps.autoPhase = 'result'
+//                                               │  loadURL(target)
+//                                               │  → onResultPageReady → startScrolling
+//                                               │                       → RESULT_DWELL_MS cap
+//                                               │  scroll detects bottom → doSearch(next) …
+//                                               └─ (no eligible result or probability skip)
+//                                                  → doSearch(next term) …
+//
+// Safety rules:
+//   • Audio is muted on auto-mode entry; unmuted on customer takeover.
+//   • Result pages are never written to the DDG cache.
+//   • Load failures/timeouts on result pages skip retryCount so broken
+//     third-party sites don't slow down DDG searches.
+//   • AUTO_LINK_POLICY guards eligible result targets.
+//   • Ads (.result--ad, .badge--ad) are always skipped.
+//   • When a DDG search is in-flight (ps.loadTimer set), the search-phase
+//     scroll bottom does not advance — onSearchPageReady takes over on landing.
 
 function startScrolling(key) {
   const ps = panelStates.get(key);
@@ -899,13 +951,27 @@ function startScrolling(key) {
 
     let atBottom = false;
     try {
-      // Scroll one step and return whether the page bottom has been reached.
-      // executeJavaScript does NOT dispatch wheel events, so it cannot trigger
-      // the isTrusted customer-activity check in kiosk-preload.js.
+      // Scroll one step and check for bottom.  executeJavaScript is not a
+      // trusted event so it cannot trigger customer-activity detection in
+      // kiosk-preload.js.
+      //
+      // Bottom detection: document.scrollingElement handles quirks-mode and
+      // arbitrary sites.  "scrollY didn't change after scrollBy" is treated
+      // as the bottom for pages that scroll an inner container or block
+      // window scrolling.
       atBottom = await view.webContents.executeJavaScript(`
         (function () {
+          var prevY = (typeof window.__kioskPrevScrollY === 'number')
+            ? window.__kioskPrevScrollY : window.scrollY;
           window.scrollBy(0, ${SCROLL_STEP_PX});
-          return window.scrollY + window.innerHeight >= document.body.scrollHeight - 4;
+          var newY = window.scrollY;
+          window.__kioskPrevScrollY = newY;
+          if (newY === prevY) return true;
+          var scroller = document.scrollingElement || document.documentElement;
+          if (!scroller) return true;
+          var body = document.body;
+          var scrollH = Math.max(scroller.scrollHeight, body ? body.scrollHeight : 0);
+          return newY + window.innerHeight >= scrollH - 4;
         })()
       `, false);
     } catch {
@@ -914,7 +980,7 @@ function startScrolling(key) {
 
     if (!atBottom) return;
 
-    // Jump to the top instantly so the panel never looks frozen.
+    // Snap to top so the panel never looks frozen.
     try {
       await view.webContents.executeJavaScript(`window.scrollTo(0, 0)`, false);
     } catch {
@@ -924,25 +990,29 @@ function startScrolling(key) {
     // Re-check state after the second await.
     if (ps.mode !== 'auto' || ps.scrollTimer === null) return;
 
-    // A live search is already in-flight — keep scrolling and let
-    // onSearchPageReady take over when it lands.
-    if (ps.loadTimer) return;
+    if (ps.autoPhase === 'result') {
+      // Result page bottom: wait the normal hold floor then fetch the next search.
+      const sinceLastSearch = Date.now() - ps.lastSearchTime;
+      const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+      stopScrolling(key);
+      clearTimeout(ps.resultDwellTimer);
+      ps.resultDwellTimer = null;
+      console.log(`[kiosk-auto] ${key} result bottom — next search in ${holdMs} ms`);
+      ps.dwellTimer = setTimeout(() => {
+        ps.dwellTimer = null;
+        if (ps.mode === 'auto') doSearch(key);
+      }, holdMs);
+    } else {
+      // Search phase: don't advance if a DDG load is still in-flight — let
+      // onSearchPageReady take over when the real page lands.
+      if (ps.loadTimer) return;
 
-    // Always advance to the next search term.  The hold is normally just
-    // BOTTOM_HOLD_MS (300 ms); MIN_SEARCH_INTERVAL_MS adds extra delay only
-    // when the page was scrolled through unusually fast (very short page).
-    const sinceLastSearch = Date.now() - ps.lastSearchTime;
-    const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
-
-    stopScrolling(key);
-    clearTimeout(ps.dwellTimer); // cancel the max-dwell safety net
-    ps.dwellTimer = null;
-    console.log(`[kiosk-auto] ${key} bottom — next search in ${holdMs} ms`);
-
-    ps.dwellTimer = setTimeout(() => {
+      stopScrolling(key);
+      clearTimeout(ps.dwellTimer);
       ps.dwellTimer = null;
-      if (ps.mode === 'auto') doSearch(key);
-    }, holdMs);
+      console.log(`[kiosk-auto] ${key} search bottom — picking result`);
+      onSearchBottom(key); // async chain; manages its own timers from here
+    }
   }, SCROLL_STEP_MS);
 }
 
@@ -970,7 +1040,7 @@ function onSearchPageReady(key) {
     ps.dwellTimer = null;
     if (ps.mode !== 'auto') return;
     stopScrolling(key);
-    doSearch(key);
+    onSearchBottom(key); // respect FOLLOW_RESULT_PROBABILITY even on the dwell cap
   }, SEARCH_INTERVAL_MS);
 }
 
@@ -991,9 +1061,178 @@ function scheduleRetry(key, reason) {
   console.log(`[kiosk-auto] ${key} retry in ${delay} ms (reason: ${reason}, attempt: ${ps.retryCount})`);
 }
 
+// Collects eligible result links from the current DDG results page, unwraps
+// DDG /l/ redirects, applies AUTO_LINK_POLICY, and returns { domHref, target }
+// for a randomly chosen link, or null if no eligible links are found.
+async function pickRandomResult(key) {
+  const view = panelViews[key];
+  if (!view || view.webContents.isDestroyed()) return null;
+
+  let domHrefs;
+  try {
+    // a.href is the browser-resolved absolute URL (preserves DDG /l/ redirects).
+    // Anything nested inside .result--ad or .badge--ad is skipped.
+    domHrefs = await view.webContents.executeJavaScript(`
+      (function () {
+        var adEls = new Set(Array.from(
+          document.querySelectorAll('.result--ad .result__a, .badge--ad .result__a')
+        ));
+        return Array.from(document.querySelectorAll('a.result__a'))
+          .filter(function (a) { return !adEls.has(a); })
+          .map(function (a) { return a.href; });
+      })()
+    `, false);
+  } catch {
+    return null;
+  }
+
+  if (!Array.isArray(domHrefs) || domHrefs.length === 0) return null;
+
+  const ps = panelStates.get(key);
+  const recentUrls = ps ? ps.recentResultUrls : [];
+  let total = domHrefs.length;
+  let afterPolicy = 0;
+
+  const candidates = [];
+  for (let domHref of domHrefs) {
+    // Resolve protocol-relative hrefs before unwrapping.
+    if (typeof domHref === 'string' && domHref.startsWith('//')) domHref = 'https:' + domHref;
+
+    // Unwrap DDG /l/ redirect; fall through to the raw href if already direct.
+    const unwrapped = unwrapDdgRedirect(domHref);
+    const target = (unwrapped !== null) ? unwrapped : domHref;
+
+    // Must be http/https.
+    let proto = '';
+    try { proto = new URL(target).protocol; } catch {}
+    if (proto !== 'http:' && proto !== 'https:') continue;
+
+    // Apply the auto-mode link policy.
+    const allowed = (AUTO_LINK_POLICY === 'allowlist') ? isDomainAllowed(target) : isPassesPolicy(target);
+    if (!allowed) continue;
+    afterPolicy += 1;
+
+    // Skip recently visited pages.
+    if (recentUrls.includes(target)) continue;
+
+    candidates.push({ domHref, target });
+  }
+
+  if (candidates.length === 0) {
+    console.log(`[kiosk-auto] ${key} no eligible results (${total} found, ${afterPolicy} after policy), next search`);
+    return null;
+  }
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+// Called when a search page hits the bottom (or the SEARCH_INTERVAL_MS dwell
+// cap fires).  Respects FOLLOW_RESULT_PROBABILITY; when following, picks a
+// random eligible result, highlights it briefly, then loads it in the panel.
+async function onSearchBottom(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
+
+  // Occasionally skip result-following to mix in pure search-only cycles.
+  if (Math.random() > FOLLOW_RESULT_PROBABILITY) {
+    const sinceLastSearch = Date.now() - ps.lastSearchTime;
+    const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+    console.log(`[kiosk-auto] ${key} skipping result (probability), next search in ${holdMs} ms`);
+    ps.dwellTimer = setTimeout(() => {
+      ps.dwellTimer = null;
+      if (ps.mode === 'auto') doSearch(key);
+    }, holdMs);
+    return;
+  }
+
+  const result = await pickRandomResult(key);
+
+  // Re-check mode after async operation.
+  if (ps.mode !== 'auto') return;
+
+  if (!result) {
+    const sinceLastSearch = Date.now() - ps.lastSearchTime;
+    const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+    ps.dwellTimer = setTimeout(() => {
+      ps.dwellTimer = null;
+      if (ps.mode === 'auto') doSearch(key);
+    }, holdMs);
+    return;
+  }
+
+  console.log(`[kiosk-auto] ${key} following result: ${result.target}`);
+
+  // Highlight the chosen anchor in-page before navigating.
+  const view = panelViews[key];
+  if (!view || view.webContents.isDestroyed()) { doSearch(key); return; }
+  try {
+    await view.webContents.executeJavaScript(`
+      (function (href) {
+        var el = Array.from(document.querySelectorAll('a.result__a'))
+          .find(function (a) { return a.href === href; });
+        if (el) {
+          el.style.outline = '3px solid #ea4b00';
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
+      })(${JSON.stringify(result.domHref)})
+    `, false);
+  } catch {}
+
+  // Re-check mode after the highlight executeJavaScript.
+  if (ps.mode !== 'auto') return;
+
+  ps.highlightTimer = setTimeout(() => {
+    ps.highlightTimer = null;
+    if (ps.mode !== 'auto') return;
+    const v = panelViews[key];
+    if (!v || v.webContents.isDestroyed()) { doSearch(key); return; }
+
+    ps.autoPhase = 'result';
+    ps.recentResultUrls.push(result.target);
+    if (ps.recentResultUrls.length > 20) ps.recentResultUrls.shift();
+
+    // Arm result load watchdog — fires if did-finish-load/did-fail-load never arrive.
+    clearTimeout(ps.loadTimer);
+    ps.loadTimer = setTimeout(() => {
+      ps.loadTimer = null;
+      if (ps.mode !== 'auto') return;
+      console.log(`[kiosk-auto] ${key} result load timed out, skipping`);
+      doSearch(key);
+    }, RESULT_LOAD_TIMEOUT_MS);
+
+    v.webContents.loadURL(result.target).catch(err => {
+      clearTimeout(ps.loadTimer);
+      ps.loadTimer = null;
+      if (ps.mode !== 'auto') return;
+      console.log(`[kiosk-auto] ${key} result load rejected: ${err.message}, skipping`);
+      doSearch(key);
+    });
+  }, RESULT_HIGHLIGHT_MS);
+}
+
+// Called after a result page finishes loading.  Starts the scroll loop and
+// arms RESULT_DWELL_MS as a safety net in case bottom detection never fires.
+function onResultPageReady(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
+
+  const url = panelViews[key]?.webContents.getURL() || '';
+  console.log(`[kiosk-auto] ${key} result page ready: ${url}`);
+
+  startScrolling(key);
+
+  clearTimeout(ps.resultDwellTimer);
+  ps.resultDwellTimer = setTimeout(() => {
+    ps.resultDwellTimer = null;
+    if (ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
+    stopScrolling(key);
+    doSearch(key);
+  }, RESULT_DWELL_MS);
+}
+
 function doSearch(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
+  ps.autoPhase = 'search';
 
   // Global search gate: space out DDG hits across all panels.
   // Skipped for each panel's very first search so windows fill immediately.
@@ -1051,7 +1290,10 @@ function startBrowsingLoop(key) {
   const ps = panelStates.get(key);
   if (!ps) return;
   stopBrowsingLoop(key);
-  ps.mode = 'auto';
+  ps.mode      = 'auto';
+  ps.autoPhase = 'search';
+  const view = panelViews[key];
+  if (view && !view.webContents.isDestroyed()) view.webContents.setAudioMuted(true);
   doSearch(key);
 }
 
@@ -1063,10 +1305,14 @@ function stopBrowsingLoop(key) {
   clearInterval(ps.scrollTimer);
   clearTimeout(ps.rotationStartTimer);
   clearTimeout(ps.loadTimer);
+  clearTimeout(ps.highlightTimer);    // RESULT_HIGHLIGHT_MS pause before navigating to a result
+  clearTimeout(ps.resultDwellTimer);  // RESULT_DWELL_MS cap on result pages
   ps.dwellTimer         = null;
   ps.scrollTimer        = null;
   ps.rotationStartTimer = null;
   ps.loadTimer          = null;
+  ps.highlightTimer     = null;
+  ps.resultDwellTimer   = null;
 }
 
 // ---- Window creation --------------------------------------------------------
@@ -1329,6 +1575,10 @@ function startAllIdleRotation() {
       firstSearchDone:    false, // set true after first search; skips global gap on first load
       searchLoadStartedAt: 0,    // Date.now() when doSearch called loadURL; used for timing log
       lastNavStatus:      0,     // HTTP response code from did-navigate; carried into did-finish-load log
+      autoPhase:          'search', // 'search' | 'result' — current phase of the auto loop
+      recentResultUrls:   [],       // recently visited result URLs (max ~20); prevents re-visiting the same page
+      highlightTimer:     null,     // RESULT_HIGHLIGHT_MS timeout before navigating to a chosen result
+      resultDwellTimer:   null,     // RESULT_DWELL_MS cap on result pages before returning to search
     });
 
     // Stagger first loads by INITIAL_LOAD_STAGGER_MS so all five panels show
@@ -1342,6 +1592,7 @@ function startAllIdleRotation() {
     panelStates.get(key).rotationStartTimer = timer;
   });
   windowsCreatedAt = Date.now();
+  console.log(`[kiosk-auto] link-following enabled (policy: ${AUTO_LINK_POLICY}, probability: ${FOLLOW_RESULT_PROBABILITY})`);
 }
 
 // ---- Exports ----------------------------------------------------------------
