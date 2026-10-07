@@ -1,6 +1,10 @@
-const { BrowserWindow, BrowserView, screen, ipcMain, globalShortcut, session } = require('electron');
+const { app, BrowserWindow, BrowserView, screen, ipcMain, globalShortcut, session } = require('electron');
 const path = require('path');
 const fs   = require('fs');
+
+// DDG result cache — one HTML file per panel, loaded as the startup placeholder.
+const cacheDir = path.join(app.getPath('userData'), 'ddg-cache');
+try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) {}
 
 // ---- Spoon cursor -----------------------------------------------------------
 // Pre-computed once at module init so every renderer can get the same rule.
@@ -91,6 +95,12 @@ const SCROLL_STEP_MS         = 250;       // ms between scroll ticks
 const INACTIVITY_TIMEOUT_MS  = 90 * 1000; // idle grace period before auto mode resumes
 const LOAD_TIMEOUT_MS        = 15 * 1000; // per-panel watchdog: abort and retry if a DDG load takes longer
 const GLOBAL_SEARCH_GAP_MS   =  2 * 1000; // minimum gap between any two panels starting a DDG search
+const FOLLOW_RESULT_PROBABILITY = 1.0;        // chance of clicking a result after a search scroll; < 1 mixes in plain searches
+const RESULT_DWELL_MS           = 25 * 1000;  // max time on a result page before returning to search
+const RESULT_LOAD_TIMEOUT_MS    = 12 * 1000;  // watchdog: abort a stalled result page load, move to next search
+const RESULT_HIGHLIGHT_MS       = 600;         // visual highlight duration (ms) on the chosen anchor before navigating
+const AUTO_LINK_POLICY          = 'allowlist-preferred'; // 'allowlist-preferred' = prefer ALLOWED_DOMAINS, fall back to isPassesPolicy;
+                                                          // 'allowlist' = only ALLOWED_DOMAINS; 'browsing' = use isPassesPolicy
 
 // ---- Window / layout tunables -----------------------------------------------
 const HANDLE_HEIGHT         = 28;
@@ -99,13 +109,13 @@ const MIN_VISIBLE_PX        = 120;
 const GRIP_SIZE             = 18;
 const MIN_PANEL_WIDTH       = 320;
 const MIN_PANEL_HEIGHT      = 220;
-const INITIAL_LOAD_STAGGER_MS = 1500;
+const INITIAL_LOAD_STAGGER_MS = 300;
 
 // ---- Hardware-overlay tunables ----------------------------------------------
 // HARDWARE_MARGIN: transparent padding (px) on every side of each panel window.
 // The frame page (kiosk-handle.html) draws the orange border and hinge SVGs
 // inside this margin so they appear to float around the browser content.
-const HARDWARE_MARGIN  = 18;
+const HARDWARE_MARGIN  = 36;
 // USE_WINDOW_SHAPE: on Linux, call win.setShape() to cut out the four opaque
 // corner squares (HARDWARE_MARGIN × HARDWARE_MARGIN each) so clicks in those
 // areas fall through to the wallpaper rather than landing on the transparent
@@ -144,6 +154,7 @@ const PLACEHOLDER_URL = 'data:text/html,' + encodeURIComponent(
 
 // ---- Startup timing ---------------------------------------------------------
 let _t0 = 0;
+let windowsCreatedAt = 0; // set when createKioskWindow finishes; move events within 5 s are ignored
 // Timestamp of the last doSearch loadURL call across ALL panels.  Enforces
 // GLOBAL_SEARCH_GAP_MS so no two panels hit DDG within that window.
 let lastSearchStartedAt = 0;
@@ -162,7 +173,9 @@ const panelViews      = {};        // key -> BrowserView (visible panel content)
 const gripViews       = {};        // key -> BrowserView (resize grip overlay)
 const panelStates     = new Map(); // key -> { mode, inactivityTimer, searchIndex,
                                    //          lastSearchTime, manualLayout,
-                                   //          dwellTimer, scrollTimer, rotationStartTimer }
+                                   //          dwellTimer, scrollTimer, rotationStartTimer,
+                                   //          autoPhase, recentResultUrls,
+                                   //          highlightTimer, resultDwellTimer }
 const ignoreNextMoves = new Map(); // key -> timeout-id | null
 const resizeState     = new Map(); // key -> { startBounds, cornerDx, cornerDy } | null
 
@@ -316,8 +329,11 @@ function unwrapDdgRedirect(url) {
   // for click-tracking.  That page renders nothing itself, causing a black
   // panel until the redirect resolves.  Pull the real destination out of the
   // 'uddg' param and return it so the panel can load the target directly.
+  // Also handles protocol-relative hrefs (//duckduckgo.com/l/?...) that the
+  // browser may return as-is before fully resolving them.
   // Returns null if the URL is not a DDG /l/ redirect or the target is not http/https.
   try {
+    if (typeof url === 'string' && url.startsWith('//')) url = 'https:' + url;
     if (!isDdgHost(url)) return null;
     const parsed = new URL(url);
     if (parsed.pathname !== '/l/') return null;
@@ -403,20 +419,37 @@ function positionGrip(key) {
   grip.setBounds({ x: w - GRIP_SIZE - M, y: h - GRIP_SIZE - M, width: GRIP_SIZE, height: GRIP_SIZE });
 }
 
+// Which frame corners have hinge pieces (corner-t or corner-hinge) per panel.
+// Corners listed here are included in the window shape so clicks on the
+// pieces register rather than falling through to the wallpaper.
+const PANEL_CORNER_PIECES = {
+  hub:         [],
+  topLeft:     [],
+  topRight:    [],
+  bottomLeft:  [],
+  bottomRight: [],
+};
+
 function updateWindowShape(key) {
   if (!USE_WINDOW_SHAPE || process.platform !== 'linux') return;
   const win = panelWindows.get(key);
   if (!win || win.isDestroyed()) return;
   const [w, h] = win.getContentSize();
   const M = HARDWARE_MARGIN;
-  // Exclude the four transparent corner squares (M×M each) so clicks there
-  // fall through to the wallpaper.  Three overlapping rects form a cross that
-  // covers everything else including all hinge positions on the edge strips.
-  win.setShape([
+  // Base cross: three rects that cover the frame and edge strips, leaving the
+  // four M×M corner areas excluded so clicks there fall through to wallpaper.
+  const rects = [
     { x: M,     y: 0, width: w - 2 * M, height: h         },
     { x: 0,     y: M, width: M,         height: h - 2 * M },
     { x: w - M, y: M, width: M,         height: h - 2 * M },
-  ]);
+  ];
+  // Add back any corners that have hinge pieces so those pieces are clickable.
+  const corners = PANEL_CORNER_PIECES[key] || [];
+  if (corners.includes('corner-tl')) rects.push({ x: 0,     y: 0,     width: M, height: M });
+  if (corners.includes('corner-tr')) rects.push({ x: w - M, y: 0,     width: M, height: M });
+  if (corners.includes('corner-bl')) rects.push({ x: 0,     y: h - M, width: M, height: M });
+  if (corners.includes('corner-br')) rects.push({ x: w - M, y: h - M, width: M, height: M });
+  win.setShape(rects);
 }
 
 function startResize(key, offset) {
@@ -612,8 +645,11 @@ function notePanelActivity(key, eventType) {
   if (!ps) return;
 
   if (ps.mode === 'auto') {
+    console.log(`[kiosk-auto] ${key} -> active (reason: ${eventType})`);
     stopBrowsingLoop(key);
     ps.mode = 'active';
+    const _v = panelViews[key];
+    if (_v && !_v.webContents.isDestroyed()) _v.webContents.setAudioMuted(false);
     sendModeToHandle(key, 'active');
     pushForkKnifeNavState();
   }
@@ -667,30 +703,59 @@ function setupViewEventHandlers(key, win, view) {
   view.webContents.on('did-finish-load', () => {
     const url = view.webContents.getURL();
 
+    // Placeholder and blank pages are never real content.
+    if (url.startsWith('data:') || url === 'about:blank') return;
+    // Cached file — start the scroll+dwell loop immediately but don't treat it
+    // as a completed DDG search (watchdog, retryCount, and timing logs stay
+    // untouched).  We still go through onSearchPageReady so the follow-a-result
+    // step is reachable even while waiting for the real DDG response.
+    if (url.startsWith('file:')) {
+      const ps = panelStates.get(key);
+      if (ps && ps.mode === 'auto') onSearchPageReady(key);
+      return;
+    }
+
     // [kiosk-timing] first real page per panel.
-    if (!firstLoadLogged.has(key) && !url.startsWith('data:')) {
+    if (!firstLoadLogged.has(key)) {
       firstLoadLogged.add(key);
       console.log(`[kiosk-timing] ${key} did-finish-load: +${timingMs()} ms`);
     }
 
-    if (!url.startsWith('data:') && url !== 'about:blank') {
+    {
       const ps = panelStates.get(key);
       if (ps && ps.mode === 'auto') {
-        // Clear watchdog and reset backoff — this was a successful load.
         clearTimeout(ps.loadTimer);
-        ps.loadTimer  = null;
-        ps.retryCount = 0;
+        ps.loadTimer = null;
 
-        // Per-search timing log.
-        if (ps.searchLoadStartedAt) {
-          const elapsed = Date.now() - ps.searchLoadStartedAt;
-          const status  = ps.lastNavStatus || 200;
-          console.log(`[kiosk-timing] ${key} search #${ps.searchIndex} took ${elapsed} ms (status ${status})`);
-          ps.searchLoadStartedAt = 0;
-          ps.lastNavStatus       = 0;
+        if (ps.autoPhase === 'result') {
+          // Result page loaded — do not touch retryCount or write ddg-cache.
+          onResultPageReady(key);
+        } else {
+          // Successful DDG search load — reset backoff and log timing.
+          ps.retryCount = 0;
+          if (ps.searchLoadStartedAt) {
+            const elapsed = Date.now() - ps.searchLoadStartedAt;
+            const status  = ps.lastNavStatus || 200;
+            console.log(`[kiosk-timing] ${key} search #${ps.searchIndex} took ${elapsed} ms (status ${status})`);
+            ps.searchLoadStartedAt = 0;
+            ps.lastNavStatus       = 0;
+          }
+          onSearchPageReady(key);
+
+          // Persist this DDG page so the next startup can show it immediately.
+          // Skip write if there are no result links (bot-check / empty SERP).
+          if (url.startsWith('https://html.duckduckgo.com/')) {
+            view.webContents.executeJavaScript(
+              'document.querySelector("a.result__a") ? document.documentElement.outerHTML : null'
+            )
+              .then(html => {
+                if (!html) return;
+                const withBase = html.replace('<head>', '<head><base href="https://html.duckduckgo.com/">');
+                fs.writeFile(path.join(cacheDir, `${key}.html`), withBase, () => {});
+              })
+              .catch(() => {});
+          }
         }
-
-        onSearchPageReady(key);
       }
     }
   });
@@ -703,7 +768,7 @@ function setupViewEventHandlers(key, win, view) {
     if (errorCode === -3) return;
     const ps = panelStates.get(key);
     if (!ps) return;
-    if (!failedUrl || failedUrl.startsWith('data:')) return;
+    if (!failedUrl || failedUrl.startsWith('data:') || failedUrl.startsWith('file:')) return;
 
     // Clear watchdog — the load definitely ended.
     clearTimeout(ps.loadTimer);
@@ -716,7 +781,13 @@ function setupViewEventHandlers(key, win, view) {
     }
     if (ps.mode !== 'auto') return;
     console.log(`[kiosk-auto] ${key} load failed (${errorCode}): ${failedUrl}`);
-    scheduleRetry(key, `error-${errorCode}`);
+    if (ps.autoPhase === 'result') {
+      // A broken third-party page should not slow down DDG searches — skip backoff.
+      console.log(`[kiosk-auto] ${key} result failed, skipping`);
+      doSearch(key);
+    } else {
+      scheduleRetry(key, `error-${errorCode}`);
+    }
   });
 
   // Update the handle's Back button after each top-level or in-page navigation.
@@ -793,8 +864,19 @@ function setupViewEventHandlers(key, win, view) {
         console.log(`[kiosk-auto] ${key} first-click race rescued (${sinceInput} ms), activating panel`);
         notePanelActivity(key, 'click'); // transitions ps.mode to 'active'
         // Fall through to active-mode policy below.
+      } else if (ps.autoPhase === 'result') {
+        // Result page: allow page-initiated redirects (http→https, meta-refresh)
+        // that pass AUTO_LINK_POLICY; block everything else.
+        const _allowed = (AUTO_LINK_POLICY === 'allowlist') ? isDomainAllowed(url) : isPassesPolicy(url);
+        if (_allowed) {
+          console.log(`[kiosk-auto] ${key} allowed result-phase navigation: ${url}`);
+        } else {
+          event.preventDefault();
+          console.log(`[kiosk-auto] ${key} blocked result-phase navigation (policy): ${url}`);
+        }
+        return;
       } else {
-        // Auto mode with no recent trusted input: only DDG is permitted.
+        // Search phase with no recent trusted input: only DDG is permitted.
         // This blocks meta-refresh, JS redirects, and link-prefetch navs.
         if (!isDdgHost(url)) {
           event.preventDefault();
@@ -870,20 +952,38 @@ function setupViewEventHandlers(key, win, view) {
   });
 }
 
-// ---- Browsing loop (search-only) -------------------------------------------
+// ---- Browsing loop (search → result → search) --------------------------------
 //
-// Auto mode shows DuckDuckGo result pages ONLY.  No link following, no pool,
-// no preloading.  The flow per panel is:
+// Auto mode alternates between DuckDuckGo results pages and individual result
+// pages.  The per-panel flow is:
 //
-//   doSearch → page loads → onSearchPageReady → startScrolling
-//                                              → max-dwell timer (SEARCH_INTERVAL_MS)
-//                                                    |
-//              scroll tick detects bottom ──────────>|
-//                                              scrollTo(0,0) — instant jump to top
-//                                              stopScrolling
-//                                              → Math.max(BOTTOM_HOLD_MS,
-//                                                  MIN_SEARCH_INTERVAL_MS - elapsed)
-//                                              → doSearch (next keyword) …
+//   doSearch → DDG page loads → onSearchPageReady → startScrolling
+//              (or cached file)                   → SEARCH_INTERVAL_MS dwell cap
+//              scroll tick detects bottom ─────────>|
+//                                             scrollTo(0,0)
+//                                             stopScrolling
+//                                             → onSearchBottom
+//                                               (respects FOLLOW_RESULT_PROBABILITY)
+//                                               ├─ pick eligible result (AUTO_LINK_POLICY,
+//                                               │   ad-skip, recentResultUrls filter)
+//                                               │  highlight anchor (RESULT_HIGHLIGHT_MS)
+//                                               │  ps.autoPhase = 'result'
+//                                               │  loadURL(target)
+//                                               │  → onResultPageReady → startScrolling
+//                                               │                       → RESULT_DWELL_MS cap
+//                                               │  scroll detects bottom → doSearch(next) …
+//                                               └─ (no eligible result or probability skip)
+//                                                  → doSearch(next term) …
+//
+// Safety rules:
+//   • Audio is muted on auto-mode entry; unmuted on customer takeover.
+//   • Result pages are never written to the DDG cache.
+//   • Load failures/timeouts on result pages skip retryCount so broken
+//     third-party sites don't slow down DDG searches.
+//   • AUTO_LINK_POLICY guards eligible result targets.
+//   • Ads (.result--ad, .badge--ad) are always skipped.
+//   • When a DDG search is in-flight (ps.loadTimer set), the search-phase
+//     scroll bottom does not advance — onSearchPageReady takes over on landing.
 
 function startScrolling(key) {
   const ps = panelStates.get(key);
@@ -896,13 +996,27 @@ function startScrolling(key) {
 
     let atBottom = false;
     try {
-      // Scroll one step and return whether the page bottom has been reached.
-      // executeJavaScript does NOT dispatch wheel events, so it cannot trigger
-      // the isTrusted customer-activity check in kiosk-preload.js.
+      // Scroll one step and check for bottom.  executeJavaScript is not a
+      // trusted event so it cannot trigger customer-activity detection in
+      // kiosk-preload.js.
+      //
+      // Bottom detection: document.scrollingElement handles quirks-mode and
+      // arbitrary sites.  "scrollY didn't change after scrollBy" is treated
+      // as the bottom for pages that scroll an inner container or block
+      // window scrolling.
       atBottom = await view.webContents.executeJavaScript(`
         (function () {
+          var prevY = (typeof window.__kioskPrevScrollY === 'number')
+            ? window.__kioskPrevScrollY : window.scrollY;
           window.scrollBy(0, ${SCROLL_STEP_PX});
-          return window.scrollY + window.innerHeight >= document.body.scrollHeight - 4;
+          var newY = window.scrollY;
+          window.__kioskPrevScrollY = newY;
+          if (newY === prevY) return true;
+          var scroller = document.scrollingElement || document.documentElement;
+          if (!scroller) return true;
+          var body = document.body;
+          var scrollH = Math.max(scroller.scrollHeight, body ? body.scrollHeight : 0);
+          return newY + window.innerHeight >= scrollH - 4;
         })()
       `, false);
     } catch {
@@ -911,7 +1025,7 @@ function startScrolling(key) {
 
     if (!atBottom) return;
 
-    // Jump to the top instantly so the panel never looks frozen.
+    // Snap to top so the panel never looks frozen.
     try {
       await view.webContents.executeJavaScript(`window.scrollTo(0, 0)`, false);
     } catch {
@@ -921,21 +1035,29 @@ function startScrolling(key) {
     // Re-check state after the second await.
     if (ps.mode !== 'auto' || ps.scrollTimer === null) return;
 
-    // Always advance to the next search term.  The hold is normally just
-    // BOTTOM_HOLD_MS (300 ms); MIN_SEARCH_INTERVAL_MS adds extra delay only
-    // when the page was scrolled through unusually fast (very short page).
-    const sinceLastSearch = Date.now() - ps.lastSearchTime;
-    const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+    if (ps.autoPhase === 'result') {
+      // Result page bottom: wait the normal hold floor then fetch the next search.
+      const sinceLastSearch = Date.now() - ps.lastSearchTime;
+      const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+      stopScrolling(key);
+      clearTimeout(ps.resultDwellTimer);
+      ps.resultDwellTimer = null;
+      console.log(`[kiosk-auto] ${key} result bottom — next search in ${holdMs} ms`);
+      ps.dwellTimer = setTimeout(() => {
+        ps.dwellTimer = null;
+        if (ps.mode === 'auto') doSearch(key);
+      }, holdMs);
+    } else {
+      // Search phase: don't advance if a DDG load is still in-flight — let
+      // onSearchPageReady take over when the real page lands.
+      if (ps.loadTimer) return;
 
-    stopScrolling(key);
-    clearTimeout(ps.dwellTimer); // cancel the max-dwell safety net
-    ps.dwellTimer = null;
-    console.log(`[kiosk-auto] ${key} bottom — next search in ${holdMs} ms`);
-
-    ps.dwellTimer = setTimeout(() => {
+      stopScrolling(key);
+      clearTimeout(ps.dwellTimer);
       ps.dwellTimer = null;
-      if (ps.mode === 'auto') doSearch(key);
-    }, holdMs);
+      console.log(`[kiosk-auto] ${key} search bottom — picking result`);
+      onSearchBottom(key); // async chain; manages its own timers from here
+    }
   }, SCROLL_STEP_MS);
 }
 
@@ -963,16 +1085,18 @@ function onSearchPageReady(key) {
     ps.dwellTimer = null;
     if (ps.mode !== 'auto') return;
     stopScrolling(key);
-    doSearch(key);
+    onSearchBottom(key); // respect FOLLOW_RESULT_PROBABILITY even on the dwell cap
   }, SEARCH_INTERVAL_MS);
 }
 
 // Schedules the next doSearch call with per-panel exponential backoff
-// (5 s, 10 s, 20 s, … capped at 60 s).  Resets to 0 on a successful load.
+// (5 s, 10 s, 20 s, … capped at 30 s).  Resets to 0 on a successful load.
 function scheduleRetry(key, reason) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
-  const delay = Math.min(5_000 * Math.pow(2, ps.retryCount), 60_000);
+  const delay = reason === 'timeout-first'
+    ? 2_000
+    : Math.min(5_000 * Math.pow(2, ps.retryCount), 60_000);
   ps.retryCount += 1;
   clearTimeout(ps.dwellTimer);
   ps.dwellTimer = setTimeout(() => {
@@ -982,20 +1106,253 @@ function scheduleRetry(key, reason) {
   console.log(`[kiosk-auto] ${key} retry in ${delay} ms (reason: ${reason}, attempt: ${ps.retryCount})`);
 }
 
-function doSearch(key) {
+// Collects eligible result links from the current DDG results page, unwraps
+// DDG /l/ redirects, applies AUTO_LINK_POLICY, and returns { domHref, target,
+// tier } for a randomly chosen link, null if no eligible links are found, or
+// { botCheck: true } if a DDG bot-challenge page is detected (caller should
+// scheduleRetry instead of doSearch).
+async function pickRandomResult(key) {
+  const view = panelViews[key];
+  if (!view || view.webContents.isDestroyed()) {
+    console.log(`[kiosk-auto] ${key} pickRandomResult: view gone`);
+    return null;
+  }
+
+  let pageInfo;
+  try {
+    // Collect hrefs from primary selector and two fallbacks, de-duplicated.
+    // a.href is the browser-resolved absolute URL (preserves DDG /l/ redirects).
+    // Anything nested inside .result--ad or .badge--ad is skipped.
+    pageInfo = await view.webContents.executeJavaScript(`
+      (function () {
+        var adEls = new Set(Array.from(
+          document.querySelectorAll('.result--ad .result__a, .badge--ad .result__a')
+        ));
+        var seen = new Set();
+        var hrefs = [];
+        var sels = ['a.result__a', '.result__title a', 'a.result-link'];
+        for (var si = 0; si < sels.length; si++) {
+          Array.from(document.querySelectorAll(sels[si])).forEach(function (a) {
+            if (adEls.has(a)) return;
+            var h = a.href;
+            if (h && !seen.has(h)) { seen.add(h); hrefs.push(h); }
+          });
+        }
+        // Bot-check: no .result elements, plus a form or bot/challenge text.
+        var hasResults = document.querySelectorAll('.result').length > 0;
+        var bodyText = document.body ? document.body.innerText.toLowerCase() : '';
+        var isBotCheck = !hasResults && (
+          document.querySelector('form') !== null ||
+          bodyText.indexOf('bot') !== -1 ||
+          bodyText.indexOf('challenge') !== -1 ||
+          bodyText.indexOf('unusual traffic') !== -1
+        );
+        return { hrefs: hrefs, isBotCheck: isBotCheck, title: document.title };
+      })()
+    `, false);
+  } catch (err) {
+    console.log(`[kiosk-auto] ${key} pickRandomResult: script failed: ${err.message}`);
+    return null;
+  }
+
+  const { hrefs: domHrefs, isBotCheck, title } = pageInfo;
+  const currentUrl = view.webContents.getURL();
+
+  if (!Array.isArray(domHrefs) || domHrefs.length === 0) {
+    if (isBotCheck) {
+      console.log(`[kiosk-auto] ${key} DDG bot-check page detected`);
+      return { botCheck: true };
+    }
+    console.log(`[kiosk-auto] ${key} pickRandomResult: 0 result links on page (${currentUrl}, title: ${title})`);
+    return null;
+  }
+
+  const ps = panelStates.get(key);
+  const recentUrls = ps ? ps.recentResultUrls : [];
+  const total = domHrefs.length;
+  let afterPolicy = 0;
+
+  // 'allowlist-preferred': two tiers — prefer ALLOWED_DOMAINS, fall back to isPassesPolicy.
+  const allowlistCandidates = [];
+  const fallbackCandidates  = [];
+
+  for (let domHref of domHrefs) {
+    // Resolve protocol-relative hrefs before unwrapping.
+    if (typeof domHref === 'string' && domHref.startsWith('//')) domHref = 'https:' + domHref;
+
+    // Unwrap DDG /l/ redirect; fall through to the raw href if already direct.
+    const unwrapped = unwrapDdgRedirect(domHref);
+    const target = (unwrapped !== null) ? unwrapped : domHref;
+
+    // Must be http/https.
+    let proto = '';
+    try { proto = new URL(target).protocol; } catch {}
+    if (proto !== 'http:' && proto !== 'https:') continue;
+
+    // Skip recently visited pages.
+    if (recentUrls.includes(target)) continue;
+
+    if (AUTO_LINK_POLICY === 'allowlist') {
+      if (!isDomainAllowed(target)) continue;
+      afterPolicy += 1;
+      allowlistCandidates.push({ domHref, target, tier: 'allowlist' });
+    } else if (AUTO_LINK_POLICY === 'browsing') {
+      if (!isPassesPolicy(target)) continue;
+      afterPolicy += 1;
+      allowlistCandidates.push({ domHref, target, tier: 'browsing' });
+    } else {
+      // 'allowlist-preferred': allowlist wins; any policy-passing URL is fallback.
+      if (isDomainAllowed(target)) {
+        afterPolicy += 1;
+        allowlistCandidates.push({ domHref, target, tier: 'allowlist' });
+      } else if (isPassesPolicy(target)) {
+        afterPolicy += 1;
+        fallbackCandidates.push({ domHref, target, tier: 'fallback' });
+      }
+    }
+  }
+
+  const pool = allowlistCandidates.length > 0 ? allowlistCandidates : fallbackCandidates;
+  if (pool.length === 0) {
+    console.log(`[kiosk-auto] ${key} no eligible results (${total} found, ${afterPolicy} after policy), next search`);
+    return null;
+  }
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// Called when a search page hits the bottom (or the SEARCH_INTERVAL_MS dwell
+// cap fires).  Respects FOLLOW_RESULT_PROBABILITY; when following, picks a
+// random eligible result, highlights it briefly, then loads it in the panel.
+async function onSearchBottom(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
 
-  // Global search gate: space out DDG hits across all panels.
-  const gapRemaining = GLOBAL_SEARCH_GAP_MS - (Date.now() - lastSearchStartedAt);
-  if (gapRemaining > 0) {
-    clearTimeout(ps.dwellTimer);
+  // Occasionally skip result-following to mix in pure search-only cycles.
+  if (Math.random() > FOLLOW_RESULT_PROBABILITY) {
+    const sinceLastSearch = Date.now() - ps.lastSearchTime;
+    const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+    console.log(`[kiosk-auto] ${key} skipping result (probability), next search in ${holdMs} ms`);
     ps.dwellTimer = setTimeout(() => {
       ps.dwellTimer = null;
       if (ps.mode === 'auto') doSearch(key);
-    }, gapRemaining);
+    }, holdMs);
     return;
   }
+
+  const result = await pickRandomResult(key);
+
+  // Re-check mode after async operation.
+  if (ps.mode !== 'auto') {
+    console.log(`[kiosk-auto] ${key} onSearchBottom: mode changed to ${ps.mode}, aborting`);
+    return;
+  }
+
+  if (result && result.botCheck) {
+    console.log(`[kiosk-auto] ${key} onSearchBottom: DDG bot-check, scheduling retry`);
+    scheduleRetry(key, 'ddg-challenge');
+    return;
+  }
+
+  if (!result) {
+    const sinceLastSearch = Date.now() - ps.lastSearchTime;
+    const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+    ps.dwellTimer = setTimeout(() => {
+      ps.dwellTimer = null;
+      if (ps.mode === 'auto') doSearch(key);
+    }, holdMs);
+    return;
+  }
+
+  console.log(`[kiosk-auto] ${key} following result (${result.tier}): ${result.target}`);
+
+  // Highlight the chosen anchor in-page before navigating.
+  const view = panelViews[key];
+  if (!view || view.webContents.isDestroyed()) { doSearch(key); return; }
+  try {
+    await view.webContents.executeJavaScript(`
+      (function (href) {
+        var el = Array.from(document.querySelectorAll('a.result__a'))
+          .find(function (a) { return a.href === href; });
+        if (el) {
+          el.style.outline = '3px solid #ea4b00';
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
+      })(${JSON.stringify(result.domHref)})
+    `, false);
+  } catch {}
+
+  // Re-check mode after the highlight executeJavaScript.
+  if (ps.mode !== 'auto') return;
+
+  ps.highlightTimer = setTimeout(() => {
+    ps.highlightTimer = null;
+    if (ps.mode !== 'auto') return;
+    const v = panelViews[key];
+    if (!v || v.webContents.isDestroyed()) { doSearch(key); return; }
+
+    ps.autoPhase = 'result';
+    ps.recentResultUrls.push(result.target);
+    if (ps.recentResultUrls.length > 20) ps.recentResultUrls.shift();
+
+    // Arm result load watchdog — fires if did-finish-load/did-fail-load never arrive.
+    clearTimeout(ps.loadTimer);
+    ps.loadTimer = setTimeout(() => {
+      ps.loadTimer = null;
+      if (ps.mode !== 'auto') return;
+      console.log(`[kiosk-auto] ${key} result load timed out, skipping`);
+      doSearch(key);
+    }, RESULT_LOAD_TIMEOUT_MS);
+
+    v.webContents.loadURL(result.target).catch(err => {
+      clearTimeout(ps.loadTimer);
+      ps.loadTimer = null;
+      if (ps.mode !== 'auto') return;
+      console.log(`[kiosk-auto] ${key} result load rejected: ${err.message}, skipping`);
+      doSearch(key);
+    });
+  }, RESULT_HIGHLIGHT_MS);
+}
+
+// Called after a result page finishes loading.  Starts the scroll loop and
+// arms RESULT_DWELL_MS as a safety net in case bottom detection never fires.
+function onResultPageReady(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
+
+  const url = panelViews[key]?.webContents.getURL() || '';
+  console.log(`[kiosk-auto] ${key} result page ready: ${url}`);
+
+  startScrolling(key);
+
+  clearTimeout(ps.resultDwellTimer);
+  ps.resultDwellTimer = setTimeout(() => {
+    ps.resultDwellTimer = null;
+    if (ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
+    stopScrolling(key);
+    doSearch(key);
+  }, RESULT_DWELL_MS);
+}
+
+function doSearch(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
+  ps.autoPhase = 'search';
+
+  // Global search gate: space out DDG hits across all panels.
+  // Skipped for each panel's very first search so windows fill immediately.
+  if (ps.firstSearchDone) {
+    const gapRemaining = GLOBAL_SEARCH_GAP_MS - (Date.now() - lastSearchStartedAt);
+    if (gapRemaining > 0) {
+      clearTimeout(ps.dwellTimer);
+      ps.dwellTimer = setTimeout(() => {
+        ps.dwellTimer = null;
+        if (ps.mode === 'auto') doSearch(key);
+      }, gapRemaining);
+      return;
+    }
+  }
+  const isFirst      = !ps.firstSearchDone; // capture before setting — true only on each panel's first search
+  ps.firstSearchDone = true;
 
   const now = Date.now();
   lastSearchStartedAt    = now;
@@ -1013,15 +1370,17 @@ function doSearch(key) {
 
   // Arm load watchdog — fires if neither did-finish-load nor did-fail-load
   // arrives within LOAD_TIMEOUT_MS (e.g. request stalled before a response).
+  // Use a shorter timeout for the first search so a stalled panel recovers fast.
+  const timeoutMs  = isFirst ? 8_000 : LOAD_TIMEOUT_MS;
   clearTimeout(ps.loadTimer);
   ps.loadTimer = setTimeout(() => {
     ps.loadTimer = null;
     if (ps.mode !== 'auto') return;
     const stuckUrl = view.webContents.isDestroyed() ? url : (view.webContents.getURL() || url);
-    console.log(`[kiosk-auto] ${key} load timed out after ${LOAD_TIMEOUT_MS} ms: ${stuckUrl}`);
+    console.log(`[kiosk-auto] ${key} load timed out after ${timeoutMs} ms: ${stuckUrl}`);
     view.webContents.stop();
-    scheduleRetry(key, 'timeout');
-  }, LOAD_TIMEOUT_MS);
+    scheduleRetry(key, isFirst ? 'timeout-first' : 'timeout');
+  }, timeoutMs);
 
   view.webContents.loadURL(url).catch(err => {
     clearTimeout(ps.loadTimer);
@@ -1035,7 +1394,10 @@ function startBrowsingLoop(key) {
   const ps = panelStates.get(key);
   if (!ps) return;
   stopBrowsingLoop(key);
-  ps.mode = 'auto';
+  ps.mode      = 'auto';
+  ps.autoPhase = 'search';
+  const view = panelViews[key];
+  if (view && !view.webContents.isDestroyed()) view.webContents.setAudioMuted(true);
   doSearch(key);
 }
 
@@ -1047,10 +1409,14 @@ function stopBrowsingLoop(key) {
   clearInterval(ps.scrollTimer);
   clearTimeout(ps.rotationStartTimer);
   clearTimeout(ps.loadTimer);
+  clearTimeout(ps.highlightTimer);    // RESULT_HIGHLIGHT_MS pause before navigating to a result
+  clearTimeout(ps.resultDwellTimer);  // RESULT_DWELL_MS cap on result pages
   ps.dwellTimer         = null;
   ps.scrollTimer        = null;
   ps.rotationStartTimer = null;
   ps.loadTimer          = null;
+  ps.highlightTimer     = null;
+  ps.resultDwellTimer   = null;
 }
 
 // ---- Forkknife window -------------------------------------------------------
@@ -1176,7 +1542,12 @@ function createKioskWindow() {
     win.addBrowserView(view);
     view.setBounds({ x: M, y: HANDLE_HEIGHT + M, width: panelW, height: panelH });
     view.setAutoResize({ width: true, height: true });
-    view.webContents.loadURL(PLACEHOLDER_URL);
+    const cachedPage = path.join(cacheDir, `${key}.html`);
+    if (fs.existsSync(cachedPage)) {
+      view.webContents.loadFile(cachedPage);
+    } else {
+      view.webContents.loadURL(PLACEHOLDER_URL);
+    }
     panelViews[key] = view;
     setupViewEventHandlers(key, win, view);
 
@@ -1199,6 +1570,10 @@ function createKioskWindow() {
     let moveDebounce = null;
     win.on('move', () => {
       if (ignoreNextMoves.get(key)) return;
+      if (Date.now() - windowsCreatedAt < 5_000) {
+        console.log(`[kiosk-auto] ${key} startup move ignored`);
+        return;
+      }
       clearTimeout(moveDebounce);
       moveDebounce = setTimeout(() => {
         // Customer dragged the handle while already active — disable auto-size
@@ -1385,8 +1760,13 @@ function startAllIdleRotation() {
       lastTrustedInputAt: 0,     // Date.now() of last panel-activity IPC; used to rescue first-click race
       loadTimer:          null,  // LOAD_TIMEOUT_MS watchdog set in doSearch, cleared on load end
       retryCount:         0,     // exponential-backoff attempt counter; reset on successful load
+      firstSearchDone:    false, // set true after first search; skips global gap on first load
       searchLoadStartedAt: 0,    // Date.now() when doSearch called loadURL; used for timing log
       lastNavStatus:      0,     // HTTP response code from did-navigate; carried into did-finish-load log
+      autoPhase:          'search', // 'search' | 'result' — current phase of the auto loop
+      recentResultUrls:   [],       // recently visited result URLs (max ~20); prevents re-visiting the same page
+      highlightTimer:     null,     // RESULT_HIGHLIGHT_MS timeout before navigating to a chosen result
+      resultDwellTimer:   null,     // RESULT_DWELL_MS cap on result pages before returning to search
     });
 
     // Stagger first loads by INITIAL_LOAD_STAGGER_MS so all five panels show
@@ -1399,6 +1779,8 @@ function startAllIdleRotation() {
 
     panelStates.get(key).rotationStartTimer = timer;
   });
+  windowsCreatedAt = Date.now();
+  console.log(`[kiosk-auto] link-following enabled (policy: ${AUTO_LINK_POLICY}, probability: ${FOLLOW_RESULT_PROBABILITY})`);
 }
 
 // ---- Exports ----------------------------------------------------------------

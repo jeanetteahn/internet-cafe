@@ -221,28 +221,57 @@ clicks, types, drags, or resizes a panel, it stops and becomes their
 browser until they've been idle for `INACTIVITY_TIMEOUT_MS` (90 s by
 default), at which point auto mode resumes.
 
-**Auto mode — search-only loop** (`kiosk-browsers.js` — `startBrowsingLoop`):
+**Auto mode — search → result → search loop** (`kiosk-browsers.js` — `startBrowsingLoop`):
 
-Auto mode shows DuckDuckGo HTML search result pages and **nothing else**.
-Panels never navigate to individual result links.
+Auto mode alternates between DuckDuckGo results pages and individual result
+pages.  Audio is muted while a panel is in auto mode and unmuted the moment a
+customer takes over.
 
 1. `doSearch` navigates the panel to `buildSearchUrl(term)` — DuckDuckGo's
-   plain HTML endpoint with `&kp=1` (strict SafeSearch).
-2. Once loaded (`onSearchPageReady`), the panel auto-scrolls the page via
+   plain HTML endpoint with `&kp=1` (strict SafeSearch).  If a cached copy of
+   the previous results page exists for this panel it is shown immediately while
+   the live search loads.
+2. Once loaded (`onSearchPageReady`), the panel auto-scrolls via
    `window.scrollBy` (no wheel events fired — cannot trigger the customer-
-   activity detector).
-3. When scrolling reaches the page bottom, the panel instantly jumps back
-   to the top (`window.scrollTo(0, 0)`) and loads the next topic in
-   `SEARCH_TERMS` after a `BOTTOM_HOLD_MS` pause.  `SEARCH_INTERVAL_MS`
-   (45 s) is a safety-net ceiling for pages that never reach the bottom
-   due to dynamic loading.  Repeat indefinitely.
+   activity detector).  `SEARCH_INTERVAL_MS` (45 s) is a safety-net ceiling
+   for pages that never reach the bottom due to dynamic loading.
+3. When scrolling reaches the bottom (or the dwell cap fires), `onSearchBottom`
+   runs.  It collects links via `a.result__a`, `.result__title a`, and
+   `a.result-link` (de-duplicated), skips any inside `.result--ad` or
+   `.badge--ad`, unwraps DDG `/l/` redirects, and applies `AUTO_LINK_POLICY`.
+   With the default `'allowlist-preferred'` policy, links from `ALLOWED_DOMAINS`
+   are picked first; if none are present, any link that passes `isPassesPolicy`
+   is eligible.  After also dropping any URL already in `ps.recentResultUrls`
+   (max 20), one link is picked at random.  If DDG returns a bot-challenge page
+   (detected by absence of `.result` elements plus a form or challenge text),
+   `scheduleRetry` is called with reason `'ddg-challenge'` instead of hammering
+   DDG again immediately.
+4. The chosen anchor is briefly highlighted with an orange outline and scrolled
+   into view (`RESULT_HIGHLIGHT_MS` ≈ 600 ms), then the panel loads the target
+   URL directly via `webContents.loadURL` (bypassing will-navigate).
+5. Once the result page loads (`onResultPageReady`), the panel scrolls it the
+   same way.  `RESULT_DWELL_MS` (25 s) is the safety-net ceiling.  When
+   scrolling reaches the bottom, the panel calls `doSearch` with the next
+   keyword and the cycle repeats.
+6. If no eligible links are found (all filtered by policy, ads, or
+   `recentResultUrls`), or if `FOLLOW_RESULT_PROBABILITY` causes a skip, the
+   panel goes straight to `doSearch`.
+7. Result pages are **never** written to the DDG cache.  Load failures and
+   timeouts on result pages skip `scheduleRetry` entirely — a broken
+   third-party site does not slow down DDG searches.
 
-**Navigation guard in auto mode** (`will-navigate`): any page-initiated
-navigation whose hostname is not `duckduckgo.com` or a subdomain is blocked
-before it happens.  This covers meta-refresh, JavaScript `window.location`
-assignments, and any other script the results page might trigger.
-`webContents.loadURL()` calls from the main process (used by `doSearch`) are
-exempt -- `will-navigate` does not fire for programmatic main-process loads.
+**Navigation guard in auto mode** (`will-navigate`): behaviour depends on the
+current `ps.autoPhase`.
+
+- **Search phase** (`autoPhase === 'search'`): any page-initiated navigation
+  whose hostname is not `duckduckgo.com` or a subdomain is blocked.  This
+  covers meta-refresh, JavaScript `window.location` assignments, and any
+  script the results page might trigger.
+- **Result phase** (`autoPhase === 'result'`): page-initiated navigations
+  (redirects, http→https upgrades, meta-refresh) are allowed only if they
+  pass `AUTO_LINK_POLICY`; everything else is blocked.
+- `webContents.loadURL()` calls from the main process are always exempt —
+  `will-navigate` does not fire for programmatic main-process loads.
 
 A first-click race exists where `will-navigate` fires in the main process
 before the renderer's `panel-activity` IPC arrives (async channel vs.
@@ -285,24 +314,23 @@ stop the loop instantly.
 | Constant | Default | Effect |
 |---|---|---|
 | `SEARCH_INTERVAL_MS` | 45 s | Safety-net max time per results page; bottom detection usually fires first |
-| `MIN_SEARCH_INTERVAL_MS` | 5 s | Minimum time between consecutive searches on one panel -- prevents hammering DDG when pages are very short |
-| `BOTTOM_HOLD_MS` | 300 ms | Brief pause after jumping back to the page top before loading the next search |
-| `SCROLL_STEP_PX` / `SCROLL_STEP_MS` | 80 px / 250 ms | Scroll speed -- lower `SCROLL_STEP_PX` or raise `SCROLL_STEP_MS` for slower scroll |
+| `MIN_SEARCH_INTERVAL_MS` | 5 s | Minimum time between consecutive searches on one panel — prevents hammering DDG when pages are very short |
+| `BOTTOM_HOLD_MS` | 300 ms | Brief pause after reaching page bottom before the next search |
+| `FOLLOW_RESULT_PROBABILITY` | 1.0 | Chance of clicking a result after each search scroll; set < 1 to mix in plain search-only cycles |
+| `RESULT_DWELL_MS` | 25 s | Safety-net max time on a result page; bottom detection usually fires first |
+| `RESULT_LOAD_TIMEOUT_MS` | 12 s | Watchdog for result page loads; on expiry skips to the next search without backoff |
+| `RESULT_HIGHLIGHT_MS` | 600 ms | How long the chosen result anchor is highlighted before navigation begins |
+| `AUTO_LINK_POLICY` | `'allowlist-preferred'` | `'allowlist-preferred'` = prefer `ALLOWED_DOMAINS`, fall back to `isPassesPolicy`; `'allowlist'` = only `ALLOWED_DOMAINS`; `'browsing'` = `isPassesPolicy` only |
+| `SCROLL_STEP_PX` / `SCROLL_STEP_MS` | 80 px / 250 ms | Scroll speed — lower `SCROLL_STEP_PX` or raise `SCROLL_STEP_MS` for slower scroll |
 | `INACTIVITY_TIMEOUT_MS` | 90 s | Idle time before auto mode resumes after a customer |
-| `INITIAL_LOAD_STAGGER_MS` | 1500 ms | Delay between each panel's first search at launch, so all five don't hit DDG simultaneously |
+| `INITIAL_LOAD_STAGGER_MS` | 300 ms | Delay between each panel's first search at launch |
 | `ACTIVE_SCALE` | 1.25 | How much larger an active panel grows (fraction of its home size) |
 | `ACTIVE_ANIM_MS` | 220 ms | Duration of the enlarge/shrink tween |
-| `BROWSING_POLICY` | `'open'` | `'open'` allows all http/https except `BLOCKED_DOMAINS`; `'allowlist'` restricts to `ALLOWED_DOMAINS` |
+| `BROWSING_POLICY` | `'open'` | Controls active (customer) mode: `'open'` allows all http/https except `BLOCKED_DOMAINS`; `'allowlist'` restricts to `ALLOWED_DOMAINS` |
 | `BLOCKED_DOMAINS` | (8 sites) | Hosts blocked in active `'open'` mode |
-| `ALLOWED_DOMAINS` | (15 sites) | Hosts allowed in active `'allowlist'` mode |
+| `ALLOWED_DOMAINS` | (15 sites) | Hosts allowed in active `'allowlist'` mode; also the preferred tier when `AUTO_LINK_POLICY = 'allowlist-preferred'` |
 | `FIRST_CLICK_GRACE_MS` | 1500 ms | Grace window for rescuing first-click IPC race in auto mode |
 | `SEARCH_TERMS` | (10 topics) | Kid-friendly topics cycled during auto mode |
-
-**Removed constants** (were present when auto mode did link-following; no
-longer applicable):
-`PAGE_DWELL_MIN_MS`, `PAGE_DWELL_MAX_MS`, `MAX_LINK_HOPS`, `POOL_MAX`,
-`RECENT_URL_MAX`, `PRELOAD_NEXT_PAGE`, `PRELOAD_TIMEOUT_MS`,
-`BLOCKED_KEYWORDS`.
 
 **Known bug (fixed): kiosk windows silently garbage-collected — process
 alive, nothing on screen.** After the process split above, `kiosk-main.js`

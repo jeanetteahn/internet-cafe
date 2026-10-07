@@ -171,37 +171,37 @@
     // edge: 'corner-tl' | 'corner-tr' | 'corner-bl' | 'corner-br'
     //       | 'top' | 'bottom' | 'left' | 'right'
     // pct:  0–1 position along the edge (ignored for corner edges)
+    // corner-t pieces also take dir: 'up'|'down'|'left'|'right' (which way the stem points)
     var PANEL_HINGES = {
-      hub: [
-        { piece: 'corner-hinge', edge: 'corner-tl' },
-        { piece: 'corner-hinge', edge: 'corner-bl' },
-        { piece: 'strap-hinge',  edge: 'top',  pct: 0.45 },
-        { piece: 'edge-hinge',   edge: 'left', pct: 0.25 },
-        { piece: 'edge-hinge',   edge: 'left', pct: 0.52 },
-        { piece: 'edge-hinge',   edge: 'left', pct: 0.78 },
-      ],
       topLeft: [
-        { piece: 'corner-hinge', edge: 'corner-tl' },
-        { piece: 'corner-hinge', edge: 'corner-bl' },
-        { piece: 'strap-hinge',  edge: 'top', pct: 0.5 },
+        { piece: 'strap-hinge', edge: 'top',    pct: 0.70 },
+        { piece: 'edge-hinge',  edge: 'right',  pct: 0.30 },
+        { piece: 'strap-hinge', edge: 'bottom', pct: 0.20 },
+        { piece: 'strap-hinge', edge: 'left',   pct: 0.60 },
+      ],
+      hub: [
+        { piece: 'strap-hinge', edge: 'top',    pct: 0.35 },
+        { piece: 'strap-hinge', edge: 'right',  pct: 0.65 },
+        { piece: 'edge-hinge',  edge: 'bottom', pct: 0.75 },
+        { piece: 'strap-hinge', edge: 'left',   pct: 0.45 },
       ],
       topRight: [
-        { piece: 'corner-hinge', edge: 'corner-tr' },
-        { piece: 'corner-hinge', edge: 'corner-br' },
-        { piece: 'strap-hinge',  edge: 'top',   pct: 0.6 },
-        { piece: 'strap-hinge',  edge: 'right', pct: 0.5 },
+        { piece: 'strap-hinge', edge: 'top',    pct: 0.25 },
+        { piece: 'strap-hinge', edge: 'right',  pct: 0.55 },
+        { piece: 'strap-hinge', edge: 'bottom', pct: 0.80 },
+        { piece: 'edge-hinge',  edge: 'left',   pct: 0.70 },
       ],
       bottomLeft: [
-        { piece: 'corner-hinge', edge: 'corner-bl' },
-        { piece: 'corner-hinge', edge: 'corner-tl' },
-        { piece: 'strap-hinge',  edge: 'bottom', pct: 0.45 },
-        { piece: 'edge-hinge',   edge: 'right',  pct: 0.8 },
+        { piece: 'edge-hinge',  edge: 'top',    pct: 0.30 },
+        { piece: 'strap-hinge', edge: 'right',  pct: 0.40 },
+        { piece: 'strap-hinge', edge: 'bottom', pct: 0.65 },
+        { piece: 'strap-hinge', edge: 'left',   pct: 0.75 },
       ],
       bottomRight: [
-        { piece: 'corner-hinge', edge: 'corner-br' },
-        { piece: 'corner-hinge', edge: 'corner-bl' },
-        { piece: 'strap-hinge',  edge: 'right',  pct: 0.5 },
-        { piece: 'strap-hinge',  edge: 'bottom', pct: 0.45 },
+        { piece: 'strap-hinge', edge: 'top',    pct: 0.80 },
+        { piece: 'edge-hinge',  edge: 'right',  pct: 0.35 },
+        { piece: 'strap-hinge', edge: 'bottom', pct: 0.30 },
+        { piece: 'strap-hinge', edge: 'left',   pct: 0.60 },
       ],
     };
 
@@ -226,66 +226,99 @@
       if (!hinges) return;
 
       hinges.forEach(function (h) {
-        var dims = DIMS[h.piece];
+        var dims = (h.piece === 'corner-t') ? DIMS['edge-hinge'] : DIMS[h.piece];
         var el   = document.createElement('div');
-        el.innerHTML = SVGS[h.piece];
+        el.innerHTML = (h.piece === 'corner-t') ? SVGS['edge-hinge'] : SVGS[h.piece];
         var pct = (h.pct !== undefined) ? h.pct : 0.5;
 
         switch (h.edge) {
           case 'corner-tl':
-            // L inner corner at window top-left; arms go right and down
-            place(el, dims, 0, 0);
+            if (h.piece === 'corner-t') {
+              // T-junction at (M,M). dir 'down': stem vertical, arm extends left.
+              if (h.dir === 'down') place(el, dims, M - 20, M - 27);
+            } else {
+              place(el, dims, M - dims.w, M - dims.h, 'scale(-1,-1)');
+            }
             break;
 
           case 'corner-tr':
-            // Mirror horizontally: inner corner at top-right, arms go left and down
-            place(el, dims, W - dims.w, 0, 'scaleX(-1)');
+            if (h.piece === 'corner-t') {
+              // T-junction at (W-M,M). dir 'up': scaleX(-1) flips arm rightward, stem vertical.
+              if (h.dir === 'up') place(el, dims, W - M - 14, M - 27, 'scaleX(-1)');
+            } else {
+              place(el, dims, W - M, M - dims.h, 'scaleY(-1)');
+            }
             break;
 
           case 'corner-bl':
-            // Mirror vertically: inner corner at bottom-left, arms go right and up
-            place(el, dims, 0, Wh - dims.h, 'scaleY(-1)');
+            if (h.piece === 'corner-t') {
+              // T-junction at (M,Wh-M).
+              // dir 'left': rotate(90deg) scaleY(-1) → stem horizontal going left, arm down.
+              // dir 'down': natural orientation, arm extends left.
+              if (h.dir === 'left') place(el, dims, M - 17.5, Wh - M - 24.5, 'rotate(90deg) scaleY(-1)');
+              if (h.dir === 'down') place(el, dims, M - 20,   Wh - M - 27);
+            } else {
+              place(el, dims, M - dims.w, Wh - M, 'scaleX(-1)');
+            }
             break;
 
           case 'corner-br':
-            // Mirror both axes: inner corner at bottom-right, arms go left and up
-            place(el, dims, W - dims.w, Wh - dims.h, 'scale(-1,-1)');
+            if (h.piece === 'corner-t') {
+              // T-junction at (W-M,Wh-M). dir 'down': scaleX(-1) flips arm rightward, stem vertical.
+              if (h.dir === 'down') place(el, dims, W - M - 14, Wh - M - 27, 'scaleX(-1)');
+            } else {
+              place(el, dims, W - M, Wh - M);
+            }
             break;
 
           case 'top': {
-            // Strap centered horizontally at pct, vertically centered in top margin
+            // pct from frame left corner
             var cx = M + pct * panelW;
-            place(el, dims, cx - dims.w / 2, M / 2 - dims.h / 2);
+            if (h.piece === 'strap-hinge') {
+              // Bottom edge of strap sits on border (y=M)
+              place(el, dims, cx - dims.w / 2, M - dims.h);
+            } else {
+              // edge-hinge rotate(90deg): crossbar at bottom flush against border, stem up
+              place(el, dims, cx - 17, M - 44.5, 'rotate(90deg)');
+            }
             break;
           }
 
           case 'bottom': {
-            // Strap centered horizontally at pct, vertically centered in bottom margin
+            // pct from frame left corner
             var cx2 = M + pct * panelW;
-            place(el, dims, cx2 - dims.w / 2, Wh - M / 2 - dims.h / 2);
+            if (h.piece === 'strap-hinge') {
+              // Top edge of strap sits on border (y=Wh-M)
+              place(el, dims, cx2 - dims.w / 2, Wh - M);
+            } else {
+              // edge-hinge rotate(-90deg): crossbar at top flush against border, stem down
+              place(el, dims, cx2 - 17, Wh - M - 10.5, 'rotate(-90deg)');
+            }
             break;
           }
 
           case 'left': {
-            var cy = M + H + pct * panelH;
+            // pct from frame top corner; piece extends leftward from border (x=M)
+            var cy = M + pct * panelH;
             if (h.piece === 'strap-hinge') {
-              // Rotate 90 deg; center the visual bar in the left margin strip
-              place(el, dims, M / 2 - dims.w / 2, cy - dims.h / 2, 'rotate(90deg)');
+              // Rotated 90deg: visual right edge at x=M → left = M - w/2 - h/2
+              place(el, dims, M - dims.w / 2 - dims.h / 2, cy - dims.h / 2, 'rotate(90deg)');
             } else {
-              // edge-hinge: center at border, scaleX(-1) so arm extends inward
-              place(el, dims, M - dims.w / 2, cy - dims.h / 2, 'scaleX(-1)');
+              // edge-hinge natural: crossbar flush against border, stem points left
+              place(el, dims, M - 34, cy - 27.5);
             }
             break;
           }
 
           case 'right': {
-            var cy2 = M + H + pct * panelH;
+            // pct from frame top corner; piece extends rightward from border (x=W-M)
+            var cy2 = M + pct * panelH;
             if (h.piece === 'strap-hinge') {
-              // Rotate 90 deg; center the visual bar in the right margin strip
-              place(el, dims, W - M / 2 - dims.w / 2, cy2 - dims.h / 2, 'rotate(90deg)');
+              // Rotated 90deg: visual left edge at x=W-M → left = W-M - w/2 + h/2
+              place(el, dims, W - M - dims.w / 2 + dims.h / 2, cy2 - dims.h / 2, 'rotate(90deg)');
             } else {
-              // edge-hinge: center at border, natural orientation (arm extends left)
-              place(el, dims, W - M - dims.w / 2, cy2 - dims.h / 2);
+              // edge-hinge scaleX(-1): crossbar flush against border, stem points right
+              place(el, dims, W - M, cy2 - 27.5, 'scaleX(-1)');
             }
             break;
           }
@@ -311,11 +344,11 @@
 
       var border = document.getElementById('border');
       border.style.left   = M + 'px';
-      border.style.top    = (M + H) + 'px';
+      border.style.top    = M + 'px';
       border.style.width  = panelW + 'px';
-      border.style.height = panelH + 'px';
+      border.style.height = (Wh - 2 * M) + 'px';
 
-      renderHinges(M, H, W, Wh, panelW, panelH);
+      renderHinges(M, H, W, Wh, panelW, Wh - 2 * M);
     }
 
     window.addEventListener('resize', render);
