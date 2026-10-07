@@ -236,10 +236,16 @@ customer takes over.
    activity detector).  `SEARCH_INTERVAL_MS` (45 s) is a safety-net ceiling
    for pages that never reach the bottom due to dynamic loading.
 3. When scrolling reaches the bottom (or the dwell cap fires), `onSearchBottom`
-   runs.  It collects `a.result__a` links from the page, skips any inside
-   `.result--ad` or `.badge--ad`, unwraps DDG `/l/` redirects, and filters
-   the remaining URLs through `AUTO_LINK_POLICY`.  After also dropping any URL
-   already in `ps.recentResultUrls` (max 20), it picks one at random.
+   runs.  It collects links via `a.result__a`, `.result__title a`, and
+   `a.result-link` (de-duplicated), skips any inside `.result--ad` or
+   `.badge--ad`, unwraps DDG `/l/` redirects, and applies `AUTO_LINK_POLICY`.
+   With the default `'allowlist-preferred'` policy, links from `ALLOWED_DOMAINS`
+   are picked first; if none are present, any link that passes `isPassesPolicy`
+   is eligible.  After also dropping any URL already in `ps.recentResultUrls`
+   (max 20), one link is picked at random.  If DDG returns a bot-challenge page
+   (detected by absence of `.result` elements plus a form or challenge text),
+   `scheduleRetry` is called with reason `'ddg-challenge'` instead of hammering
+   DDG again immediately.
 4. The chosen anchor is briefly highlighted with an orange outline and scrolled
    into view (`RESULT_HIGHLIGHT_MS` ≈ 600 ms), then the panel loads the target
    URL directly via `webContents.loadURL` (bypassing will-navigate).
@@ -314,7 +320,7 @@ stop the loop instantly.
 | `RESULT_DWELL_MS` | 25 s | Safety-net max time on a result page; bottom detection usually fires first |
 | `RESULT_LOAD_TIMEOUT_MS` | 12 s | Watchdog for result page loads; on expiry skips to the next search without backoff |
 | `RESULT_HIGHLIGHT_MS` | 600 ms | How long the chosen result anchor is highlighted before navigation begins |
-| `AUTO_LINK_POLICY` | `'allowlist'` | `'allowlist'` = only `ALLOWED_DOMAINS` are eligible result targets; `'browsing'` = use `isPassesPolicy` |
+| `AUTO_LINK_POLICY` | `'allowlist-preferred'` | `'allowlist-preferred'` = prefer `ALLOWED_DOMAINS`, fall back to `isPassesPolicy`; `'allowlist'` = only `ALLOWED_DOMAINS`; `'browsing'` = `isPassesPolicy` only |
 | `SCROLL_STEP_PX` / `SCROLL_STEP_MS` | 80 px / 250 ms | Scroll speed — lower `SCROLL_STEP_PX` or raise `SCROLL_STEP_MS` for slower scroll |
 | `INACTIVITY_TIMEOUT_MS` | 90 s | Idle time before auto mode resumes after a customer |
 | `INITIAL_LOAD_STAGGER_MS` | 300 ms | Delay between each panel's first search at launch |
@@ -322,7 +328,7 @@ stop the loop instantly.
 | `ACTIVE_ANIM_MS` | 220 ms | Duration of the enlarge/shrink tween |
 | `BROWSING_POLICY` | `'open'` | Controls active (customer) mode: `'open'` allows all http/https except `BLOCKED_DOMAINS`; `'allowlist'` restricts to `ALLOWED_DOMAINS` |
 | `BLOCKED_DOMAINS` | (8 sites) | Hosts blocked in active `'open'` mode |
-| `ALLOWED_DOMAINS` | (15 sites) | Hosts allowed in active `'allowlist'` mode and as `AUTO_LINK_POLICY = 'allowlist'` result targets |
+| `ALLOWED_DOMAINS` | (15 sites) | Hosts allowed in active `'allowlist'` mode; also the preferred tier when `AUTO_LINK_POLICY = 'allowlist-preferred'` |
 | `FIRST_CLICK_GRACE_MS` | 1500 ms | Grace window for rescuing first-click IPC race in auto mode |
 | `SEARCH_TERMS` | (10 topics) | Kid-friendly topics cycled during auto mode |
 

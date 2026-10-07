@@ -98,7 +98,8 @@ const FOLLOW_RESULT_PROBABILITY = 1.0;        // chance of clicking a result aft
 const RESULT_DWELL_MS           = 25 * 1000;  // max time on a result page before returning to search
 const RESULT_LOAD_TIMEOUT_MS    = 12 * 1000;  // watchdog: abort a stalled result page load, move to next search
 const RESULT_HIGHLIGHT_MS       = 600;         // visual highlight duration (ms) on the chosen anchor before navigating
-const AUTO_LINK_POLICY          = 'allowlist'; // 'allowlist' = only ALLOWED_DOMAINS; 'browsing' = use isPassesPolicy
+const AUTO_LINK_POLICY          = 'allowlist-preferred'; // 'allowlist-preferred' = prefer ALLOWED_DOMAINS, fall back to isPassesPolicy;
+                                                          // 'allowlist' = only ALLOWED_DOMAINS; 'browsing' = use isPassesPolicy
 
 // ---- Window / layout tunables -----------------------------------------------
 const HANDLE_HEIGHT         = 28;
@@ -696,9 +697,13 @@ function setupViewEventHandlers(key, win, view) {
           onSearchPageReady(key);
 
           // Persist this DDG page so the next startup can show it immediately.
+          // Skip write if there are no result links (bot-check / empty SERP).
           if (url.startsWith('https://html.duckduckgo.com/')) {
-            view.webContents.executeJavaScript('document.documentElement.outerHTML')
+            view.webContents.executeJavaScript(
+              'document.querySelector("a.result__a") ? document.documentElement.outerHTML : null'
+            )
               .then(html => {
+                if (!html) return;
                 const withBase = html.replace('<head>', '<head><base href="https://html.duckduckgo.com/">');
                 fs.writeFile(path.join(cacheDir, `${key}.html`), withBase, () => {});
               })
@@ -1062,38 +1067,75 @@ function scheduleRetry(key, reason) {
 }
 
 // Collects eligible result links from the current DDG results page, unwraps
-// DDG /l/ redirects, applies AUTO_LINK_POLICY, and returns { domHref, target }
-// for a randomly chosen link, or null if no eligible links are found.
+// DDG /l/ redirects, applies AUTO_LINK_POLICY, and returns { domHref, target,
+// tier } for a randomly chosen link, null if no eligible links are found, or
+// { botCheck: true } if a DDG bot-challenge page is detected (caller should
+// scheduleRetry instead of doSearch).
 async function pickRandomResult(key) {
   const view = panelViews[key];
-  if (!view || view.webContents.isDestroyed()) return null;
+  if (!view || view.webContents.isDestroyed()) {
+    console.log(`[kiosk-auto] ${key} pickRandomResult: view gone`);
+    return null;
+  }
 
-  let domHrefs;
+  let pageInfo;
   try {
+    // Collect hrefs from primary selector and two fallbacks, de-duplicated.
     // a.href is the browser-resolved absolute URL (preserves DDG /l/ redirects).
     // Anything nested inside .result--ad or .badge--ad is skipped.
-    domHrefs = await view.webContents.executeJavaScript(`
+    pageInfo = await view.webContents.executeJavaScript(`
       (function () {
         var adEls = new Set(Array.from(
           document.querySelectorAll('.result--ad .result__a, .badge--ad .result__a')
         ));
-        return Array.from(document.querySelectorAll('a.result__a'))
-          .filter(function (a) { return !adEls.has(a); })
-          .map(function (a) { return a.href; });
+        var seen = new Set();
+        var hrefs = [];
+        var sels = ['a.result__a', '.result__title a', 'a.result-link'];
+        for (var si = 0; si < sels.length; si++) {
+          Array.from(document.querySelectorAll(sels[si])).forEach(function (a) {
+            if (adEls.has(a)) return;
+            var h = a.href;
+            if (h && !seen.has(h)) { seen.add(h); hrefs.push(h); }
+          });
+        }
+        // Bot-check: no .result elements, plus a form or bot/challenge text.
+        var hasResults = document.querySelectorAll('.result').length > 0;
+        var bodyText = document.body ? document.body.innerText.toLowerCase() : '';
+        var isBotCheck = !hasResults && (
+          document.querySelector('form') !== null ||
+          bodyText.indexOf('bot') !== -1 ||
+          bodyText.indexOf('challenge') !== -1 ||
+          bodyText.indexOf('unusual traffic') !== -1
+        );
+        return { hrefs: hrefs, isBotCheck: isBotCheck, title: document.title };
       })()
     `, false);
-  } catch {
+  } catch (err) {
+    console.log(`[kiosk-auto] ${key} pickRandomResult: script failed: ${err.message}`);
     return null;
   }
 
-  if (!Array.isArray(domHrefs) || domHrefs.length === 0) return null;
+  const { hrefs: domHrefs, isBotCheck, title } = pageInfo;
+  const currentUrl = view.webContents.getURL();
+
+  if (!Array.isArray(domHrefs) || domHrefs.length === 0) {
+    if (isBotCheck) {
+      console.log(`[kiosk-auto] ${key} DDG bot-check page detected`);
+      return { botCheck: true };
+    }
+    console.log(`[kiosk-auto] ${key} pickRandomResult: 0 result links on page (${currentUrl}, title: ${title})`);
+    return null;
+  }
 
   const ps = panelStates.get(key);
   const recentUrls = ps ? ps.recentResultUrls : [];
-  let total = domHrefs.length;
+  const total = domHrefs.length;
   let afterPolicy = 0;
 
-  const candidates = [];
+  // 'allowlist-preferred': two tiers — prefer ALLOWED_DOMAINS, fall back to isPassesPolicy.
+  const allowlistCandidates = [];
+  const fallbackCandidates  = [];
+
   for (let domHref of domHrefs) {
     // Resolve protocol-relative hrefs before unwrapping.
     if (typeof domHref === 'string' && domHref.startsWith('//')) domHref = 'https:' + domHref;
@@ -1107,22 +1149,35 @@ async function pickRandomResult(key) {
     try { proto = new URL(target).protocol; } catch {}
     if (proto !== 'http:' && proto !== 'https:') continue;
 
-    // Apply the auto-mode link policy.
-    const allowed = (AUTO_LINK_POLICY === 'allowlist') ? isDomainAllowed(target) : isPassesPolicy(target);
-    if (!allowed) continue;
-    afterPolicy += 1;
-
     // Skip recently visited pages.
     if (recentUrls.includes(target)) continue;
 
-    candidates.push({ domHref, target });
+    if (AUTO_LINK_POLICY === 'allowlist') {
+      if (!isDomainAllowed(target)) continue;
+      afterPolicy += 1;
+      allowlistCandidates.push({ domHref, target, tier: 'allowlist' });
+    } else if (AUTO_LINK_POLICY === 'browsing') {
+      if (!isPassesPolicy(target)) continue;
+      afterPolicy += 1;
+      allowlistCandidates.push({ domHref, target, tier: 'browsing' });
+    } else {
+      // 'allowlist-preferred': allowlist wins; any policy-passing URL is fallback.
+      if (isDomainAllowed(target)) {
+        afterPolicy += 1;
+        allowlistCandidates.push({ domHref, target, tier: 'allowlist' });
+      } else if (isPassesPolicy(target)) {
+        afterPolicy += 1;
+        fallbackCandidates.push({ domHref, target, tier: 'fallback' });
+      }
+    }
   }
 
-  if (candidates.length === 0) {
+  const pool = allowlistCandidates.length > 0 ? allowlistCandidates : fallbackCandidates;
+  if (pool.length === 0) {
     console.log(`[kiosk-auto] ${key} no eligible results (${total} found, ${afterPolicy} after policy), next search`);
     return null;
   }
-  return candidates[Math.floor(Math.random() * candidates.length)];
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 // Called when a search page hits the bottom (or the SEARCH_INTERVAL_MS dwell
@@ -1147,7 +1202,16 @@ async function onSearchBottom(key) {
   const result = await pickRandomResult(key);
 
   // Re-check mode after async operation.
-  if (ps.mode !== 'auto') return;
+  if (ps.mode !== 'auto') {
+    console.log(`[kiosk-auto] ${key} onSearchBottom: mode changed to ${ps.mode}, aborting`);
+    return;
+  }
+
+  if (result && result.botCheck) {
+    console.log(`[kiosk-auto] ${key} onSearchBottom: DDG bot-check, scheduling retry`);
+    scheduleRetry(key, 'ddg-challenge');
+    return;
+  }
 
   if (!result) {
     const sinceLastSearch = Date.now() - ps.lastSearchTime;
@@ -1159,7 +1223,7 @@ async function onSearchBottom(key) {
     return;
   }
 
-  console.log(`[kiosk-auto] ${key} following result: ${result.target}`);
+  console.log(`[kiosk-auto] ${key} following result (${result.tier}): ${result.target}`);
 
   // Highlight the chosen anchor in-page before navigating.
   const view = panelViews[key];
