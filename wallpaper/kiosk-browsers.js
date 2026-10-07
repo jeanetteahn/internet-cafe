@@ -22,13 +22,14 @@ const SPOON_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSvg).t
 const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') 3 0,auto!important}input,textarea{cursor:text!important}`;
 // Chromium 121+ ignores ::-webkit-scrollbar when a page sets scrollbar-color/scrollbar-width;
 // forcing both back to auto overrides that and makes our thumb/track colors apply everywhere.
+// :not(#__kiosk) adds ID-level specificity so our rules beat a site's own scrollbar styles.
 const _scrollbarRule =
-  '*{scrollbar-color:auto!important;scrollbar-width:auto!important}' +
-  '::-webkit-scrollbar{width:12px;height:12px;background:#ffffff}' +
-  '::-webkit-scrollbar-track{background:#ffffff}' +
-  '::-webkit-scrollbar-thumb{background:#ea4b00;border-radius:6px;border:2px solid #ffffff}' +
-  '::-webkit-scrollbar-thumb:hover{background:#ea4b00}' +
-  '::-webkit-scrollbar-corner{background:#ffffff}';
+  '*:not(#__kiosk){scrollbar-color:auto!important;scrollbar-width:auto!important}' +
+  '*:not(#__kiosk)::-webkit-scrollbar{width:12px!important;height:12px!important;background:#ffffff!important;display:block!important}' +
+  '*:not(#__kiosk)::-webkit-scrollbar-track{background:#ffffff!important}' +
+  '*:not(#__kiosk)::-webkit-scrollbar-thumb{background:#ea4b00!important;border-radius:6px!important;border:2px solid #ffffff!important;min-height:40px!important}' +
+  '*:not(#__kiosk)::-webkit-scrollbar-thumb:hover{background:#ea4b00!important}' +
+  '*:not(#__kiosk)::-webkit-scrollbar-corner{background:#ffffff!important}';
 const PANEL_CURSOR_CSS     = _spoonRule + _scrollbarRule;
 const HANDLE_CURSOR_CSS    = _spoonRule + '#strip{cursor:grab!important}';
 const GRIP_CURSOR_CSS      = _spoonRule + '.grip{cursor:nwse-resize!important}';
@@ -804,6 +805,7 @@ function setupViewEventHandlers(key, win, view) {
     if (!url || url.startsWith('data:') || url === 'about:blank') return;
 
     if (isMainFrame) {
+      view.webContents.insertCSS(PANEL_CURSOR_CSS).catch(() => {});
       const ps = panelStates.get(key);
       if (ps) {
         ps.lastNavStatus = httpResponseCode;
