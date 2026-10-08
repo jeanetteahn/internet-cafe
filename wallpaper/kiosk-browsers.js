@@ -1,6 +1,7 @@
 const { app, BrowserWindow, BrowserView, screen, ipcMain, globalShortcut, session } = require('electron');
 const path = require('path');
 const fs   = require('fs');
+const http = require('http');
 
 // DDG result cache — one HTML file per panel, loaded as the startup placeholder.
 const cacheDir = path.join(app.getPath('userData'), 'ddg-cache');
@@ -27,6 +28,11 @@ const FORKKNIFE_CURSOR_CSS  = _spoonRule;
 const ADDRESSBAR_CURSOR_CSS = _spoonRule +
   '#drag-pad{cursor:grab!important}' +
   '#bar.dragging,#bar.dragging *{cursor:grabbing!important}';
+
+// ---- Clock SVG ---------------------------------------------------------------
+// Read once at startup; sent to the clock renderer over IPC on did-finish-load.
+// The file must not be modified — the renderer works with the raw bytes.
+const _clockSvgText = fs.readFileSync(path.join(__dirname, 'assets/clock/clock.svg'), 'utf8');
 
 // ---- Search topics ----------------------------------------------------------
 // Kid-friendly only.  Panels cycle through the list in order, staggered so
@@ -136,6 +142,14 @@ const FORKKNIFE_POSITION = { x: 24, y: 24 };
 const FORKKNIFE_WIN_W    = FK_GRAPHIC_W + FK_PAD; // ~56 px
 const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD;         // ~27 px
 
+// ---- Clock window ------------------------------------------------------------
+// SVG viewBox is 87.2×87.2; the window is square.
+const CLOCK_SIZE = 110; // window width and height (px)
+// Offset from the work area's top-left corner.
+// Tuned for 1920×1080: centers the clock on the top-right panel's top edge.
+const CLOCK_POSITION = { x: 1332, y: 20 };
+const CLOCK_TZ_REFETCH_MS = 60 * 60 * 1000; // re-check timezone once per hour
+
 // ---- Address bar window -------------------------------------------------------
 // Dimensions match the SVG viewBox (310.59 × 43.62 → 311 × 44 px).
 const AB_WIN_W                   = 311; // address bar window width
@@ -203,6 +217,11 @@ let   enlargedKey = null;      // panel key currently enlarged, or null
 let forkKnifeWindow     = null; // standalone forkknife nav control window
 let forkKnifeDragOffset = null; // { dx, dy } set at drag-start, cleared at drag-end
 let forkKnifeHomePos    = null; // starting position, restored on double-click
+let clockWindow     = null; // analog clock overlay window
+let clockDragOffset = null; // { dx, dy } set at drag-start, cleared at drag-end
+let clockHomePos    = null; // home position, restored when all panels go idle
+let clockTimezone   = null; // IANA timezone from ip-api.com, null = use system time
+let clockTzTimer    = null; // setInterval id for hourly re-fetch
 let addressBarWindow     = null;     // floating address bar for the hub panel
 let addressBarDragOffset = null;     // { dx, dy } set at drag-start, cleared at drag-end
 let addressBarDocked     = true;     // true = follows hub; false = free-floating
@@ -679,6 +698,7 @@ function pushAddressBarUrl(url) {
 
 function restackOverlays() {
   if (addressBarWindow && !addressBarWindow.isDestroyed()) addressBarWindow.moveTop();
+  if (clockWindow      && !clockWindow.isDestroyed())      clockWindow.moveTop();
   if (forkKnifeWindow  && !forkKnifeWindow.isDestroyed())  forkKnifeWindow.moveTop();
 }
 
@@ -724,6 +744,11 @@ function notePanelActivity(key, eventType) {
     if (forkKnifeWindow && !forkKnifeWindow.isDestroyed() && forkKnifeHomePos) {
       const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
       if (allAuto) forkKnifeWindow.setPosition(forkKnifeHomePos.x, forkKnifeHomePos.y);
+    }
+    // Same for the clock.
+    if (clockWindow && !clockWindow.isDestroyed() && clockHomePos) {
+      const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
+      if (allAuto) clockWindow.setPosition(clockHomePos.x, clockHomePos.y);
     }
   }, INACTIVITY_TIMEOUT_MS);
 
@@ -1517,6 +1542,72 @@ function createForkKnifeWindow(workArea) {
   });
 }
 
+// ---- Clock window -------------------------------------------------------------
+
+function fetchClockTimezone() {
+  // Deliberately plain http:// — ip-api.com's free tier has no https.
+  // See the identical comment in renderer.js for the full explanation.
+  http.get('http://ip-api.com/json/', (res) => {
+    let data = '';
+    res.on('data', chunk => { data += chunk; });
+    res.on('end', () => {
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed.timezone) {
+          clockTimezone = parsed.timezone;
+          if (clockWindow && !clockWindow.isDestroyed()) {
+            clockWindow.webContents.send('clock-timezone', clockTimezone);
+          }
+        }
+      } catch (e) {
+        console.error('[kiosk-clock] timezone parse failed:', e.message);
+      }
+    });
+  }).on('error', (e) => {
+    console.error('[kiosk-clock] timezone fetch failed:', e.message);
+  });
+}
+
+function createClockWindow(workArea) {
+  if (clockWindow && !clockWindow.isDestroyed()) {
+    clockWindow.destroy();
+  }
+  const homeX = workArea.x + CLOCK_POSITION.x;
+  const homeY = workArea.y + CLOCK_POSITION.y;
+  clockHomePos = { x: homeX, y: homeY };
+
+  clockWindow = new BrowserWindow({
+    x:           homeX,
+    y:           homeY,
+    width:       CLOCK_SIZE,
+    height:      CLOCK_SIZE,
+    frame:       false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable:   false,
+    movable:     true,
+    webPreferences: {
+      preload:          path.join(__dirname, 'kiosk-clock-preload.js'),
+      contextIsolation: true,
+      nodeIntegration:  false,
+      sandbox:          true,
+    },
+  });
+
+  clockWindow.loadFile(path.join(__dirname, 'kiosk-clock.html'));
+  clockWindow.webContents.on('dom-ready', () => {
+    clockWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS).catch(() => {});
+  });
+  clockWindow.webContents.once('did-finish-load', () => {
+    if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+      clockWindow.setShape([{ x: 0, y: 0, width: CLOCK_SIZE, height: CLOCK_SIZE }]);
+    }
+    clockWindow.webContents.send('clock-svg', _clockSvgText);
+    if (clockTimezone) clockWindow.webContents.send('clock-timezone', clockTimezone);
+  });
+}
+
 // ---- Address bar window -------------------------------------------------------
 
 function createAddressBarWindow(workArea) {
@@ -1750,7 +1841,15 @@ function createKioskWindow() {
   }
 
   createForkKnifeWindow(workArea);
+  createClockWindow(workArea);
   createAddressBarWindow(workArea);
+
+  // Start timezone fetch for the clock.  The interval is created only once so
+  // a future re-layout call doesn't spawn duplicate timers.
+  fetchClockTimezone();
+  if (!clockTzTimer) {
+    clockTzTimer = setInterval(fetchClockTimezone, CLOCK_TZ_REFETCH_MS);
+  }
 
   return order.map(key => panelWindows.get(key));
 }
@@ -1836,6 +1935,44 @@ function attachActivityHandling() {
     if (event.sender !== forkKnifeWindow.webContents) return;
     if (forkKnifeHomePos) {
       forkKnifeWindow.setPosition(forkKnifeHomePos.x, forkKnifeHomePos.y);
+    }
+  });
+
+  ipcMain.on('clock-drag-start', (event) => {
+    if (!clockWindow || clockWindow.isDestroyed()) return;
+    if (event.sender !== clockWindow.webContents) return;
+    const cursor = screen.getCursorScreenPoint();
+    const pos    = clockWindow.getPosition();
+    clockDragOffset = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
+  });
+
+  ipcMain.on('clock-drag-move', (event) => {
+    if (!clockWindow || clockWindow.isDestroyed()) return;
+    if (event.sender !== clockWindow.webContents) return;
+    if (!clockDragOffset) return;
+    const cursor       = screen.getCursorScreenPoint();
+    const { workArea } = screen.getDisplayMatching(clockWindow.getBounds());
+    const MIN_VIS      = 20;
+    let nx = cursor.x - clockDragOffset.dx;
+    let ny = cursor.y - clockDragOffset.dy;
+    nx = Math.max(workArea.x - CLOCK_SIZE + MIN_VIS,
+                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS));
+    ny = Math.max(workArea.y,
+                  Math.min(ny, workArea.y + workArea.height - CLOCK_SIZE));
+    clockWindow.setPosition(Math.round(nx), Math.round(ny));
+  });
+
+  ipcMain.on('clock-drag-end', (event) => {
+    if (!clockWindow || clockWindow.isDestroyed()) return;
+    if (event.sender !== clockWindow.webContents) return;
+    clockDragOffset = null;
+  });
+
+  ipcMain.on('clock-drag-reset', (event) => {
+    if (!clockWindow || clockWindow.isDestroyed()) return;
+    if (event.sender !== clockWindow.webContents) return;
+    if (clockHomePos) {
+      clockWindow.setPosition(clockHomePos.x, clockHomePos.y);
     }
   });
 

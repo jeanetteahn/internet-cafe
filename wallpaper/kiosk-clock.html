@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+      display: flex;
+      align-items: stretch;
+    }
+
+    /* #clock-wrap fills the window and receives all pointer events.
+       The injected SVG is pointer-events:none so drags reach this div. */
+    #clock-wrap {
+      position: relative;
+      flex: 1;
+      height: 100%;
+    }
+
+    /* Grabbing cursor during drag — higher specificity beats the injected spoon rule. */
+    #clock-wrap.grabbing, #clock-wrap.grabbing * { cursor: grabbing !important; }
+  </style>
+</head>
+<body>
+
+  <div id="clock-wrap"></div>
+
+  <script>
+    var wrap = document.getElementById('clock-wrap');
+
+    // ---- Clock state ----
+    var minuteHand  = null;
+    var hourHand    = null;
+    var firstRender = true;
+    var cumMinute   = 0;
+    var cumHour     = 0;
+    var tickTimer   = null;
+    var clockTz     = null; // IANA timezone; null = system time
+
+    // ---- Time helpers ----
+    function getLocalTime() {
+      var d = new Date();
+      if (clockTz) {
+        try {
+          var parts = new Intl.DateTimeFormat('en', {
+            timeZone:  clockTz,
+            hour:      'numeric',
+            minute:    'numeric',
+            second:    'numeric',
+            hourCycle: 'h23',
+          }).formatToParts(d);
+          function get(type) {
+            var p = parts.find(function (x) { return x.type === type; });
+            return p ? parseInt(p.value, 10) : 0;
+          }
+          return { h: get('hour'), m: get('minute'), s: get('second') };
+        } catch (e) {
+          console.error('[kiosk-clock] Intl error, falling back to system time:', e.message);
+        }
+      }
+      return { h: d.getHours(), m: d.getMinutes(), s: d.getSeconds() };
+    }
+
+    // Smallest non-negative forward delta from cumulative angle to a 0-360 target.
+    function nextCum(cum, target360) {
+      var modCum = ((cum % 360) + 360) % 360;
+      var delta  = ((target360 - modCum) + 360) % 360;
+      return cum + delta;
+    }
+
+    // ---- Tick ----
+    function tick() {
+      if (!minuteHand || !hourHand) return;
+      var now       = getLocalTime();
+      var rawMinute = now.m * 6  + now.s * 0.1;          // 0–360
+      var rawHour   = (now.h % 12) * 30 + now.m * 0.5;   // 0–360
+
+      if (firstRender) {
+        firstRender = false;
+        cumMinute = rawMinute;
+        cumHour   = rawHour;
+        // Snap to position with no animation on the first frame.
+        minuteHand.style.transform = 'rotate(' + cumMinute + 'deg)';
+        hourHand.style.transform   = 'rotate(' + (cumHour - 45) + 'deg)';
+        // Enable smooth transitions after the browser has painted the initial position.
+        requestAnimationFrame(function () {
+          minuteHand.style.transition = 'transform 0.4s ease';
+          hourHand.style.transition   = 'transform 0.4s ease';
+        });
+        return;
+      }
+
+      cumMinute = nextCum(cumMinute, rawMinute);
+      cumHour   = nextCum(cumHour,   rawHour);
+      minuteHand.style.transform = 'rotate(' + cumMinute + 'deg)';
+      // Hour hand SVG starts at 45° (1:30 position) — subtract to reach true 12 o'clock.
+      hourHand.style.transform   = 'rotate(' + (cumHour - 45) + 'deg)';
+    }
+
+    function startClock() {
+      if (tickTimer) clearInterval(tickTimer);
+      tick(); // immediate first tick
+      tickTimer = setInterval(tick, 1000);
+    }
+
+    // ---- IPC ----
+    if (window.kioskClock) {
+      // SVG text is sent once by the main process after did-finish-load.
+      window.kioskClock.onSvg(function (svgText) {
+        wrap.innerHTML = svgText;
+        var svg = wrap.querySelector('svg');
+        if (!svg) return;
+        // Size the SVG to fill the window via style; don't touch the file's attributes.
+        svg.style.width         = '100%';
+        svg.style.height        = '100%';
+        svg.style.pointerEvents = 'none';
+        svg.style.display       = 'block';
+
+        // Select hands by DOM order: [0] = minute (straight up), [1] = hour (45° offset).
+        var lines = svg.querySelectorAll('line');
+        minuteHand = lines[0];
+        hourHand   = lines[1];
+        [minuteHand, hourHand].forEach(function (l) {
+          l.style.transformBox    = 'view-box';
+          l.style.transformOrigin = '43.6px 43.6px';
+          l.style.transition      = 'none'; // overridden after first tick
+        });
+
+        startClock();
+      });
+
+      // Timezone arrives after ip-api.com fetch; may update any time.
+      window.kioskClock.onTimezone(function (tz) {
+        clockTz = tz;
+        // Reset to first-render so the hands jump to the correct position immediately.
+        firstRender = true;
+        if (minuteHand && hourHand) {
+          minuteHand.style.transition = 'none';
+          hourHand.style.transition   = 'none';
+        }
+      });
+    }
+
+    // ---- Drag (mirrors kiosk-forkknife.html exactly) ----
+    var DRAG_THRESHOLD = 5;
+    var isDragging  = false;
+    var capturedId  = null;
+    var dragStartX  = 0;
+    var dragStartY  = 0;
+
+    wrap.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      wrap.setPointerCapture(e.pointerId);
+      capturedId  = e.pointerId;
+      isDragging  = false;
+      dragStartX  = e.clientX;
+      dragStartY  = e.clientY;
+    });
+
+    wrap.addEventListener('pointermove', function (e) {
+      if (capturedId === null) return;
+      var dx = e.clientX - dragStartX;
+      var dy = e.clientY - dragStartY;
+      if (!isDragging && Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
+        isDragging = true;
+        wrap.classList.add('grabbing');
+        if (window.kioskClock) {
+          window.kioskClock.dragStart();
+          window.kioskClock.dragMove();
+        }
+      } else if (isDragging) {
+        if (window.kioskClock) window.kioskClock.dragMove();
+      }
+    });
+
+    wrap.addEventListener('pointerup', function (e) {
+      if (capturedId === null) return;
+      try { wrap.releasePointerCapture(capturedId); } catch (_) {}
+      capturedId = null;
+      wrap.classList.remove('grabbing');
+      if (isDragging) {
+        isDragging = false;
+        if (window.kioskClock) window.kioskClock.dragEnd();
+      }
+      // Tap (below threshold): no action — clock has no tap function.
+    });
+
+    wrap.addEventListener('pointercancel', function () {
+      wrap.classList.remove('grabbing');
+      if (isDragging && window.kioskClock) window.kioskClock.dragEnd();
+      isDragging = false;
+      capturedId = null;
+    });
+  </script>
+</body>
+</html>
