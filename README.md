@@ -97,7 +97,7 @@ field:
   follow links freely; a `did-navigate` guard redirects back to DuckDuckGo
   if a navigation lands outside `ALLOWED_DOMAINS`.
 
-After `INACTIVITY_TIMEOUT_MS` (90 s) of no activity, the panel returns to
+After `INACTIVITY_TIMEOUT_MS` (120 s) of no activity, the panel returns to
 its home position and size and switches back to auto mode.
 
 **Guardrails for anyone editing panel code:**
