@@ -450,6 +450,23 @@ Other things worth knowing:
   takes roughly 20-40 seconds to scroll, so expect on the order of 1-3
   requests per panel per minute while auto mode is running.  To reduce
   load, raise `SCROLL_STEP_MS` (slower scroll) or lower `SCROLL_STEP_PX`.
+- **Carbon indicator** — a 90 × 90 px draggable circle (`kiosk-carbon.html` /
+  `kiosk-carbon-preload.js`) floats near the top-left of whichever panel is
+  currently active. It uses [CO2.js](https://developers.thegreenwebfoundation.org/co2js/)
+  (Sustainable Web Design model) to estimate the carbon cost of each page view
+  from the bytes transferred, and shifts its gradient from blue (low) to orange
+  (high) accordingly. A few things to keep in mind:
+  - **This is an estimate**, not a measurement. CO2.js assumes an average energy
+    mix for the internet; real-world values vary by ISP, CDN, and data centre.
+  - **Repeat visits read greener** because browser caching reduces transferred
+    bytes. That accurately reflects the real saving — less data = less energy.
+  - Tunables: `CARBON_ANCHOR` (where it sits relative to the panel), `CARBON_CLEAN_G`
+    and `CARBON_DIRTY_G` (gram thresholds for blue and orange), all in
+    `kiosk-browsers.js`.
+  - **Linux after `git pull`:** `relaunch.sh` now runs `npm install --prefer-offline`
+    automatically if `package.json` is newer than `node_modules`, so the
+    `@tgwf/co2` dependency is picked up without a manual step. If you install
+    manually, run `npm install` in the `wallpaper/` directory.
 
 ## Recommended workflow
 

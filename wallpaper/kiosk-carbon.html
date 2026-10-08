@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+      display: flex;
+      align-items: stretch;
+    }
+
+    #carbon-wrap {
+      position: relative;
+      flex: 1;
+      height: 100%;
+    }
+
+    /* Grabbing cursor during drag. */
+    #carbon-wrap.grabbing, #carbon-wrap.grabbing * { cursor: grabbing !important; }
+  </style>
+</head>
+<body>
+
+  <div id="carbon-wrap"></div>
+
+  <script>
+    var wrap = document.getElementById('carbon-wrap');
+
+    // Original stop offsets from carboncircle.svg (9 stops).
+    var ORIG_OFFSETS = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1];
+
+    // ---- Gradient state ----
+    var stops        = null; // NodeList of <stop> elements
+    var curOffsets   = ORIG_OFFSETS.slice(); // current animated offsets
+    var targetOffsets = ORIG_OFFSETS.slice();
+    var animTimer    = null;  // requestAnimationFrame id
+    var animStart    = null;  // performance.now() when anim started
+    var ANIM_MS      = 400;
+    var fromOffsets  = ORIG_OFFSETS.slice(); // snapshot at anim start
+
+    // ---- Loading pulse ----
+    var isLoading   = false;
+    var pulseTimer  = null;
+    var pulsePhase  = 0; // 0-1 ramp for smooth cosine pulse
+
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+    // Compute target offsets for a given score (0=clean/blue, 1=dirty/orange).
+    function scoreToOffsets(score) {
+      var result = [];
+      for (var i = 0; i < ORIG_OFFSETS.length; i++) {
+        result.push(clamp(ORIG_OFFSETS[i] + (0.5 - score) * 1.2, 0, 1));
+      }
+      return result;
+    }
+
+    // Ease-out cubic interpolation factor for a 0-1 t value.
+    function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+
+    function startAnim(newTargets) {
+      fromOffsets   = curOffsets.slice();
+      targetOffsets = newTargets;
+      animStart     = null;
+      if (animTimer) cancelAnimationFrame(animTimer);
+      animTimer = requestAnimationFrame(animStep);
+    }
+
+    function animStep(ts) {
+      if (animStart === null) animStart = ts;
+      var t = clamp((ts - animStart) / ANIM_MS, 0, 1);
+      var f = easeOut(t);
+      for (var i = 0; i < curOffsets.length; i++) {
+        curOffsets[i] = fromOffsets[i] + (targetOffsets[i] - fromOffsets[i]) * f;
+      }
+      applyOffsets();
+      if (t < 1) {
+        animTimer = requestAnimationFrame(animStep);
+      } else {
+        animTimer = null;
+      }
+    }
+
+    function applyOffsets() {
+      if (!stops) return;
+      for (var i = 0; i < stops.length; i++) {
+        stops[i].setAttribute('offset', curOffsets[i].toFixed(4));
+      }
+    }
+
+    // ---- Loading pulse (opacity) ----
+    function startPulse() {
+      if (pulseTimer) return;
+      pulseTick();
+    }
+
+    function stopPulse() {
+      if (pulseTimer) { cancelAnimationFrame(pulseTimer); pulseTimer = null; }
+      if (wrap) wrap.style.opacity = '1';
+    }
+
+    var pulseStartTs = null;
+    var PULSE_MS = 1200;
+
+    function pulseTick(ts) {
+      if (!isLoading) { stopPulse(); return; }
+      if (pulseStartTs === null) pulseStartTs = ts || 0;
+      var t = ((ts || 0) - pulseStartTs) / PULSE_MS;
+      // cosine: 0.75 ↔ 1.0
+      var opacity = 0.875 + 0.125 * Math.cos(t * 2 * Math.PI);
+      if (wrap) wrap.style.opacity = opacity.toFixed(3);
+      pulseTimer = requestAnimationFrame(pulseTick);
+    }
+
+    // ---- IPC ----
+    if (window.kioskCarbon) {
+      window.kioskCarbon.onSvg(function (svgText) {
+        wrap.innerHTML = svgText;
+        var svg = wrap.querySelector('svg');
+        if (!svg) return;
+        svg.setAttribute('aria-hidden', 'true');
+        // Empty title so screen readers skip it.
+        var title = svg.querySelector('title');
+        if (!title) { title = document.createElementNS('http://www.w3.org/2000/svg', 'title'); svg.prepend(title); }
+        title.textContent = '';
+        svg.style.width         = '100%';
+        svg.style.height        = '100%';
+        svg.style.pointerEvents = 'none';
+        svg.style.display       = 'block';
+        stops = svg.querySelectorAll('stop');
+      });
+
+      window.kioskCarbon.onState(function (state) {
+        var score   = typeof state.score   === 'number' ? state.score   : 0.5;
+        var loading = !!state.loading;
+
+        isLoading = loading;
+        if (loading) {
+          startPulse();
+        } else {
+          stopPulse();
+          startAnim(scoreToOffsets(score));
+        }
+      });
+    }
+
+    // ---- Drag (mirrors kiosk-clock.html exactly, plus dblclick reset) ----
+    var DRAG_THRESHOLD = 5;
+    var isDragging = false;
+    var capturedId = null;
+    var dragStartX = 0;
+    var dragStartY = 0;
+
+    wrap.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      wrap.setPointerCapture(e.pointerId);
+      capturedId  = e.pointerId;
+      isDragging  = false;
+      dragStartX  = e.clientX;
+      dragStartY  = e.clientY;
+    });
+
+    wrap.addEventListener('pointermove', function (e) {
+      if (capturedId === null) return;
+      var dx = e.clientX - dragStartX;
+      var dy = e.clientY - dragStartY;
+      if (!isDragging && Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
+        isDragging = true;
+        wrap.classList.add('grabbing');
+        if (window.kioskCarbon) {
+          window.kioskCarbon.dragStart();
+          window.kioskCarbon.dragMove();
+        }
+      } else if (isDragging) {
+        if (window.kioskCarbon) window.kioskCarbon.dragMove();
+      }
+    });
+
+    wrap.addEventListener('pointerup', function (e) {
+      if (capturedId === null) return;
+      try { wrap.releasePointerCapture(capturedId); } catch (_) {}
+      capturedId = null;
+      wrap.classList.remove('grabbing');
+      if (isDragging) {
+        isDragging = false;
+        if (window.kioskCarbon) window.kioskCarbon.dragEnd();
+      }
+    });
+
+    wrap.addEventListener('pointercancel', function () {
+      wrap.classList.remove('grabbing');
+      if (isDragging && window.kioskCarbon) window.kioskCarbon.dragEnd();
+      isDragging = false;
+      capturedId = null;
+    });
+
+    // Double-click resets to anchor position.
+    wrap.addEventListener('dblclick', function () {
+      if (window.kioskCarbon) window.kioskCarbon.dragReset();
+    });
+  </script>
+</body>
+</html>

@@ -15,4 +15,13 @@ pkill -f xwinwrap 2>/dev/null
 pkill -f electron 2>/dev/null
 sleep 1
 
+# Re-run npm install if node_modules is missing or package.json is newer than
+# the lock file (e.g. after a git pull that added a new dependency like @tgwf/co2).
+NM="$PROJECT_DIR/node_modules"
+PKG="$PROJECT_DIR/package.json"
+if [ ! -d "$NM" ] || [ "$PKG" -nt "$NM/.package-lock.json" ]; then
+  echo "[relaunch] running npm install in $PROJECT_DIR..."
+  (cd "$PROJECT_DIR" && npm install --prefer-offline 2>&1) || echo "[relaunch] npm install failed, continuing anyway"
+fi
+
 exec bash "$PROJECT_DIR/linux/xwinwrap-launch.sh"

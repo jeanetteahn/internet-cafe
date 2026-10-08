@@ -34,6 +34,19 @@ const ADDRESSBAR_CURSOR_CSS = _spoonRule +
 // The file must not be modified — the renderer works with the raw bytes.
 const _clockSvgText = fs.readFileSync(path.join(__dirname, 'assets/clock/clock.svg'), 'utf8');
 
+// ---- Carbon SVG + CO2.js ----------------------------------------------------
+const _carbonSvgText = fs.readFileSync(path.join(__dirname, 'assets/carbon/carboncircle.svg'), 'utf8');
+// Fail-soft: co2Instance is null when @tgwf/co2 is not installed (should not
+// happen after npm install, but avoids a hard crash on first-launch if the
+// node_modules directory is stale).
+let co2Instance = null;
+try {
+  const { co2 } = require('@tgwf/co2');
+  co2Instance = new co2({ model: 'swd' });
+} catch (e) {
+  console.error('[kiosk-carbon] @tgwf/co2 not installed — carbon indicator will show neutral:', e.message);
+}
+
 // ---- Search topics ----------------------------------------------------------
 // Kid-friendly only.  Panels cycle through the list in order, staggered so
 // all five show different topics at launch.
@@ -158,6 +171,15 @@ const ADDRESSBAR_DOCK_OVERHANG_X   = 100; // bar overhangs hub browser-area left
 const ADDRESSBAR_DOCK_BOTTOM_INSET = 58;  // bar bottom sits this many px above hub browser-area bottom
 const ADDRESSBAR_MAX_W             = 900; // maximum expanded width (px)
 
+// ---- Carbon indicator window -------------------------------------------------
+const CARBON_SIZE    = 90;  // window width and height (px)
+// Offset from the panel window's top-left corner to the carbon window position.
+const CARBON_ANCHOR  = { x: 140, y: 120 };
+// CO2 thresholds (grams per page view) for the score log scale.
+// 0.1 g → score 0 (blue, clean); 1.0 g → score 1 (orange, dirty).
+const CARBON_CLEAN_G = 0.1;
+const CARBON_DIRTY_G = 1.0;
+
 // ---- Active-panel animation tunables ----------------------------------------
 // When a customer starts using a panel it grows to ACTIVE_SCALE × its home
 // size; when it goes idle it shrinks back.  The tween runs at ~60 fps via
@@ -227,6 +249,10 @@ let addressBarDragOffset = null;     // { dx, dy } set at drag-start, cleared at
 let addressBarDocked     = true;     // true = follows hub; false = free-floating
 let addressBarLiveUrl    = '';       // current URL shown in the bar
 let addressBarCurrentW   = AB_WIN_W; // current window width (AB_WIN_W when collapsed)
+let carbonWindow      = null;  // carbon indicator overlay window
+let carbonDragOffset  = null;  // { dx, dy } set at drag-start, cleared at drag-end
+let carbonUserPlaced  = false; // true once the user has manually dragged it
+let carbonGlideTimer  = null;  // setInterval id for glideCarbonTo tween
 
 // ---- Layout -----------------------------------------------------------------
 
@@ -698,6 +724,7 @@ function pushAddressBarUrl(url) {
 
 function restackOverlays() {
   if (addressBarWindow && !addressBarWindow.isDestroyed()) addressBarWindow.moveTop();
+  if (carbonWindow     && !carbonWindow.isDestroyed())     carbonWindow.moveTop();
   if (clockWindow      && !clockWindow.isDestroyed())      clockWindow.moveTop();
   if (forkKnifeWindow  && !forkKnifeWindow.isDestroyed())  forkKnifeWindow.moveTop();
 }
@@ -720,6 +747,7 @@ function notePanelActivity(key, eventType) {
     if (_v && !_v.webContents.isDestroyed()) _v.webContents.setAudioMuted(false);
     sendModeToHandle(key, 'active');
     pushForkKnifeNavState();
+    updateCarbonFollow(key);
   }
 
   clearTimeout(ps.inactivityTimer);
@@ -750,6 +778,8 @@ function notePanelActivity(key, eventType) {
       const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
       if (allAuto) clockWindow.setPosition(clockHomePos.x, clockHomePos.y);
     }
+    // Carbon follows whichever panel is now active (or hub if all idle).
+    updateCarbonFollow(getActiveKey());
   }, INACTIVITY_TIMEOUT_MS);
 
   // Only deliberate events enlarge the panel.
@@ -777,6 +807,34 @@ function notePanelActivity(key, eventType) {
 function setupViewEventHandlers(key, win, view) {
   view.webContents.on('page-title-updated', (_e, title) => {
     if (!win.isDestroyed()) win.webContents.send('panel-title', title);
+  });
+
+  // Attach CDP so we can tally transferred bytes for the carbon indicator.
+  try {
+    view.webContents.debugger.attach('1.3');
+    view.webContents.debugger.sendCommand('Network.enable').catch(() => {});
+    view.webContents.debugger.on('message', (_event, method, params) => {
+      if (method !== 'Network.loadingFinished') return;
+      const ps = panelStates.get(key);
+      if (ps) ps.carbonBytes += Math.max(0, params.encodedDataLength || 0);
+    });
+    view.webContents.debugger.on('detach', (_event, reason) => {
+      console.log(`[kiosk-carbon] ${key} debugger detached (${reason})`);
+    });
+  } catch (e) {
+    console.error(`[kiosk-carbon] ${key} debugger attach failed:`, e.message);
+  }
+
+  // Reset carbon byte counter at the start of each main-frame navigation so the
+  // score reflects only the current page's transferred data.
+  view.webContents.on('did-start-navigation', (_e, url, isInPlace, isMainFrame) => {
+    if (!isMainFrame || isInPlace) return;
+    if (!url || url.startsWith('data:') || url === 'about:blank' || url.startsWith('file:')) return;
+    const ps = panelStates.get(key);
+    if (!ps) return;
+    ps.carbonBytes   = 0;
+    ps.carbonLoading = true;
+    pushCarbonState(key);
   });
 
   view.webContents.on('did-finish-load', () => {
@@ -837,6 +895,21 @@ function setupViewEventHandlers(key, win, view) {
         }
       }
     }
+
+    // Carbon: main-frame load finished — compute grams and push state.
+    {
+      const ps = panelStates.get(key);
+      if (ps) {
+        ps.carbonLoading = false;
+        if (co2Instance && ps.carbonBytes > 0) {
+          ps.carbonGrams = co2Instance.perByte(ps.carbonBytes, false);
+        } else {
+          ps.carbonGrams = ps.carbonGrams || 0;
+        }
+        console.log(`[kiosk-carbon] ${key} bytes=${ps.carbonBytes} grams=${(ps.carbonGrams || 0).toFixed(4)}`);
+        pushCarbonState(key);
+      }
+    }
   });
 
   view.webContents.on('did-fail-load', (_e, errorCode, _desc, failedUrl, isMainFrame) => {
@@ -856,10 +929,14 @@ function setupViewEventHandlers(key, win, view) {
     if (ps.mode === 'active') {
       console.log(`[kiosk-active] ${key} load failed (${errorCode}): ${failedUrl}`);
       view.webContents.loadURL(buildErrorPageUrl("This page couldn't be loaded.", failedUrl)).catch(() => {});
+      ps.carbonLoading = false;
+      pushCarbonState(key);
       return;
     }
     if (ps.mode !== 'auto') return;
     console.log(`[kiosk-auto] ${key} load failed (${errorCode}): ${failedUrl}`);
+    ps.carbonLoading = false;
+    pushCarbonState(key);
     if (ps.autoPhase === 'result') {
       // A broken third-party page should not slow down DDG searches — skip backoff.
       console.log(`[kiosk-auto] ${key} result failed, skipping`);
@@ -1665,6 +1742,126 @@ function createAddressBarWindow(workArea) {
   });
 }
 
+// ---- Carbon indicator helpers -----------------------------------------------
+
+// Maps grams of CO2 to a 0–1 score on a log scale between CARBON_CLEAN_G and
+// CARBON_DIRTY_G.  0 = clean (blue), 1 = dirty (orange).
+function computeCarbonScore(grams) {
+  if (!grams || grams <= 0) return 0.5;
+  const lo = Math.log(CARBON_CLEAN_G);
+  const hi = Math.log(CARBON_DIRTY_G);
+  const v  = Math.log(grams);
+  return Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+}
+
+// Send the current carbon state of the given key to the carbon window.
+// Only sends when that key is the currently active panel, and only when the
+// carbon window exists.
+function pushCarbonState(key) {
+  if (!carbonWindow || carbonWindow.isDestroyed()) return;
+  if (key !== getActiveKey()) return;
+  const ps = panelStates.get(key);
+  if (!ps) return;
+  const score = computeCarbonScore(ps.carbonGrams || 0);
+  carbonWindow.webContents.send('carbon-state', { score, loading: !!ps.carbonLoading });
+}
+
+// Returns the screen position where the carbon window should sit for a given
+// panel key — CARBON_ANCHOR pixels from the panel window's top-left corner.
+function computeCarbonAnchor(key) {
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return null;
+  const b = win.getBounds();
+  return {
+    x: Math.round(b.x + CARBON_ANCHOR.x),
+    y: Math.round(b.y + CARBON_ANCHOR.y),
+  };
+}
+
+// Smoothly move the carbon window to a target {x, y} position.
+function glideCarbonTo(pos) {
+  if (!carbonWindow || carbonWindow.isDestroyed() || !pos) return;
+  if (carbonGlideTimer) { clearInterval(carbonGlideTimer); carbonGlideTimer = null; }
+  const from = { x: carbonWindow.getPosition()[0], y: carbonWindow.getPosition()[1] };
+  if (from.x === pos.x && from.y === pos.y) return;
+  const GLIDE_MS    = 220;
+  const STEP_MS     = TWEEN_INTERVAL_MS;
+  const steps       = Math.max(1, Math.round(GLIDE_MS / STEP_MS));
+  let   step        = 0;
+  carbonGlideTimer  = setInterval(() => {
+    if (!carbonWindow || carbonWindow.isDestroyed()) {
+      clearInterval(carbonGlideTimer); carbonGlideTimer = null; return;
+    }
+    step++;
+    const t  = step / steps;
+    const f  = 1 - Math.pow(1 - t, 3); // ease-out cubic
+    const nx = Math.round(from.x + (pos.x - from.x) * f);
+    const ny = Math.round(from.y + (pos.y - from.y) * f);
+    carbonWindow.setPosition(nx, ny);
+    if (step >= steps) { clearInterval(carbonGlideTimer); carbonGlideTimer = null; }
+  }, STEP_MS);
+}
+
+// Move the carbon window to follow the given panel key, unless the user has
+// manually placed it.
+function updateCarbonFollow(key) {
+  if (carbonUserPlaced) return;
+  const pos = computeCarbonAnchor(key);
+  if (pos) glideCarbonTo(pos);
+  pushCarbonState(key);
+}
+
+// ---- Carbon window ------------------------------------------------------------
+
+function createCarbonWindow(workArea) {
+  if (carbonWindow && !carbonWindow.isDestroyed()) {
+    carbonWindow.destroy();
+  }
+
+  const hubWin  = panelWindows.get('hub');
+  let startX = workArea.x + CARBON_ANCHOR.x;
+  let startY = workArea.y + CARBON_ANCHOR.y;
+  if (hubWin && !hubWin.isDestroyed()) {
+    const b = hubWin.getBounds();
+    startX  = b.x + CARBON_ANCHOR.x;
+    startY  = b.y + CARBON_ANCHOR.y;
+  }
+
+  carbonUserPlaced = false;
+
+  carbonWindow = new BrowserWindow({
+    x:           Math.round(startX),
+    y:           Math.round(startY),
+    width:       CARBON_SIZE,
+    height:      CARBON_SIZE,
+    frame:       false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable:   false,
+    movable:     true,
+    webPreferences: {
+      preload:          path.join(__dirname, 'kiosk-carbon-preload.js'),
+      contextIsolation: true,
+      nodeIntegration:  false,
+      sandbox:          true,
+    },
+  });
+
+  carbonWindow.loadFile(path.join(__dirname, 'kiosk-carbon.html'));
+  carbonWindow.webContents.on('dom-ready', () => {
+    carbonWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS).catch(() => {});
+  });
+  carbonWindow.webContents.once('did-finish-load', () => {
+    if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+      carbonWindow.setShape([{ x: 0, y: 0, width: CARBON_SIZE, height: CARBON_SIZE }]);
+    }
+    carbonWindow.webContents.send('carbon-svg', _carbonSvgText);
+    // Push initial neutral loading state.
+    carbonWindow.webContents.send('carbon-state', { score: 0.5, loading: false });
+  });
+}
+
 // ---- Window creation --------------------------------------------------------
 
 /**
@@ -1843,6 +2040,7 @@ function createKioskWindow() {
   createForkKnifeWindow(workArea);
   createClockWindow(workArea);
   createAddressBarWindow(workArea);
+  createCarbonWindow(workArea);
 
   // Start timezone fetch for the clock.  The interval is created only once so
   // a future re-layout call doesn't spawn duplicate timers.
@@ -2108,6 +2306,45 @@ function attachActivityHandling() {
       addressBarWindow.setShape([{ x: 0, y: 0, width: AB_WIN_W, height: AB_WIN_H }]);
     }
   });
+
+  ipcMain.on('carbon-drag-start', (event) => {
+    if (!carbonWindow || carbonWindow.isDestroyed()) return;
+    if (event.sender !== carbonWindow.webContents) return;
+    const cursor = screen.getCursorScreenPoint();
+    const pos    = carbonWindow.getPosition();
+    carbonDragOffset  = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
+    carbonUserPlaced  = true;
+    if (carbonGlideTimer) { clearInterval(carbonGlideTimer); carbonGlideTimer = null; }
+  });
+
+  ipcMain.on('carbon-drag-move', (event) => {
+    if (!carbonWindow || carbonWindow.isDestroyed()) return;
+    if (event.sender !== carbonWindow.webContents) return;
+    if (!carbonDragOffset) return;
+    const cursor       = screen.getCursorScreenPoint();
+    const { workArea } = screen.getDisplayMatching(carbonWindow.getBounds());
+    const MIN_VIS      = 20;
+    let nx = cursor.x - carbonDragOffset.dx;
+    let ny = cursor.y - carbonDragOffset.dy;
+    nx = Math.max(workArea.x - CARBON_SIZE + MIN_VIS,
+                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS));
+    ny = Math.max(workArea.y,
+                  Math.min(ny, workArea.y + workArea.height - CARBON_SIZE));
+    carbonWindow.setPosition(Math.round(nx), Math.round(ny));
+  });
+
+  ipcMain.on('carbon-drag-end', (event) => {
+    if (!carbonWindow || carbonWindow.isDestroyed()) return;
+    if (event.sender !== carbonWindow.webContents) return;
+    carbonDragOffset = null;
+  });
+
+  ipcMain.on('carbon-drag-reset', (event) => {
+    if (!carbonWindow || carbonWindow.isDestroyed()) return;
+    if (event.sender !== carbonWindow.webContents) return;
+    carbonUserPlaced = false;
+    glideCarbonTo(computeCarbonAnchor(getActiveKey()));
+  });
 }
 
 // ---- Startup ----------------------------------------------------------------
@@ -2134,6 +2371,9 @@ function startAllIdleRotation() {
       recentResultUrls:   [],       // recently visited result URLs (max ~20); prevents re-visiting the same page
       highlightTimer:     null,     // RESULT_HIGHLIGHT_MS timeout before navigating to a chosen result
       resultDwellTimer:   null,     // RESULT_DWELL_MS cap on result pages before returning to search
+      carbonBytes:        0,        // running total of CDP encodedDataLength for current page load
+      carbonGrams:        0,        // CO2 grams from last completed page load
+      carbonLoading:      false,    // true while a main-frame navigation is in progress
     });
 
     // Stagger first loads by INITIAL_LOAD_STAGGER_MS so all five panels show

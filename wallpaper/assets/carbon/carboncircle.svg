@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Carbon indicator: vector rebuild of the original raster circle.
+  Colors were sampled from the original image so it matches visually.
+  The gradient runs top (blue, low carbon) to bottom (orange, high carbon).
+  Code can recolor it by moving the stop offsets inside #carbonGradient,
+  e.g. shifting every offset up makes the circle read "more orange".
+-->
+<svg id="carbon-circle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 87.2 87.2">
+  <defs>
+    <linearGradient id="carbonGradient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"     stop-color="#4AB0E1"/>
+      <stop offset="0.125" stop-color="#6DA9D1"/>
+      <stop offset="0.25"  stop-color="#89A0BA"/>
+      <stop offset="0.375" stop-color="#9F97A5"/>
+      <stop offset="0.5"   stop-color="#B38E91"/>
+      <stop offset="0.625" stop-color="#C3837D"/>
+      <stop offset="0.75"  stop-color="#D27563"/>
+      <stop offset="0.875" stop-color="#E06349"/>
+      <stop offset="1"     stop-color="#E95026"/>
+    </linearGradient>
+  </defs>
+  <circle id="carbon-fill" cx="43.6" cy="43.6" r="43.5" fill="url(#carbonGradient)"/>
+</svg>

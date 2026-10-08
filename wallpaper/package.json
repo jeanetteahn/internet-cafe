@@ -9,6 +9,9 @@
     "start:kiosk-only": "electron kiosk-main.js",
     "build:linux": "electron-builder --linux AppImage"
   },
+  "dependencies": {
+    "@tgwf/co2": "^0.15.0"
+  },
   "devDependencies": {
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3"
