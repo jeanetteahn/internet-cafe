@@ -23,7 +23,10 @@ const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') 3 0,auto!important}input
 const PANEL_CURSOR_CSS     = _spoonRule;
 const HANDLE_CURSOR_CSS    = _spoonRule + '#strip{cursor:grab!important}';
 const GRIP_CURSOR_CSS      = _spoonRule + '.grip{cursor:nwse-resize!important}';
-const FORKKNIFE_CURSOR_CSS = _spoonRule;
+const FORKKNIFE_CURSOR_CSS  = _spoonRule;
+const ADDRESSBAR_CURSOR_CSS = _spoonRule +
+  '#drag-pad{cursor:grab!important}' +
+  '#bar.dragging,#bar.dragging *{cursor:grabbing!important}';
 
 // ---- Search topics ----------------------------------------------------------
 // Kid-friendly only.  Panels cycle through the list in order, staggered so
@@ -133,6 +136,13 @@ const FORKKNIFE_POSITION = { x: 24, y: 24 };
 const FORKKNIFE_WIN_W    = FK_GRAPHIC_W + FK_PAD; // ~56 px
 const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD;         // ~27 px
 
+// ---- Address bar window -------------------------------------------------------
+// Dimensions match the SVG viewBox (310.59 × 43.62 → 311 × 44 px).
+const AB_WIN_W                   = 311; // address bar window width
+const AB_WIN_H                   = 44;  // address bar window height
+const ADDRESSBAR_DOCK_OVERHANG_X = 100; // bar overhangs hub browser-area left edge by this many px
+const ADDRESSBAR_DOCK_BOTTOM_INSET = 58; // bar bottom sits this many px above hub browser-area bottom
+
 // ---- Active-panel animation tunables ----------------------------------------
 // When a customer starts using a panel it grows to ACTIVE_SCALE × its home
 // size; when it goes idle it shrinks back.  The tween runs at ~60 fps via
@@ -192,6 +202,10 @@ let   enlargedKey = null;      // panel key currently enlarged, or null
 let forkKnifeWindow     = null; // standalone forkknife nav control window
 let forkKnifeDragOffset = null; // { dx, dy } set at drag-start, cleared at drag-end
 let forkKnifeHomePos    = null; // starting position, restored on double-click
+let addressBarWindow     = null; // floating address bar for the hub panel
+let addressBarDragOffset = null; // { dx, dy } set at drag-start, cleared at drag-end
+let addressBarDocked     = true; // true = follows hub; false = free-floating
+let addressBarLiveUrl    = '';   // current URL shown in the bar
 
 // ---- Layout -----------------------------------------------------------------
 
@@ -369,6 +383,7 @@ function setPanelBoundsIgnored(key, bounds) {
   ignoreNextMoves.set(key, setTimeout(() => ignoreNextMoves.set(key, null), 400));
   const win = panelWindows.get(key);
   if (win && !win.isDestroyed()) win.setBounds(bounds);
+  if (key === 'hub') repositionAddressBarTo(bounds);
 }
 
 function sendPanelHome(key) {
@@ -571,6 +586,7 @@ function enlargePanel(key) {
   if (!win || win.isDestroyed()) return;
   tweenBounds(key, win.getBounds(), activeBounds, ACTIVE_ANIM_MS);
   win.moveTop();
+  restackOverlays();
 }
 
 // Animate the panel back to its home bounds.  Skips animation if the panel is
@@ -602,6 +618,7 @@ function resetPanelLayout(key) {
   if (enlargedKey === key) enlargedKey = null;
   const ps = panelStates.get(key);
   if (ps) ps.manualLayout = false;
+  if (key === 'hub') addressBarDocked = true;
   sendPanelHome(key);
 }
 
@@ -633,6 +650,36 @@ function pushForkKnifeNavState() {
   forkKnifeWindow.webContents.send('forkknife-nav-state', state);
 }
 
+// ---- Address bar helpers ----------------------------------------------------
+
+function repositionAddressBarTo(hubBounds) {
+  if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+  if (!addressBarDocked) return;
+  const M  = HARDWARE_MARGIN;
+  const ax = hubBounds.x + M - ADDRESSBAR_DOCK_OVERHANG_X;
+  const ay = hubBounds.y + hubBounds.height - M - ADDRESSBAR_DOCK_BOTTOM_INSET - AB_WIN_H;
+  addressBarWindow.setPosition(Math.round(ax), Math.round(ay));
+}
+
+function repositionAddressBar() {
+  const hubWin = panelWindows.get('hub');
+  if (!hubWin || hubWin.isDestroyed()) return;
+  repositionAddressBarTo(hubWin.getBounds());
+}
+
+function pushAddressBarUrl(url) {
+  if (!url || url.startsWith('data:') || url === 'about:blank') return;
+  addressBarLiveUrl = url;
+  if (addressBarWindow && !addressBarWindow.isDestroyed()) {
+    addressBarWindow.webContents.send('addressbar-url', url);
+  }
+}
+
+function restackOverlays() {
+  if (addressBarWindow && !addressBarWindow.isDestroyed()) addressBarWindow.moveTop();
+  if (forkKnifeWindow  && !forkKnifeWindow.isDestroyed())  forkKnifeWindow.moveTop();
+}
+
 // ---- Activity ---------------------------------------------------------------
 
 // eventType is the DOM event type from kiosk-preload.js ('mousedown', 'click',
@@ -659,6 +706,7 @@ function notePanelActivity(key, eventType) {
     // resized during this active session, animate the shrink.  If they did
     // (manualLayout), use an instant snap so we don't override their layout
     // choice mid-animation, or skip entirely if RETURN_HOME_WHEN_IDLE is off.
+    if (key === 'hub') addressBarDocked = true;
     if (!ps.manualLayout) {
       shrinkPanelToHome(key);
     } else if (RETURN_HOME_WHEN_IDLE) {
@@ -818,10 +866,12 @@ function setupViewEventHandlers(key, win, view) {
     }
 
     pushForkKnifeNavState();
+    if (key === 'hub') pushAddressBarUrl(url);
   });
 
   view.webContents.on('did-navigate-in-page', () => {
     pushForkKnifeNavState();
+    if (key === 'hub') pushAddressBarUrl(view.webContents.getURL());
   });
 
   // Navigation guard -- applies to all page-initiated navigations (meta-refresh,
@@ -1465,6 +1515,62 @@ function createForkKnifeWindow(workArea) {
   });
 }
 
+// ---- Address bar window -------------------------------------------------------
+
+function createAddressBarWindow(workArea) {
+  if (addressBarWindow && !addressBarWindow.isDestroyed()) {
+    addressBarWindow.destroy();
+  }
+
+  const hubWin = panelWindows.get('hub');
+  let startX = workArea.x;
+  let startY = workArea.y;
+  if (hubWin && !hubWin.isDestroyed()) {
+    const b = hubWin.getBounds();
+    startX = b.x + HARDWARE_MARGIN - ADDRESSBAR_DOCK_OVERHANG_X;
+    startY = b.y + b.height - HARDWARE_MARGIN - ADDRESSBAR_DOCK_BOTTOM_INSET - AB_WIN_H;
+  }
+
+  addressBarDocked   = true;
+  addressBarLiveUrl  = '';
+
+  addressBarWindow = new BrowserWindow({
+    x:               Math.round(startX),
+    y:               Math.round(startY),
+    width:           AB_WIN_W,
+    height:          AB_WIN_H,
+    frame:           false,
+    transparent:     false,
+    backgroundColor: '#ffffff',
+    alwaysOnTop:     true,
+    skipTaskbar:     true,
+    resizable:       false,
+    focusable:       true,
+    webPreferences: {
+      preload:          path.join(__dirname, 'kiosk-addressbar-preload.js'),
+      contextIsolation: true,
+      nodeIntegration:  false,
+      sandbox:          true,
+    },
+  });
+
+  addressBarWindow.loadFile(path.join(__dirname, 'kiosk-addressbar.html'));
+
+  addressBarWindow.webContents.on('dom-ready', () => {
+    addressBarWindow.webContents.insertCSS(ADDRESSBAR_CURSOR_CSS).catch(() => {});
+  });
+
+  addressBarWindow.webContents.once('did-finish-load', () => {
+    if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+      addressBarWindow.setShape([{ x: 0, y: 0, width: AB_WIN_W, height: AB_WIN_H }]);
+    }
+    const hubView = panelViews['hub'];
+    if (hubView && !hubView.webContents.isDestroyed()) {
+      pushAddressBarUrl(hubView.webContents.getURL());
+    }
+  });
+}
+
 // ---- Window creation --------------------------------------------------------
 
 /**
@@ -1569,10 +1675,12 @@ function createKioskWindow() {
       positionGrip(key);
       updateWindowShape(key);
       if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
+      if (key === 'hub') repositionAddressBar();
     });
 
     let moveDebounce = null;
     win.on('move', () => {
+      if (key === 'hub') repositionAddressBar();
       if (ignoreNextMoves.get(key)) return;
       if (Date.now() - windowsCreatedAt < 5_000) {
         console.log(`[kiosk-auto] ${key} startup move ignored`);
@@ -1607,6 +1715,7 @@ function createKioskWindow() {
   // Re-stack hub on top now that all five windows exist.
   const hubWin = panelWindows.get('hub');
   if (hubWin && !hubWin.isDestroyed()) hubWin.moveTop();
+  restackOverlays();
 
   attachActivityHandling();
   startAllIdleRotation();
@@ -1638,6 +1747,7 @@ function createKioskWindow() {
   }
 
   createForkKnifeWindow(workArea);
+  createAddressBarWindow(workArea);
 
   return order.map(key => panelWindows.get(key));
 }
@@ -1744,6 +1854,91 @@ function attachActivityHandling() {
   ipcMain.on('panel-resize-end', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
     if (key) endResize(key);
+  });
+
+  ipcMain.on('addressbar-navigate', (event, raw) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    let url = (raw || '').trim();
+    if (!url) return;
+    if (!/^https?:\/\//i.test(url)) {
+      url = /^[^\s]+\.[^\s]+$/.test(url) ? 'https://' + url : buildSearchUrl(url);
+    }
+    if (isDdgSearchUrl(url)) {
+      try {
+        const p = new URL(url);
+        if (p.searchParams.get('kp') !== '1') { p.searchParams.set('kp', '1'); url = p.toString(); }
+      } catch {}
+    }
+    if (!isPassesPolicy(url)) { console.log(`[kiosk] addressbar blocked: ${url}`); return; }
+    const hubView = panelViews['hub'];
+    if (!hubView || hubView.webContents.isDestroyed()) return;
+    hubView.webContents.loadURL(url).catch(() => {});
+    notePanelActivity('hub', 'click');
+    const hubWin = panelWindows.get('hub');
+    if (hubWin && !hubWin.isDestroyed()) { hubWin.focus(); hubView.webContents.focus(); }
+  });
+
+  ipcMain.on('addressbar-focus', (event) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    const ps = panelStates.get('hub');
+    if (ps) ps.lastTrustedInputAt = Date.now();
+    notePanelActivity('hub', 'click');
+  });
+
+  ipcMain.on('addressbar-keydown', (event) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    const ps = panelStates.get('hub');
+    if (ps) ps.lastTrustedInputAt = Date.now();
+    notePanelActivity('hub', 'keydown');
+  });
+
+  ipcMain.on('addressbar-escape', (event) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    pushAddressBarUrl(addressBarLiveUrl);
+    const hubWin  = panelWindows.get('hub');
+    const hubView = panelViews['hub'];
+    if (hubWin  && !hubWin.isDestroyed())              hubWin.focus();
+    if (hubView && !hubView.webContents.isDestroyed()) hubView.webContents.focus();
+  });
+
+  ipcMain.on('addressbar-drag-start', (event) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    const cursor = screen.getCursorScreenPoint();
+    const pos    = addressBarWindow.getPosition();
+    addressBarDragOffset = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
+    addressBarDocked = false;
+  });
+
+  ipcMain.on('addressbar-drag-move', (event) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    if (!addressBarDragOffset) return;
+    const cursor       = screen.getCursorScreenPoint();
+    const { workArea } = screen.getDisplayMatching(addressBarWindow.getBounds());
+    const MIN_VIS      = 20;
+    let nx = cursor.x - addressBarDragOffset.dx;
+    let ny = cursor.y - addressBarDragOffset.dy;
+    nx = Math.max(workArea.x - AB_WIN_W + MIN_VIS, Math.min(nx, workArea.x + workArea.width  - MIN_VIS));
+    ny = Math.max(workArea.y, Math.min(ny, workArea.y + workArea.height - AB_WIN_H));
+    addressBarWindow.setPosition(Math.round(nx), Math.round(ny));
+  });
+
+  ipcMain.on('addressbar-drag-end', (event) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    addressBarDragOffset = null;
+  });
+
+  ipcMain.on('addressbar-dock', (event) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    addressBarDocked = true;
+    repositionAddressBar();
   });
 }
 

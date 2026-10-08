@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src 'self' file:;">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html {
+      width: 311px; height: 44px;
+      border: 1px solid #ea4b00;
+      background: #ffffff;
+      overflow: hidden;
+    }
+    body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    @font-face {
+      font-family: 'Apercu Mono';
+      src: url('assets/fonts/ApercuMono.otf') format('opentype');
+      font-weight: normal;
+      font-style: normal;
+    }
+
+    /* ---- Layout ---- */
+    /* Window is 311 × 44 px (SVG viewBox 310.59 × 43.62).
+       Text in SVG starts at translate(28.98, 25.88) — the drag pad is
+       the leftmost ~29 px; the input fills the remainder. */
+    #bar {
+      display: flex;
+      align-items: stretch;
+      width: 100%;
+      height: 100%;
+    }
+
+    #drag-pad {
+      flex-shrink: 0;
+      width: 29px;
+      cursor: grab;
+    }
+
+    #url {
+      flex: 1;
+      border: none;
+      outline: none;
+      background: transparent;
+      font-family: 'Apercu Mono', 'Apercu-Mono', monospace;
+      font-size: 14px;
+      color: #ea4b00;
+      padding: 0;
+      margin: 0;
+      cursor: text;
+      /* Vertically align text to match SVG baseline (y≈26 in 44 px). */
+      line-height: 44px;
+    }
+
+    /* Grabbing cursor during drag — beats the injected spoon rule. */
+    #bar.dragging, #bar.dragging * { cursor: grabbing !important; }
+  </style>
+</head>
+<body>
+  <!-- drag-pad: grab to move freely; dblclick to re-dock to hub. -->
+  <div id="bar">
+    <div id="drag-pad"></div>
+    <input id="url" type="text"
+           spellcheck="false" autocomplete="off"
+           autocorrect="off" autocapitalize="off">
+  </div>
+
+  <script>
+    var liveUrl     = '';
+    var urlInput    = document.getElementById('url');
+    var bar         = document.getElementById('bar');
+
+    // ---- URL updates from main process ----
+    if (window.kioskAddressBar) {
+      window.kioskAddressBar.onUrl(function (url) {
+        liveUrl = url;
+        // Don't overwrite while the user is editing.
+        if (document.activeElement !== urlInput) urlInput.value = url;
+      });
+    }
+
+    // ---- Input events ----
+    urlInput.addEventListener('focus', function () {
+      urlInput.select();
+      if (window.kioskAddressBar) window.kioskAddressBar.focus();
+    });
+
+    urlInput.addEventListener('blur', function () {
+      urlInput.value = liveUrl;
+    });
+
+    var keydownThrottle = null;
+    urlInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        var val = urlInput.value.trim();
+        if (val && window.kioskAddressBar) window.kioskAddressBar.navigate(val);
+        urlInput.blur();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        urlInput.value = liveUrl;
+        urlInput.blur();
+        if (window.kioskAddressBar) window.kioskAddressBar.escape();
+      } else {
+        // Throttle activity pings to avoid spamming IPC while typing.
+        if (!keydownThrottle && window.kioskAddressBar) {
+          window.kioskAddressBar.keydown();
+          keydownThrottle = setTimeout(function () { keydownThrottle = null; }, 500);
+        }
+      }
+    });
+
+    // ---- Drag from bar (anywhere except the input) ----
+    var DRAG_THRESHOLD = 5;
+    var isDragging  = false;
+    var capturedId  = null;
+    var dragStartX  = 0;
+    var dragStartY  = 0;
+
+    bar.addEventListener('pointerdown', function (e) {
+      if (e.target === urlInput) return;
+      e.preventDefault();
+      bar.setPointerCapture(e.pointerId);
+      capturedId = e.pointerId;
+      isDragging = false;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+    });
+
+    bar.addEventListener('pointermove', function (e) {
+      if (capturedId === null) return;
+      var dx = e.clientX - dragStartX;
+      var dy = e.clientY - dragStartY;
+      if (!isDragging && Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
+        isDragging = true;
+        bar.classList.add('dragging');
+        if (window.kioskAddressBar) {
+          window.kioskAddressBar.dragStart();
+          window.kioskAddressBar.dragMove();
+        }
+      } else if (isDragging) {
+        if (window.kioskAddressBar) window.kioskAddressBar.dragMove();
+      }
+    });
+
+    bar.addEventListener('pointerup', function (e) {
+      if (capturedId === null) return;
+      try { bar.releasePointerCapture(capturedId); } catch (_) {}
+      capturedId = null;
+      bar.classList.remove('dragging');
+      if (isDragging) {
+        isDragging = false;
+        if (window.kioskAddressBar) window.kioskAddressBar.dragEnd();
+      }
+    });
+
+    bar.addEventListener('pointercancel', function () {
+      bar.classList.remove('dragging');
+      if (isDragging && window.kioskAddressBar) window.kioskAddressBar.dragEnd();
+      isDragging = false;
+      capturedId = null;
+    });
+
+    // Double-click on bar (not input) re-docks to hub.
+    bar.addEventListener('dblclick', function (e) {
+      if (e.target === urlInput) return;
+      if (window.kioskAddressBar) window.kioskAddressBar.dock();
+    });
+  </script>
+</body>
+</html>

@@ -422,10 +422,13 @@ Other things worth knowing:
 - **Panel sizes scale with the display** — `computeClusterLayout()` in
   `kiosk-browsers.js` sizes each panel as a fraction of 88 % × 82 % of the
   work area, so the cluster fits any resolution with margin.
-- **No address bar or browser chrome yet** — panels show whatever page
-  they're on with no navigation controls of their own; customers browse by
-  clicking links within the page. Worth adding if that's a problem in
-  practice.
+- **Address bar for the hub panel** — a floating 311 × 44 px bar
+  (`kiosk-addressbar.html` / `kiosk-addressbar-preload.js`) sits near the
+  bottom-left of the hub, overhanging its left edge.  It shows the hub's
+  live URL; customers can click it, type a URL or search query, and press
+  Enter to navigate.  The bar follows the hub through drag, resize, enlarge,
+  and shrink.  Dragging the left pad undocks it; double-clicking the pad or
+  pressing Reset re-docks it.
 - **Guardrail: all windows and views must stay referenced.** Every
   `BrowserWindow` and `BrowserView` must remain in the module-level Maps
   (`panelWindows`, `panelViews`, `gripViews`).  V8 silently destroys any
