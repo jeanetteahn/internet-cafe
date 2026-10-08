@@ -17,30 +17,8 @@
       align-items: stretch;
     }
 
-    /* ---- Drag grip ---- */
-    /* width matches FK_GRIP_W = 8 px.  grab cursor comes from injected
-       FORKKNIFE_CURSOR_CSS (#grip{cursor:grab!important}) which overrides
-       the spoon rule's !important via higher specificity. */
-    #grip {
-      width: 8px;
-      flex-shrink: 0;
-      display: grid;
-      grid-template-columns: repeat(2, 3px);
-      grid-template-rows: repeat(3, 3px);
-      gap: 1px;
-      align-content: center;
-      justify-content: center;
-      cursor: grab;
-    }
-    .gdot {
-      width: 2px;
-      height: 2px;
-      border-radius: 50%;
-      border: 1px dotted #ea4b00;
-    }
-
     /* ---- Utensil hit areas ---- */
-    /* #right is FK_GRAPHIC_W + FK_PAD = 52 + 4 = 56 px wide, 27 px tall */
+    /* Window is FK_GRAPHIC_W + FK_PAD = 52 + 4 = 56 px wide, 27 px tall */
     #right {
       position: relative;
       flex: 1;
@@ -56,9 +34,14 @@
     #fork  { top: 0;    height: 50%; }
     #knife { bottom: 0; height: 50%; }
 
-    .utensil.disabled { opacity: 0.22; pointer-events: none; }
+    /* disabled is visual only — pointer-events stay enabled so dragging from
+       a disabled half still works; JS guards the tap/click action. */
+    .utensil.disabled { opacity: 0.22; }
     .utensil:focus    { outline: none; }
     .utensil:focus-visible { outline: 2px solid #5a8fd8; outline-offset: -2px; }
+
+    /* Grabbing cursor during drag — higher specificity beats the injected spoon rule. */
+    #right.grabbing, #right.grabbing * { cursor: grabbing !important; }
 
     /* SVG is purely decorative — pointer events fall through to the divs above.
        Dimensions match FK_GRAPHIC_W × FK_GRAPHIC_H (52 × 19 px) with FK_PAD = 4 px
@@ -74,17 +57,8 @@
 </head>
 <body>
 
-  <!-- Drag grip: pointer-capture drag, double-click resets position -->
-  <div id="grip" aria-hidden="true">
-    <div class="gdot"></div>
-    <div class="gdot"></div>
-    <div class="gdot"></div>
-    <div class="gdot"></div>
-    <div class="gdot"></div>
-    <div class="gdot"></div>
-  </div>
-
-  <!-- Right section: hit areas + visual SVG overlay -->
+  <!-- Whole control: top half = fork (forward), bottom half = knife (back).
+       Drag anywhere to move; tap a half to navigate. -->
   <div id="right">
     <!-- Fork = Forward (top half) -->
     <div id="fork" class="utensil" role="button" tabindex="0" aria-label="Forward"></div>
@@ -107,7 +81,7 @@
   <script>
     var forkEl  = document.getElementById('fork');
     var knifeEl = document.getElementById('knife');
-    var grip    = document.getElementById('grip');
+    var rightEl = document.getElementById('right');
 
     // ---- Nav state ----
     function setEnabled(el, enabled) {
@@ -131,55 +105,80 @@
         setEnabled(knifeEl, !!state.canGoBack);
       });
 
-      forkEl.addEventListener('click', function () {
-        if (!forkEl.classList.contains('disabled')) window.kioskForkKnife.goForward();
-      });
-      knifeEl.addEventListener('click', function () {
-        if (!knifeEl.classList.contains('disabled')) window.kioskForkKnife.goBack();
-      });
-
       onKey(forkEl,  function () { window.kioskForkKnife.goForward(); });
       onKey(knifeEl, function () { window.kioskForkKnife.goBack(); });
     }
 
-    // ---- Grip drag (JS/IPC with pointer capture) ----
-    // Pointer capture keeps pointermove/pointerup firing on the grip even when
-    // the cursor leaves the 8 px wide element, making drags smooth on Linux Cinnamon.
-    var isDragging = false;
-    var capturedId = null;
+    // ---- Whole-control drag with tap threshold ----
+    // pointerdown anywhere starts tracking. Moving more than DRAG_THRESHOLD px
+    // switches to drag mode; releasing without crossing the threshold is a tap.
+    // Pointer capture keeps pointermove/pointerup firing even when the cursor
+    // leaves the window, making drags smooth on Linux Cinnamon.
+    var DRAG_THRESHOLD = 5;
+    var isDragging  = false; // drag in progress (dragStart has been sent)
+    var capturedId  = null;
+    var dragStartX  = 0;
+    var dragStartY  = 0;
+    var pressedHalf = null; // 'fork' | 'knife' at the time of pointerdown
 
-    grip.addEventListener('pointerdown', function (e) {
+    rightEl.addEventListener('pointerdown', function (e) {
       e.preventDefault();
-      grip.setPointerCapture(e.pointerId);
+      rightEl.setPointerCapture(e.pointerId);
       capturedId  = e.pointerId;
-      isDragging  = true;
-      if (window.kioskForkKnife) window.kioskForkKnife.dragStart();
+      isDragging  = false;
+      dragStartX  = e.clientX;
+      dragStartY  = e.clientY;
+      pressedHalf = (e.target === forkEl  || forkEl.contains(e.target))  ? 'fork'
+                  : (e.target === knifeEl || knifeEl.contains(e.target)) ? 'knife'
+                  : null;
     });
 
-    grip.addEventListener('pointermove', function (e) {
-      if (!isDragging) return;
-      if (window.kioskForkKnife) window.kioskForkKnife.dragMove();
-    });
-
-    grip.addEventListener('pointerup', function (e) {
-      if (!isDragging) return;
-      isDragging = false;
-      if (capturedId !== null) {
-        try { grip.releasePointerCapture(capturedId); } catch (_) {}
-        capturedId = null;
+    rightEl.addEventListener('pointermove', function (e) {
+      if (capturedId === null) return;
+      var dx = e.clientX - dragStartX;
+      var dy = e.clientY - dragStartY;
+      if (!isDragging && Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
+        isDragging = true;
+        rightEl.classList.add('grabbing');
+        if (window.kioskForkKnife) {
+          // dragStart records the cursor-to-window offset in the main process.
+          // dragMove immediately after positions the window at the current cursor.
+          window.kioskForkKnife.dragStart();
+          window.kioskForkKnife.dragMove();
+        }
+      } else if (isDragging) {
+        if (window.kioskForkKnife) window.kioskForkKnife.dragMove();
       }
-      if (window.kioskForkKnife) window.kioskForkKnife.dragEnd();
     });
 
-    grip.addEventListener('pointercancel', function () {
-      isDragging = false;
+    rightEl.addEventListener('pointerup', function (e) {
+      if (capturedId === null) return;
+      try { rightEl.releasePointerCapture(capturedId); } catch (_) {}
       capturedId = null;
-      if (window.kioskForkKnife) window.kioskForkKnife.dragEnd();
+      rightEl.classList.remove('grabbing');
+
+      if (isDragging) {
+        isDragging = false;
+        if (window.kioskForkKnife) window.kioskForkKnife.dragEnd();
+        return; // drag ended — do not navigate
+      }
+
+      // Tap: navigate based on which half received the pointerdown.
+      // Disabled halves absorb the tap visually but do not navigate.
+      if (pressedHalf === 'fork' && !forkEl.classList.contains('disabled')) {
+        if (window.kioskForkKnife) window.kioskForkKnife.goForward();
+      } else if (pressedHalf === 'knife' && !knifeEl.classList.contains('disabled')) {
+        if (window.kioskForkKnife) window.kioskForkKnife.goBack();
+      }
+      pressedHalf = null;
     });
 
-    // Double-click grip → snap back to home position
-    grip.addEventListener('dblclick', function () {
-      if (window.kioskForkKnife) window.kioskForkKnife.dragReset();
+    rightEl.addEventListener('pointercancel', function () {
+      rightEl.classList.remove('grabbing');
+      if (isDragging && window.kioskForkKnife) window.kioskForkKnife.dragEnd();
+      isDragging  = false;
+      capturedId  = null;
+      pressedHalf = null;
     });
   </script>
 </body>

@@ -23,7 +23,7 @@ const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') 3 0,auto!important}input
 const PANEL_CURSOR_CSS     = _spoonRule;
 const HANDLE_CURSOR_CSS    = _spoonRule + '#strip{cursor:grab!important}';
 const GRIP_CURSOR_CSS      = _spoonRule + '.grip{cursor:nwse-resize!important}';
-const FORKKNIFE_CURSOR_CSS = _spoonRule + '#grip{cursor:grab!important}';
+const FORKKNIFE_CURSOR_CSS = _spoonRule;
 
 // ---- Search topics ----------------------------------------------------------
 // Kid-friendly only.  Panels cycle through the list in order, staggered so
@@ -127,11 +127,10 @@ const USE_WINDOW_SHAPE = true;
 const UTENSIL_PX_PER_UNIT = 32 / 37.78;
 const FK_GRAPHIC_W = Math.round(61.72 * UTENSIL_PX_PER_UNIT); // ~52 px
 const FK_GRAPHIC_H = Math.round(21.86 * UTENSIL_PX_PER_UNIT); // ~19 px
-const FK_GRIP_W    = 8;  // dotted drag-grip column width (px)
 const FK_PAD       = 4;  // padding: top, bottom, and right of graphic (px)
 // Default position (px) from the top-left corner of the kiosk display's work area.
 const FORKKNIFE_POSITION = { x: 24, y: 24 };
-const FORKKNIFE_WIN_W    = FK_GRIP_W + FK_GRAPHIC_W + FK_PAD; // ~64 px
+const FORKKNIFE_WIN_W    = FK_GRAPHIC_W + FK_PAD; // ~56 px
 const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD;         // ~27 px
 
 // ---- Active-panel animation tunables ----------------------------------------
@@ -671,6 +670,11 @@ function notePanelActivity(key, eventType) {
     sendModeToHandle(key, 'auto');
     startBrowsingLoop(key);
     pushForkKnifeNavState();
+    // Once every panel is back in auto mode, return the forkknife to its home position.
+    if (forkKnifeWindow && !forkKnifeWindow.isDestroyed() && forkKnifeHomePos) {
+      const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
+      if (allAuto) forkKnifeWindow.setPosition(forkKnifeHomePos.x, forkKnifeHomePos.y);
+    }
   }, INACTIVITY_TIMEOUT_MS);
 
   // Only deliberate events enlarge the panel.
