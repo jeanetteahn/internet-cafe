@@ -218,7 +218,7 @@ still quits both together.
 not decorative vs. interactive.** Left alone, each panel cycles through
 kid-friendly DuckDuckGo search results pages.  The moment a customer
 clicks, types, drags, or resizes a panel, it stops and becomes their
-browser until they've been idle for `INACTIVITY_TIMEOUT_MS` (90 s by
+browser until they've been idle for `INACTIVITY_TIMEOUT_MS` (120 s by
 default), at which point auto mode resumes.
 
 **Auto mode — search → result → search loop** (`kiosk-browsers.js` — `startBrowsingLoop`):
@@ -322,7 +322,7 @@ stop the loop instantly.
 | `RESULT_HIGHLIGHT_MS` | 600 ms | How long the chosen result anchor is highlighted before navigation begins |
 | `AUTO_LINK_POLICY` | `'allowlist-preferred'` | `'allowlist-preferred'` = prefer `ALLOWED_DOMAINS`, fall back to `isPassesPolicy`; `'allowlist'` = only `ALLOWED_DOMAINS`; `'browsing'` = `isPassesPolicy` only |
 | `SCROLL_STEP_PX` / `SCROLL_STEP_MS` | 80 px / 250 ms | Scroll speed — lower `SCROLL_STEP_PX` or raise `SCROLL_STEP_MS` for slower scroll |
-| `INACTIVITY_TIMEOUT_MS` | 90 s | Idle time before auto mode resumes after a customer |
+| `INACTIVITY_TIMEOUT_MS` | 120 s | Idle time before auto mode resumes after a customer |
 | `INITIAL_LOAD_STAGGER_MS` | 300 ms | Delay between each panel's first search at launch |
 | `ACTIVE_SCALE` | 1.25 | How much larger an active panel grows (fraction of its home size) |
 | `ACTIVE_ANIM_MS` | 220 ms | Duration of the enlarge/shrink tween |
