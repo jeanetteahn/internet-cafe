@@ -140,8 +140,9 @@ const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD;         // ~27 px
 // Dimensions match the SVG viewBox (310.59 × 43.62 → 311 × 44 px).
 const AB_WIN_W                   = 311; // address bar window width
 const AB_WIN_H                   = 44;  // address bar window height
-const ADDRESSBAR_DOCK_OVERHANG_X = 100; // bar overhangs hub browser-area left edge by this many px
-const ADDRESSBAR_DOCK_BOTTOM_INSET = 58; // bar bottom sits this many px above hub browser-area bottom
+const ADDRESSBAR_DOCK_OVERHANG_X   = 100; // bar overhangs hub browser-area left edge by this many px
+const ADDRESSBAR_DOCK_BOTTOM_INSET = 58;  // bar bottom sits this many px above hub browser-area bottom
+const ADDRESSBAR_MAX_W             = 900; // maximum expanded width (px)
 
 // ---- Active-panel animation tunables ----------------------------------------
 // When a customer starts using a panel it grows to ACTIVE_SCALE × its home
@@ -202,10 +203,11 @@ let   enlargedKey = null;      // panel key currently enlarged, or null
 let forkKnifeWindow     = null; // standalone forkknife nav control window
 let forkKnifeDragOffset = null; // { dx, dy } set at drag-start, cleared at drag-end
 let forkKnifeHomePos    = null; // starting position, restored on double-click
-let addressBarWindow     = null; // floating address bar for the hub panel
-let addressBarDragOffset = null; // { dx, dy } set at drag-start, cleared at drag-end
-let addressBarDocked     = true; // true = follows hub; false = free-floating
-let addressBarLiveUrl    = '';   // current URL shown in the bar
+let addressBarWindow     = null;     // floating address bar for the hub panel
+let addressBarDragOffset = null;     // { dx, dy } set at drag-start, cleared at drag-end
+let addressBarDocked     = true;     // true = follows hub; false = free-floating
+let addressBarLiveUrl    = '';       // current URL shown in the bar
+let addressBarCurrentW   = AB_WIN_W; // current window width (AB_WIN_W when collapsed)
 
 // ---- Layout -----------------------------------------------------------------
 
@@ -1533,6 +1535,7 @@ function createAddressBarWindow(workArea) {
 
   addressBarDocked   = true;
   addressBarLiveUrl  = '';
+  addressBarCurrentW = AB_WIN_W;
 
   addressBarWindow = new BrowserWindow({
     x:               Math.round(startX),
@@ -1939,6 +1942,34 @@ function attachActivityHandling() {
     if (event.sender !== addressBarWindow.webContents) return;
     addressBarDocked = true;
     repositionAddressBar();
+  });
+
+  ipcMain.on('addressbar-resize', (event, neededW) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    const { workArea } = screen.getDisplayMatching(addressBarWindow.getBounds());
+    const pos          = addressBarWindow.getPosition();
+    // Clamp: [AB_WIN_W, ADDRESSBAR_MAX_W] and must not overflow work area right edge.
+    let w = Math.max(AB_WIN_W, Math.min(Math.round(neededW || AB_WIN_W), ADDRESSBAR_MAX_W));
+    w = Math.min(w, workArea.x + workArea.width - pos[0]);
+    w = Math.max(w, AB_WIN_W);
+    if (w === addressBarCurrentW) return;
+    addressBarCurrentW = w;
+    addressBarWindow.setSize(w, AB_WIN_H);
+    if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+      addressBarWindow.setShape([{ x: 0, y: 0, width: w, height: AB_WIN_H }]);
+    }
+  });
+
+  ipcMain.on('addressbar-shrink', (event) => {
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+    if (event.sender !== addressBarWindow.webContents) return;
+    if (addressBarCurrentW === AB_WIN_W) return;
+    addressBarCurrentW = AB_WIN_W;
+    addressBarWindow.setSize(AB_WIN_W, AB_WIN_H);
+    if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+      addressBarWindow.setShape([{ x: 0, y: 0, width: AB_WIN_W, height: AB_WIN_H }]);
+    }
   });
 }
 

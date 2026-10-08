@@ -7,7 +7,9 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html {
-      width: 311px; height: 44px;
+      /* Width is controlled by the main process (setSize); height is fixed at
+         44 px.  width:100% fills whatever the OS reports as the viewport.    */
+      width: 100%; height: 44px;
       border: 1px solid #ea4b00;
       background: #ffffff;
       overflow: hidden;
@@ -26,15 +28,16 @@
       font-style: normal;
     }
 
-    /* ---- Layout ---- */
-    /* Window is 311 × 44 px (SVG viewBox 310.59 × 43.62).
-       Text in SVG starts at translate(28.98, 25.88) — the drag pad is
-       the leftmost ~29 px; the input fills the remainder. */
+    /* Window is 311 × 44 px at rest (SVG viewBox 310.59 × 43.62).
+       Text in SVG starts at translate(28.98, 25.88) — drag pad is the
+       leftmost 29 px; input fills the remainder.  padding-right gives
+       breathing room on the right when expanded.                        */
     #bar {
       display: flex;
       align-items: stretch;
       width: 100%;
       height: 100%;
+      padding-right: 12px;
     }
 
     #drag-pad {
@@ -45,6 +48,7 @@
 
     #url {
       flex: 1;
+      min-width: 0;       /* allow flex child to shrink below content size */
       border: none;
       outline: none;
       background: transparent;
@@ -54,8 +58,9 @@
       padding: 0;
       margin: 0;
       cursor: text;
-      /* Vertically align text to match SVG baseline (y≈26 in 44 px). */
-      line-height: 44px;
+      /* Resting state: truncate long URLs with an ellipsis.
+         When focused, Chromium ignores this and scrolls normally. */
+      text-overflow: ellipsis;
     }
 
     /* Grabbing cursor during drag — beats the injected spoon rule. */
@@ -72,27 +77,82 @@
   </div>
 
   <script>
-    var liveUrl     = '';
-    var urlInput    = document.getElementById('url');
-    var bar         = document.getElementById('bar');
+    var liveUrl  = '';
+    var urlInput = document.getElementById('url');
+    var bar      = document.getElementById('bar');
+
+    // ---- Off-screen sizer for accurate text-width measurement ----
+    // Same font string as #url so the measurement matches the rendered text.
+    var sizer = document.createElement('span');
+    sizer.style.cssText =
+      'position:absolute;left:-9999px;top:-9999px;' +
+      'white-space:nowrap;visibility:hidden;' +
+      'font:14px "Apercu Mono","Apercu-Mono",monospace;';
+    document.body.appendChild(sizer);
+
+    function measureTextW(text) {
+      sizer.textContent = text;
+      return sizer.offsetWidth;
+    }
+
+    // ---- Expand / shrink ----
+    var isHovered   = false;
+    var isFocused   = false;
+    var shrinkTimer = null;
+
+    // 29 px drag pad + text + 12 px bar padding-right + 8 px buffer.
+    function measureAndResize() {
+      if (!window.kioskAddressBar) return;
+      var needed = Math.ceil(29 + measureTextW(urlInput.value || liveUrl) + 12 + 8);
+      window.kioskAddressBar.resize(needed);
+    }
+
+    function maybeShrink() {
+      clearTimeout(shrinkTimer);
+      if (!isHovered && !isFocused) {
+        shrinkTimer = setTimeout(function () {
+          if (window.kioskAddressBar) window.kioskAddressBar.shrink();
+        }, 300);
+      }
+    }
 
     // ---- URL updates from main process ----
     if (window.kioskAddressBar) {
       window.kioskAddressBar.onUrl(function (url) {
         liveUrl = url;
-        // Don't overwrite while the user is editing.
-        if (document.activeElement !== urlInput) urlInput.value = url;
+        if (document.activeElement !== urlInput) {
+          urlInput.value = url;
+          // Re-measure while hovered so the bar stays fitted to the new URL.
+          if (isHovered) measureAndResize();
+        }
       });
     }
 
+    // ---- Hover ----
+    bar.addEventListener('pointerenter', function () {
+      isHovered = true;
+      clearTimeout(shrinkTimer);
+      measureAndResize();
+    });
+
+    bar.addEventListener('pointerleave', function () {
+      isHovered = false;
+      maybeShrink();
+    });
+
     // ---- Input events ----
     urlInput.addEventListener('focus', function () {
+      isFocused = true;
+      clearTimeout(shrinkTimer);
       urlInput.select();
+      measureAndResize();
       if (window.kioskAddressBar) window.kioskAddressBar.focus();
     });
 
     urlInput.addEventListener('blur', function () {
+      isFocused = false;
       urlInput.value = liveUrl;
+      maybeShrink();
     });
 
     var keydownThrottle = null;
@@ -108,7 +168,6 @@
         urlInput.blur();
         if (window.kioskAddressBar) window.kioskAddressBar.escape();
       } else {
-        // Throttle activity pings to avoid spamming IPC while typing.
         if (!keydownThrottle && window.kioskAddressBar) {
           window.kioskAddressBar.keydown();
           keydownThrottle = setTimeout(function () { keydownThrottle = null; }, 500);

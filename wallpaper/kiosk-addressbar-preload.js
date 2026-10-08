@@ -12,4 +12,6 @@ contextBridge.exposeInMainWorld('kioskAddressBar', {
   dragMove:  ()    => { ipcRenderer.send('addressbar-drag-move'); },
   dragEnd:   ()    => { ipcRenderer.send('addressbar-drag-end'); },
   dock:      ()    => { ipcRenderer.send('addressbar-dock'); },
+  resize:    (w)   => { ipcRenderer.send('addressbar-resize', w); },
+  shrink:    ()    => { ipcRenderer.send('addressbar-shrink'); },
 });
