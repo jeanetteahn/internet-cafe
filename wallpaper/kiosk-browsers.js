@@ -164,16 +164,19 @@ const HARDWARE_MARGIN  = 36;
 const USE_WINDOW_SHAPE = true;
 
 // ---- Forkknife nav control --------------------------------------------------
-// Fixed scale for utensil icon sizing: 32 px rendered per 37.78 viewBox units.
-// Independent of SPOON_CURSOR_W — changing cursor size does not resize the control.
-const UTENSIL_PX_PER_UNIT = 32 / 37.78;
-const FK_GRAPHIC_W = Math.round(61.72 * UTENSIL_PX_PER_UNIT); // ~52 px
-const FK_GRAPHIC_H = Math.round(21.86 * UTENSIL_PX_PER_UNIT); // ~19 px
+// Graphic width matches CLOCK_SIZE; height is derived from the SVG aspect ratio.
+const _fkSvgRaw   = fs.readFileSync(path.join(__dirname, 'assets/utensils/forkknife.svg'), 'utf8');
+const _fkVbMatch  = _fkSvgRaw.match(/viewBox="([\d.\s]+)"/);
+const _fkVbParts  = _fkVbMatch ? _fkVbMatch[1].trim().split(/\s+/) : ['0', '0', '61.72', '21.86'];
+const _fkVbW      = parseFloat(_fkVbParts[2]); // viewBox width  in SVG units
+const _fkVbH      = parseFloat(_fkVbParts[3]); // viewBox height in SVG units
+const FK_GRAPHIC_W = CLOCK_SIZE;                                   // 110 px
+const FK_GRAPHIC_H = Math.round(FK_GRAPHIC_W * _fkVbH / _fkVbW); // ~39 px
 const FK_PAD       = 4;  // padding: top, bottom, and right of graphic (px)
 // Default position (px) from the top-left corner of the kiosk display's work area.
 const FORKKNIFE_POSITION = { x: 24, y: 24 };
-const FORKKNIFE_WIN_W    = FK_GRAPHIC_W + FK_PAD; // ~56 px
-const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD;         // ~27 px
+const FORKKNIFE_WIN_W    = FK_GRAPHIC_W + FK_PAD;      // ~114 px
+const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD; // ~47 px
 
 // ---- Clock window ------------------------------------------------------------
 // SVG viewBox is 87.2×87.2; the window is square.

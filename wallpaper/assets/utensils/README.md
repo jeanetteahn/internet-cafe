@@ -22,4 +22,5 @@ control (`kiosk-forkknife.html`):
 The control is a separate always-on-top transparent window managed by
 `kiosk-browsers.js` (`createForkKnifeWindow`). It tracks whichever
 panel was most recently active and shows that panel's back/forward
-state.
+state. Rendered width equals `CLOCK_SIZE` (110 px); height (~39 px) is
+derived from the `0 0 61.72 21.86` viewBox aspect ratio at startup.
