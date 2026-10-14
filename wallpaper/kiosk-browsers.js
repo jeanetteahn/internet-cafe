@@ -7,20 +7,39 @@ const http = require('http');
 const cacheDir = path.join(app.getPath('userData'), 'ddg-cache');
 try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) {}
 
+// ---- Clock / cursor size -----------------------------------------------------
+// Declared here (before the spoon cursor block) so SPOON_CURSOR_W can reference
+// it.  Used again in the constants section below for clock/carbon window sizes.
+const CLOCK_SIZE = 110; // window width and height (px)
+
 // ---- Spoon cursor -----------------------------------------------------------
 // Pre-computed once at module init so every renderer can get the same rule.
-const _spoonSvg = fs.readFileSync(path.join(__dirname, 'assets/utensils/spoon-cursor.svg'), 'utf8')
+// Size is driven by CLOCK_SIZE so the cursor and clock circle share one value.
+const _spoonSvgRaw  = fs.readFileSync(path.join(__dirname, 'assets/utensils/spoon-cursor.svg'), 'utf8');
+const _spoonVbMatch = _spoonSvgRaw.match(/viewBox="([\d.\s]+)"/);
+const _spoonVbParts = _spoonVbMatch ? _spoonVbMatch[1].trim().split(/\s+/) : ['0', '0', '37.78', '37.77'];
+const _spoonVbW     = parseFloat(_spoonVbParts[2]); // viewBox width  in SVG units
+const _spoonVbH     = parseFloat(_spoonVbParts[3]); // viewBox height in SVG units
+const SPOON_CURSOR_W = CLOCK_SIZE;
+const SPOON_CURSOR_H = Math.round(SPOON_CURSOR_W * _spoonVbH / _spoonVbW);
+if (SPOON_CURSOR_W > 128 || SPOON_CURSOR_H > 128) {
+  console.warn(`[kiosk-cursor] SPOON_CURSOR_W=${SPOON_CURSOR_W} or SPOON_CURSOR_H=${SPOON_CURSOR_H} exceeds 128 px — Chromium will ignore the custom cursor`);
+}
+// Hotspot: spoon bowl tip at (3.47, 0) in viewBox units, scaled to render size.
+// At 110 px this yields (10, 0).  Must stay in sync with index.html.
+const _spoonHotX = Math.round(3.47 * SPOON_CURSOR_W / _spoonVbW);
+const _spoonHotY = 0;
+const _spoonSvg = _spoonSvgRaw
   .replace(/<\?xml[^?]*\?>\n?/, '')
   .replace(/<defs>[\s\S]*?<\/defs>\n?/, '')
   .replace(/\s+id="[^"]+"/g, '')
   .replace(/\s+data-name="[^"]+"/g, '')
   .replace(/class="cls-1"/g, 'fill="#ea4b00"')
-  .replace(/<svg /, '<svg width="32" height="32" ')
+  .replace(/<svg /, `<svg width="${SPOON_CURSOR_W}" height="${SPOON_CURSOR_H}" `)
   .replace(/\n\s*\n/g, '\n')
   .trim();
 const SPOON_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSvg).toString('base64');
-// hotspot pixel (3,0): spoon bowl tip at (3.47,0) in viewBox 37.78×37.77, rendered at 32×32
-const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') 3 0,auto!important}input,textarea{cursor:text!important}`;
+const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') ${_spoonHotX} ${_spoonHotY},auto!important}input,textarea{cursor:text!important}`;
 const PANEL_CURSOR_CSS     = _spoonRule;
 const HANDLE_CURSOR_CSS    = _spoonRule + '#strip{cursor:grab!important}';
 const GRIP_CURSOR_CSS      = _spoonRule + '.grip{cursor:nwse-resize!important}';
@@ -145,7 +164,8 @@ const HARDWARE_MARGIN  = 36;
 const USE_WINDOW_SHAPE = true;
 
 // ---- Forkknife nav control --------------------------------------------------
-// Scale matches the spoon cursor: 32 px rendered for a 37.78-unit viewBox.
+// Fixed scale for utensil icon sizing: 32 px rendered per 37.78 viewBox units.
+// Independent of SPOON_CURSOR_W — changing cursor size does not resize the control.
 const UTENSIL_PX_PER_UNIT = 32 / 37.78;
 const FK_GRAPHIC_W = Math.round(61.72 * UTENSIL_PX_PER_UNIT); // ~52 px
 const FK_GRAPHIC_H = Math.round(21.86 * UTENSIL_PX_PER_UNIT); // ~19 px
@@ -157,7 +177,7 @@ const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD;         // ~27 px
 
 // ---- Clock window ------------------------------------------------------------
 // SVG viewBox is 87.2×87.2; the window is square.
-const CLOCK_SIZE = 110; // window width and height (px)
+// CLOCK_SIZE is declared at the top of the file (before the spoon cursor block).
 // Offset from the work area's top-left corner.
 // Tuned for 1920×1080: centers the clock on the top-right panel's top edge.
 const CLOCK_POSITION = { x: 1332, y: 20 };
