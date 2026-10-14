@@ -20,5 +20,5 @@
       <stop offset="1"     stop-color="#E95026"/>
     </linearGradient>
   </defs>
-  <circle id="carbon-fill" cx="43.6" cy="43.6" r="43.5" fill="url(#carbonGradient)"/>
+  <circle id="carbon-fill" cx="43.6" cy="43.6" r="43.6" fill="url(#carbonGradient)"/>
 </svg>

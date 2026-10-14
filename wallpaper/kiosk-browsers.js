@@ -172,7 +172,7 @@ const ADDRESSBAR_DOCK_BOTTOM_INSET = 58;  // bar bottom sits this many px above 
 const ADDRESSBAR_MAX_W             = 900; // maximum expanded width (px)
 
 // ---- Carbon indicator window -------------------------------------------------
-const CARBON_SIZE    = 90;  // window width and height (px)
+const CARBON_SIZE    = CLOCK_SIZE; // match clock window size exactly
 // Offset from the panel window's top-left corner to the carbon window position.
 const CARBON_ANCHOR  = { x: 140, y: 120 };
 // CO2 thresholds (grams per page view) for the score log scale.
