@@ -7,10 +7,9 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html {
-      /* Width is controlled by the main process (setSize); height is fixed at
-         44 px.  width:100% fills whatever the OS reports as the viewport.    */
-      width: 100%; height: 44px;
-      border: 1px solid #ea4b00;
+      /* Width and height track the BrowserWindow size set by the main process.
+         height:100% instead of 44px avoids fractional-scaling mismatches.    */
+      width: 100%; height: 100%;
       background: #ffffff;
       overflow: hidden;
     }
@@ -19,6 +18,19 @@
       overflow: hidden;
       user-select: none;
       -webkit-user-select: none;
+    }
+    /* Orange border overlay — always traces the live viewport edges regardless
+       of window width.  pointer-events:none so it never blocks clicks, drag,
+       or input focus.  z-index above #bar so it isn't painted over.
+       Matches kiosk-carbon.html / kiosk-clock.html --shadow-color aesthetics
+       but uses the brand orange (same as before). */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      border: 1px solid #ea4b00;
+      pointer-events: none;
+      z-index: 10;
     }
 
     @font-face {

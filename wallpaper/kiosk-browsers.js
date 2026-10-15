@@ -1778,7 +1778,7 @@ function createAddressBarWindow(workArea) {
     backgroundColor: '#ffffff',
     alwaysOnTop:     true,
     skipTaskbar:     true,
-    resizable:       false,
+    resizable:       true,   // required for programmatic setBounds() on Linux (window is frameless so users still can't resize by hand)
     focusable:       true,
     webPreferences: {
       preload:          path.join(__dirname, 'kiosk-addressbar-preload.js'),
@@ -2355,7 +2355,10 @@ function attachActivityHandling() {
     w = Math.max(w, AB_WIN_W);
     if (w === addressBarCurrentW) return;
     addressBarCurrentW = w;
-    addressBarWindow.setSize(w, AB_WIN_H);
+    // setBounds keeps position stable and resizes atomically; setSize alone on
+    // Linux with resizable:false previously failed to apply.  pos is already
+    // fetched above for the right-edge clamp.
+    addressBarWindow.setBounds({ x: pos[0], y: pos[1], width: w, height: AB_WIN_H });
     if (USE_WINDOW_SHAPE && process.platform === 'linux') {
       addressBarWindow.setShape([{ x: 0, y: 0, width: w, height: AB_WIN_H }]);
     }
@@ -2366,7 +2369,8 @@ function attachActivityHandling() {
     if (event.sender !== addressBarWindow.webContents) return;
     if (addressBarCurrentW === AB_WIN_W) return;
     addressBarCurrentW = AB_WIN_W;
-    addressBarWindow.setSize(AB_WIN_W, AB_WIN_H);
+    const pos = addressBarWindow.getPosition();
+    addressBarWindow.setBounds({ x: pos[0], y: pos[1], width: AB_WIN_W, height: AB_WIN_H });
     if (USE_WINDOW_SHAPE && process.platform === 'linux') {
       addressBarWindow.setShape([{ x: 0, y: 0, width: AB_WIN_W, height: AB_WIN_H }]);
     }
