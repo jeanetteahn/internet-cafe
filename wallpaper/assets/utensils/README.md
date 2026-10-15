@@ -9,9 +9,18 @@ no raster content, no text elements, fill color `#ea4b00`.
 ### spoon-cursor.svg
 Custom mouse cursor for the kiosk process. Replaces the system arrow
 cursor so the pointer matches the utensil aesthetic of the panels.
-Hot spot: `10 0` (spoon bowl tip at approximately `(3.47, 0)` in the
-`0 0 37.78 37.77` viewBox, rendered at 110 × 110 px — matches `CLOCK_SIZE`
-in `kiosk-browsers.js`). Also referenced in `wallpaper/index.html`.
+
+The final cursor is **126 × 128 px** — spoon art 110 × 110 px (`CLOCK_SIZE`)
+plus shadow padding 6 / 4 / 10 / 14 px (left / top / right / bottom).
+Hot spot: `16 4` (bowl tip at viewBox `(3.47, 0)` → 10 px at 110 px art,
+then shifted by left/top padding).  A `feDropShadow` filter (dx=0, dy=4,
+stdDeviation=5) is baked into the outer SVG wrapper at build time in
+`kiosk-browsers.js` (`SPOON_SHADOW_PAD_*` block).
+
+`wallpaper/index.html` (a separate Electron process) contains a hardcoded
+base64 copy with the same hotspot; regenerate it from the
+`SPOON_SHADOW_PAD_*` block in `kiosk-browsers.js` whenever `CLOCK_SIZE`
+or shadow values change.
 
 ### forkknife.svg
 Combined fork-and-knife graphic used as the standalone navigation
