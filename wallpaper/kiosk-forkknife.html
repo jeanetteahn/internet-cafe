@@ -51,8 +51,8 @@
     #knife { bottom: var(--shadow-pad); height: calc((100% - 2 * var(--shadow-pad)) / 2); }
 
     /* disabled: the .disabled class updates aria-disabled and tabindex only.
-       Visual dimming is applied to the SVG groups (#g-fork / #g-knife) in JS
-       so the shadow fades with the graphic. */
+       Both groups always render at full opacity — tapping a disabled half is
+       silently ignored by the pointerup guard. */
     .utensil:focus       { outline: none; }
     .utensil:focus-visible { outline: 2px solid #5a8fd8; outline-offset: -2px; }
 
@@ -72,11 +72,10 @@
       display: block;
     }
 
-    /* Each group carries its own drop-shadow so the shadow fades when the group
-       dims to disabled opacity (0.22). */
+    /* Each group carries its own drop-shadow.  Opacity is always 1 — the groups
+       never dim; disabled state is enforced by the tap guard in JS only. */
     #g-fork, #g-knife {
       filter: drop-shadow(var(--shadow-dx) var(--shadow-dy) var(--shadow-blur) var(--shadow-color));
-      transition: opacity 0.12s;
     }
   </style>
 </head>
@@ -119,9 +118,8 @@
       el.classList.toggle('disabled', !enabled);
       el.setAttribute('aria-disabled', enabled ? 'false' : 'true');
       el.setAttribute('tabindex', enabled ? '0' : '-1');
-      // Dim the SVG group so the graphic and its drop-shadow fade together.
-      var g = (el === forkEl) ? gForkEl : gKnifeEl;
-      if (g) g.style.opacity = enabled ? '1' : '0.22';
+      // Groups always stay at full opacity; disabled halves are silently ignored
+      // by the tap guard in pointerup, not visually dimmed.
     }
 
     function onKey(el, fn) {
