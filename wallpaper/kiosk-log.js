@@ -1,34 +1,53 @@
-// Rotating file logger shared by kiosk-main.js and kiosk-browsers.js.
-// Both files run in the same Electron process, so require() is called once
-// and the module state (LOG_FILE path, lock-free append) is shared.
+// Rotating file logger for both kiosk and wallpaper Electron processes.
+// makeLogger(name) returns { log(msg), logFile } backed by
+// app.getPath('userData')/logs/<name>.log.  Loggers are cached by name so
+// calling makeLogger('kiosk') from kiosk-main.js and kiosk-browsers.js
+// (same process, same module cache) returns the same instance.
 //
-// Rotation: when kiosk.log exceeds MAX_BYTES it is renamed to kiosk.log.1
-// (clobbering the previous .1) and a fresh kiosk.log starts.  This keeps
-// at most ~10 MB total with no external tooling.
+// Rotation: once the log exceeds MAX_BYTES it is renamed to <name>.log.1
+// (clobbering the previous .1) and a fresh <name>.log starts (~10 MB total,
+// no external tooling required).
 const fs   = require('fs');
 const path = require('path');
 const { app } = require('electron');
 
-const LOG_DIR      = path.join(app.getPath('userData'), 'logs');
-const LOG_FILE     = path.join(LOG_DIR, 'kiosk.log');
-const LOG_FILE_OLD = path.join(LOG_DIR, 'kiosk.log.1');
-const MAX_BYTES    = 5 * 1024 * 1024; // 5 MB rotation threshold
+const LOG_DIR   = path.join(app.getPath('userData'), 'logs');
+const MAX_BYTES = 5 * 1024 * 1024;
 
 try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (_) {}
 
-function kioskLog(msg) {
-  const line = `${new Date().toISOString()} ${msg}\n`;
-  try {
-    let size = 0;
-    try { size = fs.statSync(LOG_FILE).size; } catch (_) {}
-    if (size > MAX_BYTES) {
-      try { fs.renameSync(LOG_FILE, LOG_FILE_OLD); } catch (_) {}
+const _loggers = {};
+
+function makeLogger(name) {
+  if (_loggers[name]) return _loggers[name];
+
+  const logFile = path.join(LOG_DIR, `${name}.log`);
+  const oldFile = path.join(LOG_DIR, `${name}.log.1`);
+
+  function log(msg) {
+    const line = `${new Date().toISOString()} ${msg}\n`;
+    try {
+      let size = 0;
+      try { size = fs.statSync(logFile).size; } catch (_) {}
+      if (size > MAX_BYTES) {
+        try { fs.renameSync(logFile, oldFile); } catch (_) {}
+      }
+      fs.appendFileSync(logFile, line);
+    } catch (_) {
+      process.stdout.write(`[${name}-log write failed] ${line}`);
     }
-    fs.appendFileSync(LOG_FILE, line);
-  } catch (_) {
-    // Never throw — log falls back to stdout on write failure.
-    process.stdout.write(`[kiosk-log write failed] ${line}`);
   }
+
+  _loggers[name] = { log, logFile };
+  return _loggers[name];
 }
 
-module.exports = { kioskLog, LOG_FILE };
+// Convenience backward-compatible exports so kiosk-main.js and
+// kiosk-browsers.js keep working without changes.
+const _kiosk = makeLogger('kiosk');
+module.exports = {
+  makeLogger,
+  LOG_DIR,
+  kioskLog: _kiosk.log,
+  LOG_FILE: _kiosk.logFile,
+};

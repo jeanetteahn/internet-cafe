@@ -2589,34 +2589,69 @@ function startAllIdleRotation() {
 
 // ---- Self-healing: health check, cache clear, view recycle, nightly restart ---
 
-// Every 30 s: verify each overlay window exists; recreate and re-stack if not.
+// Returns true if the window's centre point falls within any connected display.
+function _windowOnDisplay(win) {
+  if (!win || win.isDestroyed()) return false;
+  const { x, y, width, height } = win.getBounds();
+  const cx = x + Math.round(width  / 2);
+  const cy = y + Math.round(height / 2);
+  return screen.getAllDisplays().some(d =>
+    cx >= d.bounds.x && cx < d.bounds.x + d.bounds.width &&
+    cy >= d.bounds.y && cy < d.bounds.y + d.bounds.height
+  );
+}
+
+// Every 30 s: verify each overlay window exists, is visible, and is on a
+// connected display.  Recreate or re-show anything that fails, then
+// re-assert alwaysOnTop and re-stack.
 function startHealthCheck() {
   setInterval(() => {
     if (!_lastWorkArea) return;
     let repairs = 0;
 
-    if (!clockWindow || clockWindow.isDestroyed()) {
-      kioskLog('health: clock window gone — recreating');
-      createClockWindow(_lastWorkArea);
-      repairs++;
+    function checkOverlay(name, getWin, recreate, restore) {
+      const win = getWin();
+      if (!win || win.isDestroyed()) {
+        kioskLog(`health: ${name} destroyed — recreating`);
+        recreate();
+        if (restore) restore();
+        repairs++;
+        return;
+      }
+      if (!win.isVisible()) {
+        kioskLog(`health: ${name} hidden — showing`);
+        try { win.show(); } catch (_) {}
+        repairs++;
+      }
+      if (!_windowOnDisplay(win)) {
+        kioskLog(`health: ${name} off-display — recreating`);
+        try { win.destroy(); } catch (_) {}
+        recreate();
+        if (restore) restore();
+        repairs++;
+      }
     }
-    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) {
-      kioskLog('health: forkknife window gone — recreating');
-      createForkKnifeWindow(_lastWorkArea);
-      pushForkKnifeNavState();
-      repairs++;
-    }
-    if (!addressBarWindow || addressBarWindow.isDestroyed()) {
-      kioskLog('health: addressbar window gone — recreating');
-      createAddressBarWindow(_lastWorkArea);
-      repairs++;
-    }
-    if (!carbonWindow || carbonWindow.isDestroyed()) {
-      kioskLog('health: carbon window gone — recreating');
-      createCarbonWindow(_lastWorkArea);
-      updateCarbonFollow(getActiveKey());
-      repairs++;
-    }
+
+    checkOverlay('clock',
+      () => clockWindow,
+      () => createClockWindow(_lastWorkArea),
+      null
+    );
+    checkOverlay('forkknife',
+      () => forkKnifeWindow,
+      () => createForkKnifeWindow(_lastWorkArea),
+      () => pushForkKnifeNavState()
+    );
+    checkOverlay('addressbar',
+      () => addressBarWindow,
+      () => createAddressBarWindow(_lastWorkArea),
+      null
+    );
+    checkOverlay('carbon',
+      () => carbonWindow,
+      () => createCarbonWindow(_lastWorkArea),
+      () => updateCarbonFollow(getActiveKey())
+    );
 
     // Re-assert alwaysOnTop on all overlays and panel windows.
     for (const w of [clockWindow, forkKnifeWindow, addressBarWindow, carbonWindow]) {

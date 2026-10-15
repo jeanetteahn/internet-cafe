@@ -13,7 +13,7 @@
 // unwrapped Electron process — see linux/xwinwrap-launch.sh and
 // linux/native-launch.sh, which start both. Running it standalone for
 // dev/testing works too: `electron kiosk-main.js`.
-const { app, globalShortcut } = require('electron');
+const { app, globalShortcut, powerMonitor, screen } = require('electron');
 const { createKioskWindow } = require('./kiosk-browsers');
 const { registerSelf, killOthers, requestQuit, clearQuitFlag } = require('./process-pair');
 const { kioskLog, LOG_FILE } = require('./kiosk-log');
@@ -46,17 +46,39 @@ process.on('unhandledRejection', (reason) => {
   kioskLog(`unhandledRejection: ${reason && reason.stack ? reason.stack : reason}`);
 });
 
+// Track the reason the kiosk is quitting so quit-event handlers can log it.
+let _quitReason = null;
+
 // SIGTERM: sent by killOthers() when the wallpaper process handles Ctrl+Alt+Q.
 // Write the quit flag so the supervisor loop does not restart us.
-// Only registered on Linux where the supervisor loop runs.
 if (process.platform === 'linux') {
   process.on('SIGTERM', () => {
+    _quitReason = 'SIGTERM';
     kioskLog('received SIGTERM — writing quit flag and exiting');
     requestQuit();
     try { cleanupPidFile(); } catch (_) {}
     process.exit(0);
   });
+  process.on('SIGHUP', () => {
+    _quitReason = 'SIGHUP';
+    kioskLog('received SIGHUP — writing quit flag and exiting');
+    requestQuit();
+    try { cleanupPidFile(); } catch (_) {}
+    process.exit(0);
+  });
 }
+
+// SIGINT (Ctrl+C in terminal): clean shutdown on both platforms.
+process.on('SIGINT', () => {
+  _quitReason = 'SIGINT';
+  kioskLog('received SIGINT — exiting');
+  try { cleanupPidFile(); } catch (_) {}
+  process.exit(0);
+});
+
+process.on('exit', (code) => {
+  try { kioskLog(`process exit code=${code} reason=${_quitReason || 'unknown'}`); } catch (_) {}
+});
 
 const PROCESS_NAME = 'kiosk';
 const cleanupPidFile = registerSelf(PROCESS_NAME);
@@ -86,6 +108,19 @@ app.whenReady().then(() => {
     console.error(`[kiosk] ${msg}`);
     kioskLog(msg);
   });
+
+  // Power events — help diagnose DPMS/screensaver-triggered disappearances.
+  for (const ev of ['suspend', 'resume', 'lock-screen', 'unlock-screen']) {
+    powerMonitor.on(ev, () => kioskLog(`powerMonitor: ${ev}`));
+  }
+
+  // Screen changes — log display hotplug / resolution changes.
+  for (const ev of ['display-added', 'display-removed', 'display-metrics-changed']) {
+    screen.on(ev, () => {
+      const displays = screen.getAllDisplays().map(d => `${d.bounds.width}x${d.bounds.height}`).join(', ');
+      kioskLog(`screen: ${ev} — displays: [${displays}]`);
+    });
+  }
 
   // Memory metrics every 5 minutes so we can spot leaks before a disappearance.
   setInterval(() => {
@@ -120,6 +155,7 @@ app.whenReady().then(() => {
   // the loser's handler below never fires, but that's fine, since
   // whichever one DOES fire kills the sibling process too.
   const registered = globalShortcut.register('Control+Alt+Q', () => {
+    _quitReason = 'Ctrl+Alt+Q';
     kioskLog('Ctrl+Alt+Q — writing quit flag and exiting');
     requestQuit();  // tell supervisor loop: intentional shutdown, do not restart
     killOthers(PROCESS_NAME);
@@ -136,9 +172,18 @@ app.whenReady().then(() => {
   kioskLog(`app.whenReady rejected: ${err && err.stack ? err.stack : err}`);
 });
 
+app.on('before-quit', () => {
+  kioskLog(`before-quit (reason=${_quitReason || 'unknown'})`);
+});
+
 app.on('will-quit', () => {
+  kioskLog(`will-quit (reason=${_quitReason || 'unknown'})`);
   globalShortcut.unregisterAll();
   cleanupPidFile();
+});
+
+app.on('quit', (_e, exitCode) => {
+  kioskLog(`quit exitCode=${exitCode} reason=${_quitReason || 'unknown'}`);
 });
 
 app.on('window-all-closed', () => {

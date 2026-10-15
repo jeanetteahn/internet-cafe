@@ -510,47 +510,62 @@ every screen gets its own video + weather overlay. The kiosk cluster
 The kiosk is designed to keep running indefinitely without manual intervention.
 Several layers of protection work together.
 
-### Supervisor loop (Linux only)
+### Supervisor loops (Linux only)
 
-`linux/xwinwrap-launch.sh` and `linux/native-launch.sh` both run a
-**restart loop** around `kiosk-main.js`. When the kiosk exits for any reason
-(crash, OOM, GPU death, nightly restart), the loop relaunches it after 3 s.
-After more than 5 exits within 2 minutes the loop backs off to 60 s to avoid
-hammering a broken GPU driver in a tight loop.
+`linux/xwinwrap-launch.sh` and `linux/native-launch.sh` both run **two
+independent restart loops** — one for the wallpaper (`main.js` / xwinwrap)
+and one for the kiosk cluster (`kiosk-main.js`). Each process is restarted
+independently if it exits for any reason (crash, OOM, GPU death, nightly
+restart) after a 3 s delay. After more than 5 exits within 2 minutes a loop
+backs off to 60 s to avoid hammering a broken GPU driver.
+
+Each process is launched with `ELECTRON_ENABLE_LOGGING=1` so Chromium's own
+fatal messages (e.g. "GPU process isn't usable") appear in the process log
+files at `/tmp/internet-cafe-wallpaper/`. Output is tee'd to both the terminal
+and the log file so you can watch it live and read it later.
 
 **Ctrl+Alt+Q** still stops everything for good: whichever Electron process
 handles the shortcut writes a `quit-requested` flag to
-`/tmp/internet-cafe-wallpaper/quit-requested`, and the loop exits when it sees
-it. `relaunch.sh` also writes the flag before killing processes (to prevent the
-old loop from racing), then clears it as part of the fresh launch so future
-restarts work normally.
+`/tmp/internet-cafe-wallpaper/quit-requested`, and both loops exit when they
+see it. `relaunch.sh` also writes the flag before killing processes (to prevent
+the old loops from racing), then the new launch clears it at startup.
 
-The loop writes its own PID to `/tmp/internet-cafe-wallpaper/launcher-kiosk.pid`
-so `relaunch.sh` can send it a clean SIGTERM — no sleep-loop kill-and-hope.
+The supervisor script saves its PID to `/tmp/internet-cafe-wallpaper/launcher.pid`
+so `relaunch.sh` can send it a clean SIGTERM — the trap handler kills both
+loop subshells before exiting.
 
-The supervisor loop also logs each restart and exit code to
+Each restart is logged with the decoded exit code or signal name to
 `/tmp/internet-cafe-wallpaper/supervisor.log`.
 
 **`npm start` (dev, macOS or Linux)**: `scripts/launch-both.js` mirrors the
-same behaviour — it restarts the kiosk child on exit instead of shutting
-everything down.
+same behaviour — both the wallpaper and kiosk children restart on exit instead
+of shutting everything down. A 5 s delay before the first kiosk start
+approximates the 15 s delay in the Linux scripts.
 
-### Diagnostics (rotating log file)
+### Diagnostics (rotating log files)
 
-`kiosk-log.js` writes timestamped entries to
-`<userData>/logs/kiosk.log` (rotates at ~5 MB to `kiosk.log.1`). The full path
-is printed to the terminal at startup. Logged events include:
+`kiosk-log.js` writes timestamped entries for both processes:
+
+- **`<userData>/logs/kiosk.log`** — kiosk process (kiosk-main.js + kiosk-browsers.js)
+- **`<userData>/logs/wallpaper.log`** — wallpaper process (main.js)
+
+Each log rotates at ~5 MB to `<name>.log.1` and keeps ~10 MB total. The full
+path is printed to the terminal at startup. Logged events include:
 
 - `child-process-gone` (GPU crashes, renderer kills)
 - `render-process-gone` and `unresponsive` on every window and BrowserView
 - `uncaughtException` and `unhandledRejection`
+- `powerMonitor` events: `suspend`, `resume`, `lock-screen`, `unlock-screen`
+- `screen` events: `display-added`, `display-removed`, `display-metrics-changed`
+- `before-quit`, `will-quit`, `quit`, and `process.exit` — with the reason
+  (`Ctrl+Alt+Q`, `SIGTERM`, `SIGHUP`, or `unknown` for unexpected exits)
 - Memory snapshot every 5 minutes (`heapUsed`, RSS, total working-set across
   all Chromium sub-processes) — useful for spotting a leak before a disappearance
 - Health-check repairs and panel-view recycles
 
-On a typical Mint/Cinnamon install with the default Electron app name, the log
-is at `~/.config/Electron/logs/kiosk.log`.  The exact path is always printed
-at startup.
+On a typical Mint/Cinnamon install with the default Electron app name, the
+logs are at `~/.config/Electron/logs/`.  The exact path is always printed at
+startup.
 
 ### Crash recovery (in-process)
 
@@ -580,6 +595,28 @@ windows are recreated, `alwaysOnTop` is re-asserted on all windows, and
   a fully fresh renderer stack. No quit flag is written, so the loop always
   restarts after a nightly exit.
 
+### Preventing display sleep and GPU loss
+
+**`powerSaveBlocker`** — `main.js` calls
+`powerSaveBlocker.start('prevent-display-sleep')` at startup. This is the
+Electron-level equivalent of disabling DPMS: it prevents the OS from blanking
+the display, which in turn prevents the X server from entering a low-power
+state that kills the Chromium GPU process.
+
+**`xset`** — The Linux launch scripts also run
+`xset s off s noblank -dpms` at startup as an X11-level belt-and-suspenders
+(ignored silently if `xset` is not installed).
+
+**One-time Cinnamon setup** — To fully prevent Cinnamon's screensaver and
+power management from blanking the display, run these commands once on the
+Linux machine (do _not_ run them from the app):
+
+```bash
+gsettings set org.cinnamon.desktop.session idle-delay 0
+gsettings set org.cinnamon.desktop.screensaver lock-enabled false
+gsettings set org.cinnamon.settings-daemon.plugins.power sleep-display-ac 0
+```
+
 ### GPU resilience
 
 All `child-process-gone` events are logged. If logs show repeated GPU crashes,
@@ -607,6 +644,9 @@ work on Cinnamon.
 
 | File | Contents |
 |---|---|
-| `~/.config/Electron/logs/kiosk.log` | Electron kiosk process log (exact path printed at startup) |
-| `/tmp/internet-cafe-wallpaper/supervisor.log` | Bash supervisor restart log |
+| `~/.config/Electron/logs/kiosk.log` | Kiosk process structured log (exact path printed at startup) |
+| `~/.config/Electron/logs/wallpaper.log` | Wallpaper process structured log |
+| `/tmp/internet-cafe-wallpaper/supervisor.log` | Bash supervisor restart/exit-code log |
+| `/tmp/internet-cafe-wallpaper/kiosk-electron.log` | Raw kiosk Electron stdout+stderr (Chromium-level messages) |
+| `/tmp/internet-cafe-wallpaper/wallpaper-electron.log` | Raw wallpaper Electron stdout+stderr |
 | `/tmp/internet-cafe-wallpaper/quit-requested` | Exists only during an intentional shutdown |

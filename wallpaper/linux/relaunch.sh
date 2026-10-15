@@ -13,16 +13,16 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 PID_DIR="/tmp/internet-cafe-wallpaper"
 QUIT_FLAG="$PID_DIR/quit-requested"
-LAUNCHER_PID_FILE="$PID_DIR/launcher-kiosk.pid"
+LAUNCHER_PID_FILE="$PID_DIR/launcher.pid"
 mkdir -p "$PID_DIR"
 
-# Signal the supervisor loop to stop before we kill the electron processes.
-# This prevents the loop from restarting the kiosk in the 3-second window
-# between our pkill and the new xwinwrap-launch.sh starting.
+# Signal the supervisor loop(s) to stop before we kill the Electron processes.
+# This prevents either loop from restarting in the window between our pkill
+# and the new launch script starting.
 touch "$QUIT_FLAG"
 
-# Kill the previous launcher (supervisor loop) by its saved PID.
-# This also interrupts any in-progress backoff sleep.
+# Kill the previous launcher (supervisor script) by its saved PID.
+# The launcher's trap handler kills both wallpaper and kiosk loop subshells.
 if [ -f "$LAUNCHER_PID_FILE" ]; then
   OLD_LAUNCHER_PID=$(cat "$LAUNCHER_PID_FILE" 2>/dev/null || true)
   if [ -n "$OLD_LAUNCHER_PID" ]; then
@@ -31,12 +31,13 @@ if [ -f "$LAUNCHER_PID_FILE" ]; then
   rm -f "$LAUNCHER_PID_FILE"
 fi
 
+# Belt-and-suspenders: kill any lingering xwinwrap or Electron processes.
 pkill -f xwinwrap 2>/dev/null || true
 pkill -f electron 2>/dev/null || true
 sleep 1
 
 # Re-run npm install if node_modules is missing or package.json is newer than
-# the lock file (e.g. after a git pull that added a new dependency like @tgwf/co2).
+# the lock file (e.g. after a git pull that added a new dependency).
 NM="$PROJECT_DIR/node_modules"
 PKG="$PROJECT_DIR/package.json"
 if [ ! -d "$NM" ] || [ "$PKG" -nt "$NM/.package-lock.json" ]; then

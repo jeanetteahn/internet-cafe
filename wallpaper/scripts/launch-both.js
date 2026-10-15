@@ -22,11 +22,10 @@ let kioskChild     = null;
 let quitting       = false;
 
 function launch(entry) {
-  const child = spawn(electronPath, [entry], {
+  return spawn(electronPath, [entry], {
     cwd: projectDir,
     stdio: 'inherit',
   });
-  return child;
 }
 
 function shutdown() {
@@ -37,17 +36,29 @@ function shutdown() {
   process.exit();
 }
 
-function startKiosk() {
-  kioskChild = launch(path.join(projectDir, 'kiosk-main.js'));
-  kioskChild.on('exit', (code) => {
+function startWallpaper() {
+  wallpaperChild = launch(projectDir); // main.js (wallpaper) — package.json "main" resolves it
+  wallpaperChild.on('exit', (code) => {
     if (quitting) return;
-    // If Ctrl+Alt+Q wrote the quit flag, honour it and shut everything down.
     if (isQuitRequested()) {
       shutdown();
       return;
     }
-    // Otherwise restart the kiosk after a short delay (mirrors the Linux
-    // supervisor loop in linux/xwinwrap-launch.sh).
+    console.log(`[launch-both] wallpaper exited (code=${code}) — restarting in 3 s`);
+    setTimeout(() => {
+      if (!quitting) startWallpaper();
+    }, 3000);
+  });
+}
+
+function startKiosk() {
+  kioskChild = launch(path.join(projectDir, 'kiosk-main.js'));
+  kioskChild.on('exit', (code) => {
+    if (quitting) return;
+    if (isQuitRequested()) {
+      shutdown();
+      return;
+    }
     console.log(`[launch-both] kiosk exited (code=${code}) — restarting in 3 s`);
     setTimeout(() => {
       if (!quitting) startKiosk();
@@ -55,11 +66,14 @@ function startKiosk() {
   });
 }
 
-wallpaperChild = launch(projectDir); // main.js (wallpaper) — package.json "main" resolves it
-wallpaperChild.on('exit', shutdown);  // if the wallpaper dies, everything goes down
+startWallpaper();
 
 if (process.env.ENABLE_KIOSK !== '0') {
-  startKiosk();
+  // Delay kiosk start slightly to let the wallpaper window establish first,
+  // mirroring the 15 s delay in the Linux launch scripts.
+  setTimeout(() => {
+    if (!quitting) startKiosk();
+  }, 5000);
 }
 
 process.on('SIGINT',  shutdown);

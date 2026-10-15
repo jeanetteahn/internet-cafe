@@ -33,7 +33,7 @@
 # a chance of working through XWayland, and even then depends on how
 # tolerant your compositor is of X11 clients requesting background
 # placement — it is not guaranteed, unlike on a real X11 session.
-set -euo pipefail
+set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -56,113 +56,210 @@ if [ ! -x "$ELECTRON_BIN" ]; then
   exit 1
 fi
 
-# Full virtual screen geometry (all monitors combined). Adjust to a
-# specific monitor's geometry (from `xrandr`) if you only want the
-# wallpaper on one screen.
+# Full virtual screen geometry (all monitors combined).
 GEOMETRY=$(xdotool getdisplaygeometry 2>/dev/null || echo "1920 1080")
-WIDTH=$(echo "$GEOMETRY" | awk '{print $1}')
+WIDTH=$(echo  "$GEOMETRY" | awk '{print $1}')
 HEIGHT=$(echo "$GEOMETRY" | awk '{print $2}')
 
 # ---- Supervisor / self-healing state ----------------------------------------
 PID_DIR="/tmp/internet-cafe-wallpaper"
 QUIT_FLAG="$PID_DIR/quit-requested"
-LAUNCHER_PID_FILE="$PID_DIR/launcher-kiosk.pid"
+LAUNCHER_PID_FILE="$PID_DIR/launcher.pid"
 SUPERVISOR_LOG="$PID_DIR/supervisor.log"
+WALLPAPER_ELECTRON_LOG="$PID_DIR/wallpaper-electron.log"
+KIOSK_ELECTRON_LOG="$PID_DIR/kiosk-electron.log"
 mkdir -p "$PID_DIR"
 
-# Write this script's PID so relaunch.sh can kill it cleanly before relaunching.
-echo $$ > "$LAUNCHER_PID_FILE"
-
 sup_log() {
-  local msg="$(date -Iseconds) [supervisor] $1"
+  local msg
+  msg="$(date -Iseconds) [supervisor] $1"
   echo "$msg" >> "$SUPERVISOR_LOG" 2>/dev/null || true
   echo "$msg" >&2
 }
 
+# Decode a bash exit code: 0 = clean, 128+N = signal, else error.
+decode_exit() {
+  local code=$1
+  if [ "$code" -eq 0 ]; then
+    echo "clean exit (0)"
+  elif [ "$code" -ge 128 ] && [ "$code" -le 165 ]; then
+    local sig=$(( code - 128 ))
+    case $sig in
+      1)  echo "SIGHUP (code=$code)"  ;;
+      2)  echo "SIGINT (code=$code)"  ;;
+      9)  echo "SIGKILL (code=$code)" ;;
+      11) echo "SIGSEGV (code=$code)" ;;
+      15) echo "SIGTERM (code=$code)" ;;
+      *)  echo "signal $sig (code=$code)" ;;
+    esac
+  else
+    echo "exit code=$code"
+  fi
+}
+
+# Write our PID so relaunch.sh can kill this script cleanly.
+echo $$ > "$LAUNCHER_PID_FILE"
+
+# When this script is killed (by relaunch.sh or Ctrl+C), stop both loops.
+WALLPAPER_LOOP_PID=""
+KIOSK_LOOP_PID=""
+cleanup() {
+  touch "$QUIT_FLAG" 2>/dev/null || true
+  [ -n "$WALLPAPER_LOOP_PID" ] && kill "$WALLPAPER_LOOP_PID" 2>/dev/null || true
+  [ -n "$KIOSK_LOOP_PID"     ] && kill "$KIOSK_LOOP_PID"     2>/dev/null || true
+  rm -f "$LAUNCHER_PID_FILE"
+  sup_log "supervisor cleanup — exiting"
+  exit 0
+}
+trap cleanup TERM INT
+
 # Clear any quit flag left from a previous session; we are starting fresh.
 rm -f "$QUIT_FLAG"
 
-sup_log "starting (pid=$$, electron=$ELECTRON_BIN)"
+# Disable X11 screen saver and DPMS so the display never goes dark and the
+# GPU driver never enters a low-power state that kills the Chromium GPU
+# process.  powerSaveBlocker in main.js is the Electron-level equivalent;
+# xset is the X11-level belt-and-suspenders. Ignore errors if xset is absent.
+xset s off s noblank -dpms 2>/dev/null || true
 
-# NOTE: deliberately no `-fs` here. xwinwrap's own usage text says `-ov`
-# (override_redirect, what makes this sit seamlessly in the background) is
-# intended for non-fullscreen mode; combining `-ov` with `-fs` triggers a
-# BadMatch X error on window creation on at least some X11/compositor
-# combinations (confirmed on Cinnamon/Mutter-family setups). The explicit
-# `-g` geometry below already covers the full display, so dropping `-fs`
-# costs nothing.
-#
-# xwinwrap must start first and claim its desktop-layer window before the
-# kiosk cluster launches. Starting both simultaneously races with xwinwrap's
-# window-placement handshake and can leave the kiosk invisible or mis-layered
-# on Cinnamon. Sleep 15 s before starting the kiosk process.
-xwinwrap -ov -s -st -sp -nf -b -un -g "${WIDTH}x${HEIGHT}+0+0" -- \
-  "$ELECTRON_BIN" "$PROJECT_DIR" &
+sup_log "starting (pid=$$, electron=$ELECTRON_BIN, geometry=${WIDTH}x${HEIGHT})"
 
-sup_log "wallpaper (xwinwrap) started; waiting 15s before kiosk"
-sleep 15
+# ---- Wallpaper supervisor loop -----------------------------------------------
+# Restarts xwinwrap + electron (main.js) whenever they exit.
+# NOTE: deliberately no `-fs` here (see the original xwinwrap-launch comments
+# above about BadMatch on Cinnamon when combining -ov with -fs).
+run_wallpaper_loop() {
+  trap 'exit 0' TERM INT
+  local crash_count=0
+  local crash_window_start
+  crash_window_start=$(date +%s)
 
-# ---- Kiosk supervisor loop --------------------------------------------------
-# Relaunches kiosk-main.js whenever it exits (crash, OOM, GPU death, etc.).
-# Backs off to 60 s when more than 5 exits happen within 2 minutes.
-# Exits cleanly when the quit-requested flag file exists.
+  while true; do
+    if [ -f "$QUIT_FLAG" ]; then
+      sup_log "wallpaper loop: quit flag — stopping"
+      break
+    fi
+
+    sup_log "wallpaper: launching xwinwrap+electron (crash_count=$crash_count)"
+    ELECTRON_ENABLE_LOGGING=1 xwinwrap -ov -s -st -sp -nf -b -un \
+      -g "${WIDTH}x${HEIGHT}+0+0" -- \
+      "$ELECTRON_BIN" "$PROJECT_DIR" \
+      > >(tee -a "$WALLPAPER_ELECTRON_LOG") 2>&1 &
+    local WALL_PID=$!
+
+    wait "$WALL_PID" 2>/dev/null || true
+    local EXIT_CODE=$?
+
+    if [ -f "$QUIT_FLAG" ]; then
+      sup_log "wallpaper: exited ($(decode_exit $EXIT_CODE)) and quit requested — stopping"
+      break
+    fi
+
+    sup_log "wallpaper: exited with $(decode_exit $EXIT_CODE) — will restart"
+
+    local now
+    now=$(date +%s)
+    local elapsed=$(( now - crash_window_start ))
+    if [ "$elapsed" -le 120 ]; then
+      crash_count=$(( crash_count + 1 ))
+    else
+      crash_count=1
+      crash_window_start=$now
+    fi
+
+    if [ "$crash_count" -gt 5 ]; then
+      sup_log "wallpaper: too many restarts ($crash_count in ${elapsed}s) — backing off 60s"
+      sleep 60
+      crash_count=0
+      crash_window_start=$(date +%s)
+    else
+      sleep 3
+    fi
+  done
+  sup_log "wallpaper loop exiting"
+}
+
+# ---- Kiosk supervisor loop ---------------------------------------------------
+# Relaunches kiosk-main.js whenever it exits.  First start is delayed 15 s so
+# xwinwrap can establish its desktop-layer window before the kiosk appears on
+# top.  Subsequent restarts get the normal 3 s / 60 s backoff.
+run_kiosk_loop() {
+  trap 'exit 0' TERM INT
+  local crash_count=0
+  local crash_window_start
+  crash_window_start=$(date +%s)
+  local first_start=1
+
+  while true; do
+    if [ -f "$QUIT_FLAG" ]; then
+      sup_log "kiosk loop: quit flag — stopping"
+      break
+    fi
+
+    sup_log "kiosk: launching (crash_count=$crash_count)"
+    ELECTRON_ENABLE_LOGGING=1 "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" \
+      > >(tee -a "$KIOSK_ELECTRON_LOG") 2>&1 &
+    local KIOSK_PID=$!
+
+    wait "$KIOSK_PID" 2>/dev/null || true
+    local EXIT_CODE=$?
+
+    if [ -f "$QUIT_FLAG" ]; then
+      sup_log "kiosk: exited ($(decode_exit $EXIT_CODE)) and quit requested — stopping"
+      break
+    fi
+
+    sup_log "kiosk: exited with $(decode_exit $EXIT_CODE) — will restart"
+
+    local now
+    now=$(date +%s)
+    local elapsed=$(( now - crash_window_start ))
+    if [ "$elapsed" -le 120 ]; then
+      crash_count=$(( crash_count + 1 ))
+    else
+      crash_count=1
+      crash_window_start=$now
+    fi
+
+    if [ "$crash_count" -gt 5 ]; then
+      sup_log "kiosk: too many restarts ($crash_count in ${elapsed}s) — backing off 60s"
+      sleep 60
+      crash_count=0
+      crash_window_start=$(date +%s)
+    else
+      sleep 3
+    fi
+    first_start=0
+  done
+  sup_log "kiosk loop exiting"
+}
+
+# ---- Launch both loops -------------------------------------------------------
 
 if [ "${ENABLE_KIOSK:-1}" = "0" ]; then
-  sup_log "ENABLE_KIOSK=0 — skipping kiosk supervisor loop"
-  wait
+  sup_log "ENABLE_KIOSK=0 — running wallpaper only (no kiosk loop)"
+  run_wallpaper_loop &
+  WALLPAPER_LOOP_PID=$!
+  wait "$WALLPAPER_LOOP_PID" 2>/dev/null || true
   rm -f "$LAUNCHER_PID_FILE"
   exit 0
 fi
 
-crash_count=0
-crash_window_start=$(date +%s)
+# Start wallpaper immediately; wait 15 s before kiosk so xwinwrap's
+# desktop-layer window is established first.
+run_wallpaper_loop &
+WALLPAPER_LOOP_PID=$!
 
-while true; do
-  # Stop immediately if Ctrl+Alt+Q or relaunch.sh requested a quit.
-  if [ -f "$QUIT_FLAG" ]; then
-    sup_log "quit-requested flag set — stopping supervisor loop"
-    break
-  fi
+sup_log "wallpaper loop started (pid=$WALLPAPER_LOOP_PID); waiting 15s before kiosk"
+sleep 15
 
-  sup_log "launching kiosk (crash_count=$crash_count)"
-  "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" &
-  KIOSK_PID=$!
+run_kiosk_loop &
+KIOSK_LOOP_PID=$!
+sup_log "kiosk loop started (pid=$KIOSK_LOOP_PID)"
 
-  # Wait for kiosk to exit (for any reason).
-  wait "$KIOSK_PID" || true
-  EXIT_CODE=$?
+# Wait for both loops.  Either finishing means the supervisor is done.
+wait "$WALLPAPER_LOOP_PID" 2>/dev/null || true
+wait "$KIOSK_LOOP_PID"     2>/dev/null || true
 
-  # Check quit flag again — may have been written during the kiosk run.
-  if [ -f "$QUIT_FLAG" ]; then
-    sup_log "kiosk exited (code=$EXIT_CODE) and quit-requested — stopping supervisor loop"
-    break
-  fi
-
-  sup_log "kiosk exited with code=$EXIT_CODE — will restart"
-
-  # Crash-rate back-off: reset window every 2 minutes.
-  now=$(date +%s)
-  elapsed=$(( now - crash_window_start ))
-  if [ "$elapsed" -le 120 ]; then
-    crash_count=$(( crash_count + 1 ))
-  else
-    crash_count=1
-    crash_window_start=$now
-  fi
-
-  if [ "$crash_count" -gt 5 ]; then
-    sup_log "too many restarts ($crash_count in ${elapsed}s) — backing off 60s"
-    sleep 60
-    crash_count=0
-    crash_window_start=$(date +%s)
-  else
-    sleep 3
-  fi
-done
-
-sup_log "supervisor exiting"
 rm -f "$LAUNCHER_PID_FILE"
-
-# Keep alive until the wallpaper (xwinwrap) process also exits, so this
-# script's exit doesn't confuse any wrapper that targets the parent PID.
-wait
+sup_log "supervisor exiting"
