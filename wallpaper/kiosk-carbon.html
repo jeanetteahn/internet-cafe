@@ -5,6 +5,15 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
   <style>
+    /* ---- Shadow tuning knobs ---- */
+    :root {
+      --shadow-pad:   24px; /* must match CARBON_SHADOW_PAD in kiosk-browsers.js */
+      --shadow-dx:    0px;
+      --shadow-dy:    4px;
+      --shadow-blur:  18px;
+      --shadow-color: rgba(0, 0, 0, 0.42);
+    }
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
       width: 100%; height: 100%;
@@ -129,10 +138,15 @@
         var title = svg.querySelector('title');
         if (!title) { title = document.createElementNS('http://www.w3.org/2000/svg', 'title'); svg.prepend(title); }
         title.textContent = '';
-        svg.style.width         = '100%';
-        svg.style.height        = '100%';
+        // Position the circle face inside the shadow padding area.
+        svg.style.position = 'absolute';
+        svg.style.left     = 'var(--shadow-pad)';
+        svg.style.top      = 'var(--shadow-pad)';
+        svg.style.width    = 'calc(100% - 2 * var(--shadow-pad))';
+        svg.style.height   = 'calc(100% - 2 * var(--shadow-pad))';
         svg.style.pointerEvents = 'none';
-        svg.style.display       = 'block';
+        svg.style.display  = 'block';
+        svg.style.filter   = 'drop-shadow(var(--shadow-dx) var(--shadow-dy) var(--shadow-blur) var(--shadow-color))';
         stops = svg.querySelectorAll('stop');
       });
 
@@ -150,6 +164,19 @@
       });
     }
 
+    // ---- Hit test: only the circle face is interactive, not the shadow padding ----
+    function hitInCircle(e) {
+      var w   = document.documentElement.clientWidth;
+      var h   = document.documentElement.clientHeight;
+      var pad = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--shadow-pad')) || 0;
+      var r   = (w - 2 * pad) / 2;
+      var cx  = w / 2;
+      var cy  = h / 2;
+      var dx  = e.clientX - cx;
+      var dy  = e.clientY - cy;
+      return dx * dx + dy * dy <= r * r;
+    }
+
     // ---- Drag (mirrors kiosk-clock.html exactly, plus dblclick reset) ----
     var DRAG_THRESHOLD = 5;
     var isDragging = false;
@@ -158,6 +185,7 @@
     var dragStartY = 0;
 
     wrap.addEventListener('pointerdown', function (e) {
+      if (!hitInCircle(e)) return;
       e.preventDefault();
       wrap.setPointerCapture(e.pointerId);
       capturedId  = e.pointerId;
@@ -201,7 +229,8 @@
     });
 
     // Double-click resets to anchor position.
-    wrap.addEventListener('dblclick', function () {
+    wrap.addEventListener('dblclick', function (e) {
+      if (!hitInCircle(e)) return;
       if (window.kioskCarbon) window.kioskCarbon.dragReset();
     });
   </script>

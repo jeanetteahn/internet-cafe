@@ -195,8 +195,13 @@ const ADDRESSBAR_DOCK_BOTTOM_INSET = 58;  // bar bottom sits this many px above 
 const ADDRESSBAR_MAX_W             = 900; // maximum expanded width (px)
 
 // ---- Carbon indicator window -------------------------------------------------
-const CARBON_SIZE    = CLOCK_SIZE; // match clock window size exactly
-// Offset from the panel window's top-left corner to the carbon window position.
+const CARBON_SIZE       = CLOCK_SIZE; // match clock window size exactly
+// Transparent border added around the window so the CSS drop-shadow has room to
+// render.  The circle stays at the same on-screen position — all positioning
+// code subtracts this pad so the window origin moves left/up by the same amount.
+const CARBON_SHADOW_PAD = 24; // px on each side; tune alongside the CSS shadow values
+const CARBON_WIN_SIZE   = CARBON_SIZE + 2 * CARBON_SHADOW_PAD; // actual BrowserWindow size
+// Offset from the panel window's top-left corner to the carbon circle position.
 const CARBON_ANCHOR  = { x: 140, y: 120 };
 // CO2 thresholds (grams per page view) for the score log scale.
 // 0.1 g → score 0 (blue, clean); 1.0 g → score 1 (orange, dirty).
@@ -1789,15 +1794,17 @@ function pushCarbonState(key) {
   carbonWindow.webContents.send('carbon-state', { score, loading: !!ps.carbonLoading });
 }
 
-// Returns the screen position where the carbon window should sit for a given
-// panel key — CARBON_ANCHOR pixels from the panel window's top-left corner.
+// Returns the screen position where the carbon window's top-left corner should
+// sit for a given panel key.  Subtracts CARBON_SHADOW_PAD so the circle face
+// lands at CARBON_ANCHOR from the panel's top-left corner (the window origin is
+// that many pixels further up/left to make room for the shadow).
 function computeCarbonAnchor(key) {
   const win = panelWindows.get(key);
   if (!win || win.isDestroyed()) return null;
   const b = win.getBounds();
   return {
-    x: Math.round(b.x + CARBON_ANCHOR.x),
-    y: Math.round(b.y + CARBON_ANCHOR.y),
+    x: Math.round(b.x + CARBON_ANCHOR.x - CARBON_SHADOW_PAD),
+    y: Math.round(b.y + CARBON_ANCHOR.y - CARBON_SHADOW_PAD),
   };
 }
 
@@ -1842,12 +1849,12 @@ function createCarbonWindow(workArea) {
   }
 
   const hubWin  = panelWindows.get('hub');
-  let startX = workArea.x + CARBON_ANCHOR.x;
-  let startY = workArea.y + CARBON_ANCHOR.y;
+  let startX = workArea.x + CARBON_ANCHOR.x - CARBON_SHADOW_PAD;
+  let startY = workArea.y + CARBON_ANCHOR.y - CARBON_SHADOW_PAD;
   if (hubWin && !hubWin.isDestroyed()) {
     const b = hubWin.getBounds();
-    startX  = b.x + CARBON_ANCHOR.x;
-    startY  = b.y + CARBON_ANCHOR.y;
+    startX  = b.x + CARBON_ANCHOR.x - CARBON_SHADOW_PAD;
+    startY  = b.y + CARBON_ANCHOR.y - CARBON_SHADOW_PAD;
   }
 
   carbonUserPlaced = false;
@@ -1855,8 +1862,8 @@ function createCarbonWindow(workArea) {
   carbonWindow = new BrowserWindow({
     x:           Math.round(startX),
     y:           Math.round(startY),
-    width:       CARBON_SIZE,
-    height:      CARBON_SIZE,
+    width:       CARBON_WIN_SIZE,
+    height:      CARBON_WIN_SIZE,
     frame:       false,
     transparent: true,
     alwaysOnTop: true,
@@ -1877,7 +1884,7 @@ function createCarbonWindow(workArea) {
   });
   carbonWindow.webContents.once('did-finish-load', () => {
     if (USE_WINDOW_SHAPE && process.platform === 'linux') {
-      carbonWindow.setShape([{ x: 0, y: 0, width: CARBON_SIZE, height: CARBON_SIZE }]);
+      carbonWindow.setShape([{ x: 0, y: 0, width: CARBON_WIN_SIZE, height: CARBON_WIN_SIZE }]);
     }
     carbonWindow.webContents.send('carbon-svg', _carbonSvgText);
     // Push initial neutral loading state.
@@ -2349,10 +2356,10 @@ function attachActivityHandling() {
     const MIN_VIS      = 20;
     let nx = cursor.x - carbonDragOffset.dx;
     let ny = cursor.y - carbonDragOffset.dy;
-    nx = Math.max(workArea.x - CARBON_SIZE + MIN_VIS,
-                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS));
-    ny = Math.max(workArea.y,
-                  Math.min(ny, workArea.y + workArea.height - CARBON_SIZE));
+    nx = Math.max(workArea.x - CARBON_SIZE + MIN_VIS - CARBON_SHADOW_PAD,
+                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS - CARBON_SHADOW_PAD));
+    ny = Math.max(workArea.y - CARBON_SHADOW_PAD,
+                  Math.min(ny, workArea.y + workArea.height - CARBON_SIZE - CARBON_SHADOW_PAD));
     carbonWindow.setPosition(Math.round(nx), Math.round(ny));
   });
 
