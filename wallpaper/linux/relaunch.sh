@@ -11,8 +11,28 @@ set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-pkill -f xwinwrap 2>/dev/null
-pkill -f electron 2>/dev/null
+PID_DIR="/tmp/internet-cafe-wallpaper"
+QUIT_FLAG="$PID_DIR/quit-requested"
+LAUNCHER_PID_FILE="$PID_DIR/launcher-kiosk.pid"
+mkdir -p "$PID_DIR"
+
+# Signal the supervisor loop to stop before we kill the electron processes.
+# This prevents the loop from restarting the kiosk in the 3-second window
+# between our pkill and the new xwinwrap-launch.sh starting.
+touch "$QUIT_FLAG"
+
+# Kill the previous launcher (supervisor loop) by its saved PID.
+# This also interrupts any in-progress backoff sleep.
+if [ -f "$LAUNCHER_PID_FILE" ]; then
+  OLD_LAUNCHER_PID=$(cat "$LAUNCHER_PID_FILE" 2>/dev/null || true)
+  if [ -n "$OLD_LAUNCHER_PID" ]; then
+    kill "$OLD_LAUNCHER_PID" 2>/dev/null || true
+  fi
+  rm -f "$LAUNCHER_PID_FILE"
+fi
+
+pkill -f xwinwrap 2>/dev/null || true
+pkill -f electron 2>/dev/null || true
 sleep 1
 
 # Re-run npm install if node_modules is missing or package.json is newer than
@@ -24,4 +44,6 @@ if [ ! -d "$NM" ] || [ "$PKG" -nt "$NM/.package-lock.json" ]; then
   (cd "$PROJECT_DIR" && npm install --prefer-offline 2>&1) || echo "[relaunch] npm install failed, continuing anyway"
 fi
 
+# xwinwrap-launch.sh clears the QUIT_FLAG itself at startup (fresh launch),
+# so we do not need to remove it here.
 exec bash "$PROJECT_DIR/linux/xwinwrap-launch.sh"

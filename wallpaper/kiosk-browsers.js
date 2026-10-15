@@ -2,6 +2,7 @@ const { app, BrowserWindow, BrowserView, screen, ipcMain, globalShortcut, sessio
 const path = require('path');
 const fs   = require('fs');
 const http = require('http');
+const { kioskLog } = require('./kiosk-log');
 
 // DDG result cache — one HTML file per panel, loaded as the startup placeholder.
 const cacheDir = path.join(app.getPath('userData'), 'ddg-cache');
@@ -316,6 +317,10 @@ let carbonWindow      = null;  // carbon indicator overlay window
 let carbonDragOffset  = null;  // { dx, dy } set at drag-start, cleared at drag-end
 let carbonUserPlaced  = false; // true once the user has manually dragged it
 let carbonGlideTimer  = null;  // setInterval id for glideCarbonTo tween
+
+// Set in createKioskWindow; needed by health check and crash recovery to recreate
+// overlay windows without requiring the caller to pass workArea again.
+let _lastWorkArea = null;
 
 // ---- Layout -----------------------------------------------------------------
 
@@ -1159,7 +1164,9 @@ function setupViewEventHandlers(key, win, view) {
   });
 
   view.webContents.on('render-process-gone', (_e, details) => {
-    console.log(`[kiosk] ${key} render process gone (reason: ${details.reason}, exitCode: ${details.exitCode})`);
+    const msg = `panel ${key} view render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
+    console.log(`[kiosk] ${msg}`);
+    kioskLog(msg);
     setTimeout(() => {
       if (view.webContents.isDestroyed()) return;
       const ps = panelStates.get(key);
@@ -1170,6 +1177,10 @@ function setupViewEventHandlers(key, win, view) {
         view.webContents.loadURL(buildErrorPageUrl('This page stopped working.', '')).catch(() => {});
       }
     }, 500);
+  });
+
+  view.webContents.on('unresponsive', () => {
+    kioskLog(`panel ${key} view webContents unresponsive`);
   });
 }
 
@@ -1680,6 +1691,26 @@ function createForkKnifeWindow(workArea) {
     }
     pushForkKnifeNavState();
   });
+
+  forkKnifeWindow.webContents.on('render-process-gone', (_e, details) => {
+    const msg = `forkknife render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
+    console.error(`[kiosk] ${msg}`);
+    kioskLog(msg);
+    setTimeout(() => {
+      if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+      forkKnifeWindow.webContents.once('did-finish-load', () => {
+        if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+          forkKnifeWindow.setShape([{ x: 0, y: 0, width: FORKKNIFE_WIN_W, height: FORKKNIFE_WIN_H }]);
+        }
+        pushForkKnifeNavState();
+        restackOverlays();
+      });
+      forkKnifeWindow.loadFile(path.join(__dirname, 'kiosk-forkknife.html'));
+    }, 500);
+  });
+  forkKnifeWindow.on('unresponsive', () => {
+    kioskLog('forkknife window unresponsive');
+  });
 }
 
 // ---- Clock window -------------------------------------------------------------
@@ -1746,6 +1777,28 @@ function createClockWindow(workArea) {
     clockWindow.webContents.send('clock-svg', _clockSvgText);
     if (clockTimezone) clockWindow.webContents.send('clock-timezone', clockTimezone);
   });
+
+  clockWindow.webContents.on('render-process-gone', (_e, details) => {
+    const msg = `clock render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
+    console.error(`[kiosk] ${msg}`);
+    kioskLog(msg);
+    setTimeout(() => {
+      if (!clockWindow || clockWindow.isDestroyed()) return;
+      // dom-ready handler (attached with 'on') will re-inject CSS automatically.
+      clockWindow.webContents.once('did-finish-load', () => {
+        if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+          clockWindow.setShape([{ x: 0, y: 0, width: CLOCK_WIN_SIZE, height: CLOCK_WIN_SIZE }]);
+        }
+        clockWindow.webContents.send('clock-svg', _clockSvgText);
+        if (clockTimezone) clockWindow.webContents.send('clock-timezone', clockTimezone);
+        restackOverlays();
+      });
+      clockWindow.loadFile(path.join(__dirname, 'kiosk-clock.html'));
+    }, 500);
+  });
+  clockWindow.on('unresponsive', () => {
+    kioskLog('clock window unresponsive');
+  });
 }
 
 // ---- Address bar window -------------------------------------------------------
@@ -1802,6 +1855,26 @@ function createAddressBarWindow(workArea) {
     if (hubView && !hubView.webContents.isDestroyed()) {
       pushAddressBarUrl(hubView.webContents.getURL());
     }
+  });
+
+  addressBarWindow.webContents.on('render-process-gone', (_e, details) => {
+    const msg = `addressbar render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
+    console.error(`[kiosk] ${msg}`);
+    kioskLog(msg);
+    setTimeout(() => {
+      if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+      addressBarWindow.webContents.once('did-finish-load', () => {
+        if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+          addressBarWindow.setShape([{ x: 0, y: 0, width: addressBarCurrentW, height: AB_WIN_H }]);
+        }
+        if (addressBarLiveUrl) addressBarWindow.webContents.send('addressbar-url', addressBarLiveUrl);
+        restackOverlays();
+      });
+      addressBarWindow.loadFile(path.join(__dirname, 'kiosk-addressbar.html'));
+    }, 500);
+  });
+  addressBarWindow.on('unresponsive', () => {
+    kioskLog('addressbar window unresponsive');
   });
 }
 
@@ -1925,6 +1998,27 @@ function createCarbonWindow(workArea) {
     // Push initial neutral loading state.
     carbonWindow.webContents.send('carbon-state', { score: 0.5, loading: false });
   });
+
+  carbonWindow.webContents.on('render-process-gone', (_e, details) => {
+    const msg = `carbon render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
+    console.error(`[kiosk] ${msg}`);
+    kioskLog(msg);
+    setTimeout(() => {
+      if (!carbonWindow || carbonWindow.isDestroyed()) return;
+      carbonWindow.webContents.once('did-finish-load', () => {
+        if (USE_WINDOW_SHAPE && process.platform === 'linux') {
+          carbonWindow.setShape([{ x: 0, y: 0, width: CARBON_WIN_SIZE, height: CARBON_WIN_SIZE }]);
+        }
+        carbonWindow.webContents.send('carbon-svg', _carbonSvgText);
+        pushCarbonState(getActiveKey());
+        restackOverlays();
+      });
+      carbonWindow.loadFile(path.join(__dirname, 'kiosk-carbon.html'));
+    }, 500);
+  });
+  carbonWindow.on('unresponsive', () => {
+    kioskLog('carbon window unresponsive');
+  });
 }
 
 // ---- Window creation --------------------------------------------------------
@@ -2001,6 +2095,23 @@ function createKioskWindow() {
       updateWindowShape(key);
     });
 
+    win.webContents.on('render-process-gone', (_e, details) => {
+      const msg = `panel ${key} handle render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
+      console.error(`[kiosk] ${msg}`);
+      kioskLog(msg);
+      setTimeout(() => {
+        if (!win || win.isDestroyed()) return;
+        win.webContents.once('did-finish-load', () => {
+          win.webContents.send('panel-hardware', { key, margin: M });
+          updateWindowShape(key);
+        });
+        win.loadFile(path.join(__dirname, 'kiosk-handle.html'));
+      }, 500);
+    });
+    win.on('unresponsive', () => {
+      kioskLog(`panel ${key} handle window unresponsive`);
+    });
+
     // Panel content view — inset by HARDWARE_MARGIN on all sides so the
     // transparent border is visible.  setAutoResize keeps the right and
     // bottom edges tracking the window edges (distance M preserved).
@@ -2026,6 +2137,16 @@ function createKioskWindow() {
     });
     gripViews[key] = grip;
     positionGrip(key);
+
+    grip.webContents.on('render-process-gone', (_e, details) => {
+      const msg = `panel ${key} grip render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
+      console.error(`[kiosk] ${msg}`);
+      kioskLog(msg);
+      setTimeout(() => {
+        if (!grip || grip.webContents.isDestroyed()) return;
+        grip.webContents.loadFile(path.join(__dirname, 'kiosk-resize-grip.html'));
+      }, 500);
+    });
 
     win.on('resize', () => {
       positionGrip(key);
@@ -2102,6 +2223,8 @@ function createKioskWindow() {
     console.error('[kiosk] Ctrl+Alt+D already claimed — layout dump unavailable');
   }
 
+  _lastWorkArea = workArea;
+
   createForkKnifeWindow(workArea);
   createClockWindow(workArea);
   createAddressBarWindow(workArea);
@@ -2113,6 +2236,11 @@ function createKioskWindow() {
   if (!clockTzTimer) {
     clockTzTimer = setInterval(fetchClockTimezone, CLOCK_TZ_REFETCH_MS);
   }
+
+  startHealthCheck();
+  startCacheClearTimer();
+  startViewRecycleTimer();
+  startNightlyRestartTimer();
 
   return order.map(key => panelWindows.get(key));
 }
@@ -2457,6 +2585,150 @@ function startAllIdleRotation() {
   });
   windowsCreatedAt = Date.now();
   console.log(`[kiosk-auto] link-following enabled (policy: ${AUTO_LINK_POLICY}, probability: ${FOLLOW_RESULT_PROBABILITY})`);
+}
+
+// ---- Self-healing: health check, cache clear, view recycle, nightly restart ---
+
+// Every 30 s: verify each overlay window exists; recreate and re-stack if not.
+function startHealthCheck() {
+  setInterval(() => {
+    if (!_lastWorkArea) return;
+    let repairs = 0;
+
+    if (!clockWindow || clockWindow.isDestroyed()) {
+      kioskLog('health: clock window gone — recreating');
+      createClockWindow(_lastWorkArea);
+      repairs++;
+    }
+    if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) {
+      kioskLog('health: forkknife window gone — recreating');
+      createForkKnifeWindow(_lastWorkArea);
+      pushForkKnifeNavState();
+      repairs++;
+    }
+    if (!addressBarWindow || addressBarWindow.isDestroyed()) {
+      kioskLog('health: addressbar window gone — recreating');
+      createAddressBarWindow(_lastWorkArea);
+      repairs++;
+    }
+    if (!carbonWindow || carbonWindow.isDestroyed()) {
+      kioskLog('health: carbon window gone — recreating');
+      createCarbonWindow(_lastWorkArea);
+      updateCarbonFollow(getActiveKey());
+      repairs++;
+    }
+
+    // Re-assert alwaysOnTop on all overlays and panel windows.
+    for (const w of [clockWindow, forkKnifeWindow, addressBarWindow, carbonWindow]) {
+      if (w && !w.isDestroyed()) {
+        try { w.setAlwaysOnTop(true); } catch (_) {}
+      }
+    }
+    for (const [, win] of panelWindows) {
+      if (win && !win.isDestroyed()) {
+        try { win.setAlwaysOnTop(true); } catch (_) {}
+      }
+    }
+
+    restackOverlays();
+
+    if (repairs > 0) {
+      kioskLog(`health: repaired ${repairs} overlay window(s)`);
+    }
+  }, 30_000);
+}
+
+// Every 30 min: clear the browser cache to prevent unbounded memory growth.
+function startCacheClearTimer() {
+  setInterval(() => {
+    session.defaultSession.clearCache()
+      .then(() => { kioskLog('cache cleared'); })
+      .catch(e => { kioskLog(`cache clear failed: ${e.message}`); });
+  }, 30 * 60 * 1000);
+}
+
+// Replace the BrowserView for one auto-mode panel to release renderer memory.
+// Never touches active panels or all five at once.
+function recyclePanelView(key) {
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return;
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
+
+  stopBrowsingLoop(key);
+
+  const oldView = panelViews[key];
+  if (oldView) {
+    try { win.removeBrowserView(oldView); } catch (_) {}
+    // Remove the stale webContents-to-key mapping.
+    if (!oldView.webContents.isDestroyed()) {
+      webContentsIdToKey.delete(oldView.webContents.id);
+    }
+  }
+
+  const M     = HARDWARE_MARGIN;
+  const [winW, winH] = win.getContentSize();
+  const panelW = winW - 2 * M;
+  const panelH = winH - HANDLE_HEIGHT - 2 * M;
+
+  const view = makePanelView();
+  win.addBrowserView(view);
+  view.setBounds({ x: M, y: HANDLE_HEIGHT + M, width: panelW, height: panelH });
+  view.setAutoResize({ width: true, height: true });
+
+  panelViews[key] = view;
+  webContentsIdToKey.set(view.webContents.id, key);
+  setupViewEventHandlers(key, win, view);
+
+  // Ensure grip stays on top of the new panel view.
+  const grip = gripViews[key];
+  if (grip) {
+    try { win.removeBrowserView(grip); win.addBrowserView(grip); } catch (_) {}
+  }
+
+  startBrowsingLoop(key);
+  kioskLog(`recycled panel view for ${key}`);
+}
+
+// Every 30 min: recycle auto-mode panel views one at a time (staggered by 1 min).
+function startViewRecycleTimer() {
+  const RECYCLE_INTERVAL_MS = 30 * 60 * 1000;
+  const RECYCLE_STAGGER_MS  =       60 * 1000;
+  const recycleOrder = ['hub', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
+  setInterval(() => {
+    let delay = 0;
+    for (const key of recycleOrder) {
+      const ps = panelStates.get(key);
+      if (ps && ps.mode === 'auto') {
+        setTimeout(() => recyclePanelView(key), delay);
+        delay += RECYCLE_STAGGER_MS;
+      }
+    }
+  }, RECYCLE_INTERVAL_MS);
+}
+
+// Nightly restart: exit cleanly at a configured hour so the supervisor
+// relaunches with a fresh renderer stack.  Only fires when all panels are
+// in auto mode (no customer is using a panel).
+// Enabled by env KIOSK_NIGHTLY_RESTART_HOUR (0-23); disabled when unset.
+function startNightlyRestartTimer() {
+  const rawHour = process.env.KIOSK_NIGHTLY_RESTART_HOUR;
+  if (rawHour === undefined || rawHour === '') return;
+  const hour = parseInt(rawHour, 10);
+  if (!Number.isFinite(hour) || hour < 0 || hour > 23) return;
+
+  let lastFiredDay = -1; // prevent firing twice in the same hour
+  setInterval(() => {
+    const now = new Date();
+    if (now.getHours() !== hour) return;
+    if (now.getDate() === lastFiredDay) return;
+    const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
+    if (!allAuto) return;
+    lastFiredDay = now.getDate();
+    kioskLog(`nightly restart at hour ${hour} — exiting cleanly for supervisor restart`);
+    // No quit flag: this is an intentional restart, not a shutdown.
+    app.quit();
+  }, 60_000);
 }
 
 // ---- Exports ----------------------------------------------------------------

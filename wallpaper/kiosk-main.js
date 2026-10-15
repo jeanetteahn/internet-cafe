@@ -15,7 +15,15 @@
 // dev/testing works too: `electron kiosk-main.js`.
 const { app, globalShortcut } = require('electron');
 const { createKioskWindow } = require('./kiosk-browsers');
-const { registerSelf, killOthers } = require('./process-pair');
+const { registerSelf, killOthers, requestQuit, clearQuitFlag } = require('./process-pair');
+const { kioskLog, LOG_FILE } = require('./kiosk-log');
+
+// KIOSK_DISABLE_GPU=1 — call before app.whenReady() so it takes effect.
+// Use this if logs show repeated GPU child-process-gone events.
+// enable-transparent-visuals is still set below so transparent windows work.
+if (process.env.KIOSK_DISABLE_GPU === '1') {
+  app.disableHardwareAcceleration();
+}
 
 // X11/Cinnamon: transparent: true BrowserWindows need an ARGB visual from
 // the X server.  Cinnamon's Mutter compositor provides one, but Chromium
@@ -31,10 +39,24 @@ if (process.platform === 'linux') {
 // terminal rather than being swallowed as unhandled promise rejections.
 process.on('uncaughtException', (err) => {
   console.error('[kiosk] Uncaught exception:', err);
+  kioskLog(`uncaughtException: ${err && err.stack ? err.stack : err}`);
 });
 process.on('unhandledRejection', (reason) => {
   console.error('[kiosk] Unhandled rejection:', reason);
+  kioskLog(`unhandledRejection: ${reason && reason.stack ? reason.stack : reason}`);
 });
+
+// SIGTERM: sent by killOthers() when the wallpaper process handles Ctrl+Alt+Q.
+// Write the quit flag so the supervisor loop does not restart us.
+// Only registered on Linux where the supervisor loop runs.
+if (process.platform === 'linux') {
+  process.on('SIGTERM', () => {
+    kioskLog('received SIGTERM — writing quit flag and exiting');
+    requestQuit();
+    try { cleanupPidFile(); } catch (_) {}
+    process.exit(0);
+  });
+}
 
 const PROCESS_NAME = 'kiosk';
 const cleanupPidFile = registerSelf(PROCESS_NAME);
@@ -50,10 +72,46 @@ const cleanupPidFile = registerSelf(PROCESS_NAME);
 let kioskWindows = null;
 
 app.whenReady().then(() => {
+  // Clear any stale quit flag from a previous session so future nightly
+  // restarts or crash restarts are not blocked.
+  clearQuitFlag();
+
+  console.log(`[kiosk] log file: ${LOG_FILE}`);
+  kioskLog(`startup pid=${process.pid} platform=${process.platform}`);
+
+  // GPU crash logging — fired when the GPU process dies (type:'GPU').
+  // If you see this repeatedly, set KIOSK_DISABLE_GPU=1 in the launch script.
+  app.on('child-process-gone', (_e, details) => {
+    const msg = `child-process-gone type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`;
+    console.error(`[kiosk] ${msg}`);
+    kioskLog(msg);
+  });
+
+  // Memory metrics every 5 minutes so we can spot leaks before a disappearance.
+  setInterval(() => {
+    try {
+      const mem     = process.memoryUsage();
+      const metrics = app.getAppMetrics();
+      let totalWS = 0;
+      for (const m of metrics) {
+        totalWS += (m.memory && m.memory.workingSetSize) ? m.memory.workingSetSize : 0;
+      }
+      kioskLog(
+        `memory heap=${Math.round(mem.heapUsed / 1024 / 1024)}MB` +
+        ` rss=${Math.round(mem.rss / 1024 / 1024)}MB` +
+        ` all-processes-ws=${Math.round(totalWS / 1024)}MB` +
+        ` processes=${metrics.length}`
+      );
+    } catch (e) {
+      kioskLog(`memory log failed: ${e.message}`);
+    }
+  }, 5 * 60 * 1000);
+
   try {
     kioskWindows = createKioskWindow();
   } catch (err) {
     console.error('[kiosk] Failed to create kiosk panels:', err);
+    kioskLog(`createKioskWindow failed: ${err && err.stack ? err.stack : err}`);
   }
 
   // Safety valve, mirrored from main.js: Ctrl+Alt+Q always quits
@@ -62,6 +120,8 @@ app.whenReady().then(() => {
   // the loser's handler below never fires, but that's fine, since
   // whichever one DOES fire kills the sibling process too.
   const registered = globalShortcut.register('Control+Alt+Q', () => {
+    kioskLog('Ctrl+Alt+Q — writing quit flag and exiting');
+    requestQuit();  // tell supervisor loop: intentional shutdown, do not restart
     killOthers(PROCESS_NAME);
     app.quit();
   });
@@ -73,6 +133,7 @@ app.whenReady().then(() => {
   }
 }).catch((err) => {
   console.error('[kiosk] app.whenReady() rejected:', err);
+  kioskLog(`app.whenReady rejected: ${err && err.stack ? err.stack : err}`);
 });
 
 app.on('will-quit', () => {

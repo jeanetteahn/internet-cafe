@@ -18,7 +18,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const PID_DIR = path.join(os.tmpdir(), 'internet-cafe-wallpaper');
+const PID_DIR   = path.join(os.tmpdir(), 'internet-cafe-wallpaper');
+const QUIT_FLAG = path.join(PID_DIR, 'quit-requested');
 fs.mkdirSync(PID_DIR, { recursive: true });
 
 // Called once at startup. Returns a cleanup function to call on quit.
@@ -55,4 +56,23 @@ function killOthers(exceptName) {
     });
 }
 
-module.exports = { registerSelf, killOthers };
+// Write the quit-requested flag so the supervisor loop in xwinwrap-launch.sh /
+// native-launch.sh knows not to restart the kiosk after it exits.
+// Called from the Ctrl+Alt+Q handler and the SIGTERM handler (both mean
+// "intentional shutdown, not a crash").
+function requestQuit() {
+  try { fs.writeFileSync(QUIT_FLAG, String(process.pid)); } catch (_) {}
+}
+
+// Remove the quit flag.  Called at the start of a fresh kiosk launch so any
+// stale flag from a previous Ctrl+Alt+Q session doesn't block future restarts.
+function clearQuitFlag() {
+  try { fs.unlinkSync(QUIT_FLAG); } catch (_) {}
+}
+
+// Read the quit flag (pure-Node — safe to call from scripts/launch-both.js).
+function isQuitRequested() {
+  try { return fs.existsSync(QUIT_FLAG); } catch (_) { return false; }
+}
+
+module.exports = { registerSelf, killOthers, requestQuit, clearQuitFlag, isQuitRequested, PID_DIR, QUIT_FLAG };

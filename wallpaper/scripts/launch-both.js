@@ -13,32 +13,54 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const electronPath = require('electron');
+const { isQuitRequested } = require('../process-pair');
 
 const projectDir = path.join(__dirname, '..');
 
-const children = [];
+let wallpaperChild = null;
+let kioskChild     = null;
+let quitting       = false;
 
 function launch(entry) {
   const child = spawn(electronPath, [entry], {
     cwd: projectDir,
     stdio: 'inherit',
   });
-  children.push(child);
   return child;
 }
 
-launch(projectDir); // main.js (wallpaper) — package.json "main" resolves it
-if (process.env.ENABLE_KIOSK !== '0') {
-  launch(path.join(projectDir, 'kiosk-main.js'));
-}
-
 function shutdown() {
-  children.forEach((child) => {
-    if (!child.killed) child.kill();
-  });
+  if (quitting) return;
+  quitting = true;
+  if (wallpaperChild && !wallpaperChild.killed) wallpaperChild.kill();
+  if (kioskChild     && !kioskChild.killed)     kioskChild.kill();
   process.exit();
 }
 
-process.on('SIGINT', shutdown);
+function startKiosk() {
+  kioskChild = launch(path.join(projectDir, 'kiosk-main.js'));
+  kioskChild.on('exit', (code) => {
+    if (quitting) return;
+    // If Ctrl+Alt+Q wrote the quit flag, honour it and shut everything down.
+    if (isQuitRequested()) {
+      shutdown();
+      return;
+    }
+    // Otherwise restart the kiosk after a short delay (mirrors the Linux
+    // supervisor loop in linux/xwinwrap-launch.sh).
+    console.log(`[launch-both] kiosk exited (code=${code}) — restarting in 3 s`);
+    setTimeout(() => {
+      if (!quitting) startKiosk();
+    }, 3000);
+  });
+}
+
+wallpaperChild = launch(projectDir); // main.js (wallpaper) — package.json "main" resolves it
+wallpaperChild.on('exit', shutdown);  // if the wallpaper dies, everything goes down
+
+if (process.env.ENABLE_KIOSK !== '0') {
+  startKiosk();
+}
+
+process.on('SIGINT',  shutdown);
 process.on('SIGTERM', shutdown);
-children.forEach((child) => child.on('exit', shutdown));

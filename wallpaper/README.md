@@ -504,3 +504,109 @@ Other things worth knowing:
 every screen gets its own video + weather overlay. The kiosk cluster
 (`kiosk-main.js`) appears on the primary display by default; set
 `KIOSK_DISPLAY=N` (0-based index) to place it on a different monitor instead.
+
+## Self-healing / long-running stability
+
+The kiosk is designed to keep running indefinitely without manual intervention.
+Several layers of protection work together.
+
+### Supervisor loop (Linux only)
+
+`linux/xwinwrap-launch.sh` and `linux/native-launch.sh` both run a
+**restart loop** around `kiosk-main.js`. When the kiosk exits for any reason
+(crash, OOM, GPU death, nightly restart), the loop relaunches it after 3 s.
+After more than 5 exits within 2 minutes the loop backs off to 60 s to avoid
+hammering a broken GPU driver in a tight loop.
+
+**Ctrl+Alt+Q** still stops everything for good: whichever Electron process
+handles the shortcut writes a `quit-requested` flag to
+`/tmp/internet-cafe-wallpaper/quit-requested`, and the loop exits when it sees
+it. `relaunch.sh` also writes the flag before killing processes (to prevent the
+old loop from racing), then clears it as part of the fresh launch so future
+restarts work normally.
+
+The loop writes its own PID to `/tmp/internet-cafe-wallpaper/launcher-kiosk.pid`
+so `relaunch.sh` can send it a clean SIGTERM — no sleep-loop kill-and-hope.
+
+The supervisor loop also logs each restart and exit code to
+`/tmp/internet-cafe-wallpaper/supervisor.log`.
+
+**`npm start` (dev, macOS or Linux)**: `scripts/launch-both.js` mirrors the
+same behaviour — it restarts the kiosk child on exit instead of shutting
+everything down.
+
+### Diagnostics (rotating log file)
+
+`kiosk-log.js` writes timestamped entries to
+`<userData>/logs/kiosk.log` (rotates at ~5 MB to `kiosk.log.1`). The full path
+is printed to the terminal at startup. Logged events include:
+
+- `child-process-gone` (GPU crashes, renderer kills)
+- `render-process-gone` and `unresponsive` on every window and BrowserView
+- `uncaughtException` and `unhandledRejection`
+- Memory snapshot every 5 minutes (`heapUsed`, RSS, total working-set across
+  all Chromium sub-processes) — useful for spotting a leak before a disappearance
+- Health-check repairs and panel-view recycles
+
+On a typical Mint/Cinnamon install with the default Electron app name, the log
+is at `~/.config/Electron/logs/kiosk.log`.  The exact path is always printed
+at startup.
+
+### Crash recovery (in-process)
+
+Each overlay window (clock, carbon, forkknife, address bar) and each panel
+handle BrowserWindow now has a `render-process-gone` handler that reloads the
+HTML file and re-sends the window's initial IPC state (SVG, timezone, URL,
+nav state) within 500 ms. The window stays at its current on-screen position;
+no visible flash for the user.
+
+A **health-check** runs every 30 s to catch any window that disappeared without
+firing `render-process-gone` (e.g. closed by the compositor). Missing overlay
+windows are recreated, `alwaysOnTop` is re-asserted on all windows, and
+`restackOverlays()` is called to restore z-order.
+
+### Memory management
+
+- **Cache flush every 30 min**: `session.defaultSession.clearCache()` clears
+  Chromium's HTTP cache, which is the main source of unbounded memory growth
+  over many hours.
+- **Panel BrowserView recycle every 30 min**: auto-mode panels (never ones a
+  customer is using) get a fresh `BrowserView` one at a time (staggered by
+  1 min) to release accumulated renderer-heap. The browsing loop restarts
+  immediately on the new view.
+- **Nightly restart** (opt-in): set `KIOSK_NIGHTLY_RESTART_HOUR=4` (or any
+  0-23 hour) in the launch script. When all panels are in auto mode at that
+  hour, `kiosk-main.js` exits cleanly and the supervisor loop restarts it with
+  a fully fresh renderer stack. No quit flag is written, so the loop always
+  restarts after a nightly exit.
+
+### GPU resilience
+
+All `child-process-gone` events are logged. If logs show repeated GPU crashes,
+set `KIOSK_DISABLE_GPU=1` in your launch script before the `ELECTRON_BIN` line:
+
+```bash
+export KIOSK_DISABLE_GPU=1
+"$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" &
+```
+
+This calls `app.disableHardwareAcceleration()` before app ready.
+`enable-transparent-visuals` is still set so transparent windows continue to
+work on Cinnamon.
+
+### Environment variables summary
+
+| Variable | Default | Effect |
+|---|---|---|
+| `KIOSK_NIGHTLY_RESTART_HOUR` | (unset = disabled) | Hour (0-23) for nightly clean restart |
+| `KIOSK_DISABLE_GPU` | (unset) | Set to `1` to disable hardware acceleration |
+| `ENABLE_KIOSK` | `1` | Set to `0` to skip the kiosk cluster (wallpaper only) |
+| `KIOSK_DISPLAY` | (primary) | 0-based index of display for kiosk cluster |
+
+### Log locations on Linux
+
+| File | Contents |
+|---|---|
+| `~/.config/Electron/logs/kiosk.log` | Electron kiosk process log (exact path printed at startup) |
+| `/tmp/internet-cafe-wallpaper/supervisor.log` | Bash supervisor restart log |
+| `/tmp/internet-cafe-wallpaper/quit-requested` | Exists only during an intentional shutdown |
