@@ -9,72 +9,9 @@ const cacheDir = path.join(app.getPath('userData'), 'ddg-cache');
 try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) {}
 
 // ---- Clock / cursor size -----------------------------------------------------
-// Declared here (before the spoon cursor block) so SPOON_CURSOR_W can reference
-// it.  Used again in the constants section below for clock/carbon window sizes.
+// Used for clock/carbon window sizes, FK_GRAPHIC_W, and spoon cursor scaling.
 const CLOCK_SIZE = 110; // window width and height (px)
 
-// ---- Spoon cursor -----------------------------------------------------------
-// Pre-computed once at module init so every renderer can get the same rule.
-// Size is driven by CLOCK_SIZE so the cursor and clock circle share one value.
-const _spoonSvgRaw  = fs.readFileSync(path.join(__dirname, 'assets/utensils/spoon-cursor.svg'), 'utf8');
-const _spoonVbMatch = _spoonSvgRaw.match(/viewBox="([\d.\s]+)"/);
-const _spoonVbParts = _spoonVbMatch ? _spoonVbMatch[1].trim().split(/\s+/) : ['0', '0', '37.78', '37.77'];
-const _spoonVbW     = parseFloat(_spoonVbParts[2]); // viewBox width  in SVG units
-const _spoonVbH     = parseFloat(_spoonVbParts[3]); // viewBox height in SVG units
-const SPOON_CURSOR_W = CLOCK_SIZE;
-const SPOON_CURSOR_H = Math.round(SPOON_CURSOR_W * _spoonVbH / _spoonVbW);
-// Shadow padding: most on right/bottom since the shadow falls down (dy=4, dx=0).
-// stdDeviation=5 (CSS blur equivalent 10 px) is tightened from the clock/carbon
-// value of 18 px (stdDeviation 9) because the 128-px cursor limit leaves only 18 px
-// of total padding room.  Final cursor size: 126×128 px.
-const SPOON_SHADOW_PAD_LEFT   =  6;
-const SPOON_SHADOW_PAD_TOP    =  4;
-const SPOON_SHADOW_PAD_RIGHT  = 10;
-const SPOON_SHADOW_PAD_BOTTOM = 14;
-const SPOON_OUTER_W = SPOON_CURSOR_W + SPOON_SHADOW_PAD_LEFT + SPOON_SHADOW_PAD_RIGHT; // 126
-const SPOON_OUTER_H = SPOON_CURSOR_H + SPOON_SHADOW_PAD_TOP  + SPOON_SHADOW_PAD_BOTTOM; // 128
-if (SPOON_OUTER_W > 128 || SPOON_OUTER_H > 128) {
-  console.warn(`[kiosk-cursor] spoon cursor ${SPOON_OUTER_W}×${SPOON_OUTER_H} exceeds 128 px — Chromium will ignore the custom cursor`);
-}
-// Hotspot: bowl tip at viewBox (3.47, 0) scaled to render size, then shifted by
-// left/top padding.  At 110 px art + 6 px left pad + 4 px top pad → (16, 4).
-// Must stay in sync with index.html (separate process — see sync comment there).
-const _spoonHotX = Math.round(3.47 * SPOON_CURSOR_W / _spoonVbW) + SPOON_SHADOW_PAD_LEFT;
-const _spoonHotY = SPOON_SHADOW_PAD_TOP;
-// Build the outer SVG: strip the raw file to just its path content, then wrap it
-// in a padded <svg> that contains the spoon art in a nested <svg> at (PAD_LEFT,
-// PAD_TOP) with a feDropShadow filter applied to it.  Shadow values mirror the
-// --shadow-* CSS variables in kiosk-clock.html / kiosk-carbon.html (dx=0, dy=4)
-// with stdDeviation=5 instead of 9 to stay inside the cursor size limit.
-const _spoonStripped = _spoonSvgRaw
-  .replace(/<\?xml[^?]*\?>\n?/, '')
-  .replace(/<defs>[\s\S]*?<\/defs>\n?/, '')
-  .replace(/\s+id="[^"]+"/g, '')
-  .replace(/\s+data-name="[^"]+"/g, '')
-  .replace(/class="cls-1"/g, 'fill="#ea4b00"')
-  .replace(/\n\s*\n/g, '\n')
-  .trim();
-const _spoonBodyMatch = _spoonStripped.match(/^<svg[^>]*>([\s\S]*)<\/svg>$/);
-const _spoonBody = _spoonBodyMatch ? _spoonBodyMatch[1].trim() : _spoonStripped;
-const _spoonSvg = [
-  `<svg width="${SPOON_OUTER_W}" height="${SPOON_OUTER_H}" xmlns="http://www.w3.org/2000/svg">`,
-  `<defs><filter id="s" x="-6%" y="-4%" width="116%" height="118%" color-interpolation-filters="sRGB">`,
-  `<feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#000" flood-opacity="0.42"/>`,
-  `</filter></defs>`,
-  `<svg x="${SPOON_SHADOW_PAD_LEFT}" y="${SPOON_SHADOW_PAD_TOP}" width="${SPOON_CURSOR_W}" height="${SPOON_CURSOR_H}" viewBox="0 0 ${_spoonVbW} ${_spoonVbH}" filter="url(#s)">`,
-  _spoonBody,
-  `</svg>`,
-  `</svg>`,
-].join('');
-const SPOON_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSvg).toString('base64');
-const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') ${_spoonHotX} ${_spoonHotY},auto!important}input,textarea{cursor:text!important}`;
-const PANEL_CURSOR_CSS     = _spoonRule;
-const HANDLE_CURSOR_CSS    = _spoonRule + '#strip{cursor:grab!important}';
-const GRIP_CURSOR_CSS      = _spoonRule + '.grip{cursor:nwse-resize!important}';
-const FORKKNIFE_CURSOR_CSS  = _spoonRule;
-const ADDRESSBAR_CURSOR_CSS = _spoonRule +
-  '#drag-pad{cursor:grab!important}' +
-  '#bar.dragging,#bar.dragging *{cursor:grabbing!important}';
 
 // ---- Clock SVG ---------------------------------------------------------------
 // Read once at startup; sent to the clock renderer over IPC on did-finish-load.
@@ -209,9 +146,125 @@ const FORKKNIFE_POSITION = { x: 24, y: 24 };
 const FORKKNIFE_WIN_W    = FK_GRAPHIC_W + 2 * FK_SHADOW_PAD; // ~158 px
 const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_SHADOW_PAD; // ~87 px
 
+// ---- Spoon cursor -----------------------------------------------------------
+// Pre-computed once at module init so every renderer can get the same rule.
+// Sized so the spoon's diagonal (its viewBox extent rotated 45°) equals the
+// fork element's rendered pixel length — visual parity with the nav buttons.
+// To regenerate the index.html base64, run:  node scripts/build-spoon-cursor.js
+
+// Walk SVG path d-attribute tokens and return { min, max, extent } for x.
+function _pathXBounds(ds) {
+  let minX = Infinity, maxX = -Infinity;
+  const hit = x => { if (x < minX) minX = x; if (x > maxX) maxX = x; };
+  for (const d of ds) {
+    const toks = [...d.matchAll(/([MmLlHhVvCcSsQqTtAaZz])|([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/g)].map(m => m[0]);
+    let i = 0, cx = 0, cmd = '';
+    const n = () => { const v = parseFloat(toks[i] || '0'); i++; return isNaN(v) ? 0 : v; };
+    while (i < toks.length) {
+      if (/[MmLlHhVvCcSsQqTtAaZz]/.test(toks[i])) { cmd = toks[i++]; continue; }
+      switch (cmd) {
+        case 'M': cx=n();n();hit(cx);cmd='L';break; case 'm':cx+=n();n();hit(cx);cmd='l';break;
+        case 'L': cx=n();n();hit(cx);break;         case 'l':cx+=n();n();hit(cx);break;
+        case 'H': cx=n();hit(cx);break;              case 'h':cx+=n();hit(cx);break;
+        case 'V': n();break;                          case 'v':n();break;
+        case 'C': n();n();n();n();cx=n();n();hit(cx);break; case 'c':n();n();n();n();cx+=n();n();hit(cx);break;
+        case 'S': n();n();cx=n();n();hit(cx);break;  case 's':n();n();cx+=n();n();hit(cx);break;
+        case 'Q': n();n();cx=n();n();hit(cx);break;  case 'q':n();n();cx+=n();n();hit(cx);break;
+        case 'T': cx=n();n();hit(cx);break;           case 't':cx+=n();n();hit(cx);break;
+        case 'A': n();n();n();n();n();cx=n();n();hit(cx);break; case 'a':n();n();n();n();n();cx+=n();n();hit(cx);break;
+        case 'Z': case 'z': break;
+        default: i++; break;
+      }
+    }
+  }
+  return { min: minX===Infinity?0:minX, max: maxX===-Infinity?0:maxX,
+           extent: (maxX===-Infinity?0:maxX) - (minX===Infinity?0:minX) };
+}
+
+const _fkAllDs         = [..._fkSvgRaw.matchAll(/\sd="([^"]+)"/g)].map(m => m[1]);
+const _forkExtentUnits = _pathXBounds(_fkAllDs.slice(0, 2)).extent; // first 2 paths = fork group
+const _forkRenderedPx  = _forkExtentUnits * FK_GRAPHIC_W / _fkVbW; // ≈105 px
+
+const _spoonSvgRaw  = fs.readFileSync(path.join(__dirname, 'assets/utensils/spoon-cursor.svg'), 'utf8');
+const _spoonVbMatch = _spoonSvgRaw.match(/viewBox="([\d.\s]+)"/);
+const _spoonVbParts = _spoonVbMatch ? _spoonVbMatch[1].trim().split(/\s+/) : ['0', '0', '37.78', '37.77'];
+const _spoonVbW     = parseFloat(_spoonVbParts[2]);
+const _spoonVbH     = parseFloat(_spoonVbParts[3]);
+
+// Uniform scale: map spoon viewBox diagonal → fork rendered length.
+const _spoonDiagUnits  = Math.sqrt(_spoonVbW * _spoonVbW + _spoonVbH * _spoonVbH);
+const _spoonScale      = _forkRenderedPx / _spoonDiagUnits;
+const SPOON_CURSOR_W   = Math.round(_spoonVbW * _spoonScale); // ≈74 px
+const SPOON_CURSOR_H   = Math.round(_spoonVbH * _spoonScale); // ≈74 px
+
+// Shadow matches fork/knife nav buttons: stdDeviation=9, dy=4, opacity=0.42.
+// At 3σ=27 px the outer cursor lands exactly on the 128-px Chromium limit.
+const _SHADOW_SD  = 9, _SHADOW_DX = 0, _SHADOW_DY = 4;
+const _SIGMA3     = Math.ceil(3 * _SHADOW_SD);                       // 27
+const SPOON_SHADOW_PAD_LEFT   = _SIGMA3;                              // 27
+const SPOON_SHADOW_PAD_TOP    = Math.max(0, _SIGMA3 - _SHADOW_DY);   // 23
+const SPOON_SHADOW_PAD_RIGHT  = _SIGMA3;                              // 27
+const SPOON_SHADOW_PAD_BOTTOM = _SIGMA3 + _SHADOW_DY;                // 31
+const SPOON_OUTER_W = SPOON_CURSOR_W + SPOON_SHADOW_PAD_LEFT + SPOON_SHADOW_PAD_RIGHT;
+const SPOON_OUTER_H = SPOON_CURSOR_H + SPOON_SHADOW_PAD_TOP  + SPOON_SHADOW_PAD_BOTTOM;
+
+if (SPOON_OUTER_W > 128 || SPOON_OUTER_H > 128) {
+  console.warn(`[kiosk-cursor] spoon cursor ${SPOON_OUTER_W}×${SPOON_OUTER_H} exceeds 128 px — Chromium will ignore the custom cursor`);
+}
+
+// Hotspot: bowl tip at viewBox (3.47, 0.50), scaled and offset by padding.
+// Must stay in sync with index.html (separate process — see sync comment there).
+const _spoonHotX = Math.round(3.47 * _spoonScale) + SPOON_SHADOW_PAD_LEFT;
+const _spoonHotY = Math.round(0.50 * _spoonScale) + SPOON_SHADOW_PAD_TOP;
+
+console.log(
+  `[kiosk-cursor] fork=${Math.round(_forkRenderedPx)}px ` +
+  `spoon-diag=${Math.round(_spoonDiagUnits * _spoonScale)}px ` +
+  `art=${SPOON_CURSOR_W}×${SPOON_CURSOR_H} ` +
+  `outer=${SPOON_OUTER_W}×${SPOON_OUTER_H} ` +
+  `hotspot=(${_spoonHotX},${_spoonHotY})`
+);
+
+const _spoonStripped = _spoonSvgRaw
+  .replace(/<\?xml[^?]*\?>\n?/, '')
+  .replace(/<defs>[\s\S]*?<\/defs>\n?/, '')
+  .replace(/\s+id="[^"]+"/g, '')
+  .replace(/\s+data-name="[^"]+"/g, '')
+  .replace(/class="cls-1"/g, 'fill="#ea4b00"')
+  .replace(/\n\s*\n/g, '\n')
+  .trim();
+const _spoonBodyMatch = _spoonStripped.match(/^<svg[^>]*>([\s\S]*)<\/svg>$/);
+const _spoonBody      = _spoonBodyMatch ? _spoonBodyMatch[1].trim() : _spoonStripped;
+
+// Filter region percentages: must contain the full shadow bleed beyond the art box.
+const _fRegX = `${-Math.ceil(SPOON_SHADOW_PAD_LEFT / SPOON_CURSOR_W * 100)}%`;
+const _fRegY = `${-Math.ceil(SPOON_SHADOW_PAD_TOP  / SPOON_CURSOR_H * 100)}%`;
+const _fRegW = `${Math.ceil(SPOON_OUTER_W / SPOON_CURSOR_W * 100) + 1}%`;
+const _fRegH = `${Math.ceil(SPOON_OUTER_H / SPOON_CURSOR_H * 100) + 1}%`;
+
+const _spoonSvg = [
+  `<svg width="${SPOON_OUTER_W}" height="${SPOON_OUTER_H}" xmlns="http://www.w3.org/2000/svg">`,
+  `<defs><filter id="s" x="${_fRegX}" y="${_fRegY}" width="${_fRegW}" height="${_fRegH}" color-interpolation-filters="sRGB">`,
+  `<feDropShadow dx="${_SHADOW_DX}" dy="${_SHADOW_DY}" stdDeviation="${_SHADOW_SD}" flood-color="#000" flood-opacity="0.42"/>`,
+  `</filter></defs>`,
+  `<svg x="${SPOON_SHADOW_PAD_LEFT}" y="${SPOON_SHADOW_PAD_TOP}" width="${SPOON_CURSOR_W}" height="${SPOON_CURSOR_H}" viewBox="0 0 ${_spoonVbW} ${_spoonVbH}" filter="url(#s)">`,
+  _spoonBody,
+  `</svg>`,
+  `</svg>`,
+].join('');
+const SPOON_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSvg).toString('base64');
+const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') ${_spoonHotX} ${_spoonHotY},auto!important}input,textarea{cursor:text!important}`;
+const PANEL_CURSOR_CSS      = _spoonRule;
+const HANDLE_CURSOR_CSS     = _spoonRule + '#strip{cursor:grab!important}';
+const GRIP_CURSOR_CSS       = _spoonRule + '.grip{cursor:nwse-resize!important}';
+const FORKKNIFE_CURSOR_CSS  = _spoonRule;
+const ADDRESSBAR_CURSOR_CSS = _spoonRule +
+  '#drag-pad{cursor:grab!important}' +
+  '#bar.dragging,#bar.dragging *{cursor:grabbing!important}';
+
 // ---- Clock window ------------------------------------------------------------
 // SVG viewBox is 87.2×87.2; the window is square.
-// CLOCK_SIZE is declared at the top of the file (before the spoon cursor block).
+// CLOCK_SIZE is declared at the top of the file.
 // Offset from the work area's top-left corner.
 // Tuned for 1920×1080: centers the clock on the top-right panel's top edge.
 const CLOCK_POSITION = { x: 1332, y: 20 };

@@ -10,17 +10,33 @@ no raster content, no text elements, fill color `#ea4b00`.
 Custom mouse cursor for the kiosk process. Replaces the system arrow
 cursor so the pointer matches the utensil aesthetic of the panels.
 
-The final cursor is **126 × 128 px** — spoon art 110 × 110 px (`CLOCK_SIZE`)
-plus shadow padding 6 / 4 / 10 / 14 px (left / top / right / bottom).
-Hot spot: `16 4` (bowl tip at viewBox `(3.47, 0)` → 10 px at 110 px art,
-then shifted by left/top padding).  A `feDropShadow` filter (dx=0, dy=4,
-stdDeviation=5) is baked into the outer SVG wrapper at build time in
-`kiosk-browsers.js` (`SPOON_SHADOW_PAD_*` block).
+The final cursor is **128 × 128 px** — spoon art 74 × 74 px plus shadow
+padding 27 / 23 / 27 / 31 px (left / top / right / bottom).
+Hot spot: `34 24` (bowl tip at viewBox `(3.47, 0.50)`, scaled and shifted
+by padding).
 
+**Sizing logic:** the art size is derived at startup from `forkknife.svg`
+so the spoon matches the fork/knife nav buttons visually.
+1. Extract the x-extent of the fork paths (first two `<path>` elements in
+   `forkknife.svg`) using a path-token parser → ≈ 58.93 SVG units.
+2. Scale to pixels: `forkExtent × CLOCK_SIZE / forkViewBoxW` ≈ 105 px.
+3. Compute the spoon viewBox diagonal
+   `√(37.78² + 37.77²)` ≈ 53.42 units.
+4. Uniform scale: `spoonScale = forkRenderedPx / spoonDiag` ≈ 1.966×.
+5. Art size: `round(37.78 × scale)` = 74 px (square, since viewBox is square).
+
+**Shadow** matches the fork/knife overlay: `feDropShadow` dx=0, dy=4,
+stdDeviation=9, opacity=0.42.  At 3σ = 27 px the outer cursor lands
+exactly on the 128-px Chromium cursor-size limit.
+
+The cursor SVG is built in `kiosk-browsers.js` (the `_pathXBounds` /
+`SPOON_SHADOW_PAD_*` block that follows the forkknife constants).
 `wallpaper/index.html` (a separate Electron process) contains a hardcoded
-base64 copy with the same hotspot; regenerate it from the
-`SPOON_SHADOW_PAD_*` block in `kiosk-browsers.js` whenever `CLOCK_SIZE`
-or shadow values change.
+base64 copy; regenerate it by running:
+
+```
+node scripts/build-spoon-cursor.js
+```
 
 ### forkknife.svg
 Combined fork-and-knife graphic used as the standalone navigation
