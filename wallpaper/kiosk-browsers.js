@@ -185,6 +185,11 @@ const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD; // ~47 px
 // Tuned for 1920×1080: centers the clock on the top-right panel's top edge.
 const CLOCK_POSITION = { x: 1332, y: 20 };
 const CLOCK_TZ_REFETCH_MS = 60 * 60 * 1000; // re-check timezone once per hour
+// Transparent border so the CSS drop-shadow has room to render — same approach
+// as CARBON_SHADOW_PAD.  All positioning subtracts this pad so the clock face
+// stays in the same on-screen spot.
+const CLOCK_SHADOW_PAD = 24; // px on each side; tune alongside --shadow-* in kiosk-clock.html
+const CLOCK_WIN_SIZE   = CLOCK_SIZE + 2 * CLOCK_SHADOW_PAD; // actual BrowserWindow size
 
 // ---- Address bar window -------------------------------------------------------
 // Dimensions match the SVG viewBox (310.59 × 43.62 → 311 × 44 px).
@@ -1677,15 +1682,15 @@ function createClockWindow(workArea) {
   if (clockWindow && !clockWindow.isDestroyed()) {
     clockWindow.destroy();
   }
-  const homeX = workArea.x + CLOCK_POSITION.x;
-  const homeY = workArea.y + CLOCK_POSITION.y;
+  const homeX = workArea.x + CLOCK_POSITION.x - CLOCK_SHADOW_PAD;
+  const homeY = workArea.y + CLOCK_POSITION.y - CLOCK_SHADOW_PAD;
   clockHomePos = { x: homeX, y: homeY };
 
   clockWindow = new BrowserWindow({
     x:           homeX,
     y:           homeY,
-    width:       CLOCK_SIZE,
-    height:      CLOCK_SIZE,
+    width:       CLOCK_WIN_SIZE,
+    height:      CLOCK_WIN_SIZE,
     frame:       false,
     transparent: true,
     alwaysOnTop: true,
@@ -1706,7 +1711,7 @@ function createClockWindow(workArea) {
   });
   clockWindow.webContents.once('did-finish-load', () => {
     if (USE_WINDOW_SHAPE && process.platform === 'linux') {
-      clockWindow.setShape([{ x: 0, y: 0, width: CLOCK_SIZE, height: CLOCK_SIZE }]);
+      clockWindow.setShape([{ x: 0, y: 0, width: CLOCK_WIN_SIZE, height: CLOCK_WIN_SIZE }]);
     }
     clockWindow.webContents.send('clock-svg', _clockSvgText);
     if (clockTimezone) clockWindow.webContents.send('clock-timezone', clockTimezone);
@@ -2183,10 +2188,10 @@ function attachActivityHandling() {
     const MIN_VIS      = 20;
     let nx = cursor.x - clockDragOffset.dx;
     let ny = cursor.y - clockDragOffset.dy;
-    nx = Math.max(workArea.x - CLOCK_SIZE + MIN_VIS,
-                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS));
-    ny = Math.max(workArea.y,
-                  Math.min(ny, workArea.y + workArea.height - CLOCK_SIZE));
+    nx = Math.max(workArea.x - CLOCK_SIZE + MIN_VIS - CLOCK_SHADOW_PAD,
+                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS - CLOCK_SHADOW_PAD));
+    ny = Math.max(workArea.y - CLOCK_SHADOW_PAD,
+                  Math.min(ny, workArea.y + workArea.height - CLOCK_SIZE - CLOCK_SHADOW_PAD));
     clockWindow.setPosition(Math.round(nx), Math.round(ny));
   });
 

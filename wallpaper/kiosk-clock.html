@@ -5,6 +5,18 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
   <style>
+    /* ---- Shadow tuning knobs ----
+       Values must match kiosk-carbon.html --shadow-* variables; both files are
+       intentionally duplicated because the CSP/preload setup has no shared CSS
+       source.  Change both files together. */
+    :root {
+      --shadow-pad:   24px; /* must match CLOCK_SHADOW_PAD in kiosk-browsers.js */
+      --shadow-dx:    0px;
+      --shadow-dy:    4px;
+      --shadow-blur:  18px;
+      --shadow-color: rgba(0, 0, 0, 0.42);
+    }
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
       width: 100%; height: 100%;
@@ -117,11 +129,17 @@
         wrap.innerHTML = svgText;
         var svg = wrap.querySelector('svg');
         if (!svg) return;
-        // Size the SVG to fill the window via style; don't touch the file's attributes.
-        svg.style.width         = '100%';
-        svg.style.height        = '100%';
+        // Inset the SVG by --shadow-pad so the drop-shadow has room to render.
+        // transformBox:view-box on the hands keeps their pivot at (43.6, 43.6) in
+        // the SVG's own coordinate system, unchanged by the window/element size.
+        svg.style.position = 'absolute';
+        svg.style.left     = 'var(--shadow-pad)';
+        svg.style.top      = 'var(--shadow-pad)';
+        svg.style.width    = 'calc(100% - 2 * var(--shadow-pad))';
+        svg.style.height   = 'calc(100% - 2 * var(--shadow-pad))';
         svg.style.pointerEvents = 'none';
-        svg.style.display       = 'block';
+        svg.style.display  = 'block';
+        svg.style.filter   = 'drop-shadow(var(--shadow-dx) var(--shadow-dy) var(--shadow-blur) var(--shadow-color))';
 
         // Select hands by DOM order: [0] = minute (straight up), [1] = hour (45° offset).
         var lines = svg.querySelectorAll('line');
@@ -148,6 +166,19 @@
       });
     }
 
+    // ---- Hit test: only the clock face is draggable, not the shadow padding ----
+    function hitInCircle(e) {
+      var w   = document.documentElement.clientWidth;
+      var h   = document.documentElement.clientHeight;
+      var pad = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--shadow-pad')) || 0;
+      var r   = (w - 2 * pad) / 2;
+      var cx  = w / 2;
+      var cy  = h / 2;
+      var dx  = e.clientX - cx;
+      var dy  = e.clientY - cy;
+      return dx * dx + dy * dy <= r * r;
+    }
+
     // ---- Drag (mirrors kiosk-forkknife.html exactly) ----
     var DRAG_THRESHOLD = 5;
     var isDragging  = false;
@@ -156,6 +187,7 @@
     var dragStartY  = 0;
 
     wrap.addEventListener('pointerdown', function (e) {
+      if (!hitInCircle(e)) return;
       e.preventDefault();
       wrap.setPointerCapture(e.pointerId);
       capturedId  = e.pointerId;
