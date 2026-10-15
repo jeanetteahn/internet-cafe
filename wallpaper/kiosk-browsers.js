@@ -199,11 +199,14 @@ const _fkVbW      = parseFloat(_fkVbParts[2]); // viewBox width  in SVG units
 const _fkVbH      = parseFloat(_fkVbParts[3]); // viewBox height in SVG units
 const FK_GRAPHIC_W = CLOCK_SIZE;                                   // 110 px
 const FK_GRAPHIC_H = Math.round(FK_GRAPHIC_W * _fkVbH / _fkVbW); // ~39 px
-const FK_PAD       = 4;  // padding: top, bottom, and right of graphic (px)
-// Default position (px) from the top-left corner of the kiosk display's work area.
+// Transparent border for CSS drop-shadow — same approach and value as CLOCK_SHADOW_PAD /
+// CARBON_SHADOW_PAD (declared below; literal here to avoid forward-reference).
+// All positioning subtracts this pad so the graphic stays in the same on-screen spot.
+const FK_SHADOW_PAD = 24; // px on each side; tune alongside --shadow-* in kiosk-forkknife.html
+// Default position (px from work-area top-left) of the graphic face (not the window origin).
 const FORKKNIFE_POSITION = { x: 24, y: 24 };
-const FORKKNIFE_WIN_W    = FK_GRAPHIC_W + FK_PAD;      // ~114 px
-const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_PAD; // ~47 px
+const FORKKNIFE_WIN_W    = FK_GRAPHIC_W + 2 * FK_SHADOW_PAD; // ~158 px
+const FORKKNIFE_WIN_H    = FK_GRAPHIC_H + 2 * FK_SHADOW_PAD; // ~87 px
 
 // ---- Clock window ------------------------------------------------------------
 // SVG viewBox is 87.2×87.2; the window is square.
@@ -1643,8 +1646,8 @@ function createForkKnifeWindow(workArea) {
   if (forkKnifeWindow && !forkKnifeWindow.isDestroyed()) {
     forkKnifeWindow.destroy();
   }
-  const homeX = workArea.x + FORKKNIFE_POSITION.x;
-  const homeY = workArea.y + FORKKNIFE_POSITION.y;
+  const homeX = workArea.x + FORKKNIFE_POSITION.x - FK_SHADOW_PAD;
+  const homeY = workArea.y + FORKKNIFE_POSITION.y - FK_SHADOW_PAD;
   forkKnifeHomePos = { x: homeX, y: homeY };
 
   forkKnifeWindow = new BrowserWindow({
@@ -2177,10 +2180,10 @@ function attachActivityHandling() {
     const MIN_VIS      = 20;
     let nx = cursor.x - forkKnifeDragOffset.dx;
     let ny = cursor.y - forkKnifeDragOffset.dy;
-    nx = Math.max(workArea.x - FORKKNIFE_WIN_W + MIN_VIS,
-                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS));
-    ny = Math.max(workArea.y,
-                  Math.min(ny, workArea.y + workArea.height - FORKKNIFE_WIN_H));
+    nx = Math.max(workArea.x - FK_GRAPHIC_W + MIN_VIS - FK_SHADOW_PAD,
+                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS - FK_SHADOW_PAD));
+    ny = Math.max(workArea.y - FK_SHADOW_PAD,
+                  Math.min(ny, workArea.y + workArea.height - FK_GRAPHIC_H - FK_SHADOW_PAD));
     forkKnifeWindow.setPosition(Math.round(nx), Math.round(ny));
   });
 
