@@ -10,6 +10,7 @@
 # is the fix, and keeping both launch paths consistent means there's only
 # one place, kiosk-main.js, that owns the kiosk window).
 set -uo pipefail
+trap '' HUP
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -87,11 +88,23 @@ rm -f "$QUIT_FLAG"
 # Disable X11 screen saver and DPMS so the display never goes dark.
 xset s off s noblank -dpms 2>/dev/null || true
 
+export KIOSK_NIGHTLY_RESTART_HOUR=${KIOSK_NIGHTLY_RESTART_HOUR:-4}
+
+_USER_DATA_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/internet-cafe"
+
 sup_log "starting (pid=$$, electron=$ELECTRON_BIN)"
+sup_log "log files:"
+sup_log "  supervisor:         $SUPERVISOR_LOG"
+sup_log "  kiosk-electron:     $KIOSK_ELECTRON_LOG"
+sup_log "  wallpaper-electron: $WALLPAPER_ELECTRON_LOG"
+sup_log "  kiosk-app:          $_USER_DATA_DIR/logs/kiosk.log"
+sup_log "  wallpaper-app:      $_USER_DATA_DIR/logs/wallpaper.log"
 
 # ---- Wallpaper supervisor loop -----------------------------------------------
 run_wallpaper_loop() {
-  trap 'exit 0' TERM INT
+  local WALL_PID=""
+  trap 'kill -TERM "${WALL_PID:-}" 2>/dev/null; exit 0' TERM INT
+  trap '' HUP
   local crash_count=0
   local crash_window_start
   crash_window_start=$(date +%s)
@@ -103,12 +116,13 @@ run_wallpaper_loop() {
     fi
 
     sup_log "wallpaper: launching (crash_count=$crash_count)"
-    ELECTRON_ENABLE_LOGGING=1 "$ELECTRON_BIN" "$PROJECT_DIR" \
+    ELECTRON_ENABLE_LOGGING=1 setsid "$ELECTRON_BIN" "$PROJECT_DIR" \
       > >(tee -a "$WALLPAPER_ELECTRON_LOG") 2>&1 &
-    local WALL_PID=$!
+    WALL_PID=$!
 
-    wait "$WALL_PID" 2>/dev/null || true
+    wait "$WALL_PID" 2>/dev/null
     local EXIT_CODE=$?
+    WALL_PID=""
 
     if [ -f "$QUIT_FLAG" ]; then
       sup_log "wallpaper: exited ($(decode_exit $EXIT_CODE)) and quit requested — stopping"
@@ -141,7 +155,9 @@ run_wallpaper_loop() {
 
 # ---- Kiosk supervisor loop ---------------------------------------------------
 run_kiosk_loop() {
-  trap 'exit 0' TERM INT
+  local KIOSK_PID=""
+  trap 'kill -TERM "${KIOSK_PID:-}" 2>/dev/null; exit 0' TERM INT
+  trap '' HUP
   local crash_count=0
   local crash_window_start
   crash_window_start=$(date +%s)
@@ -153,12 +169,13 @@ run_kiosk_loop() {
     fi
 
     sup_log "kiosk: launching (crash_count=$crash_count)"
-    ELECTRON_ENABLE_LOGGING=1 "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" \
+    ELECTRON_ENABLE_LOGGING=1 setsid "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" \
       > >(tee -a "$KIOSK_ELECTRON_LOG") 2>&1 &
-    local KIOSK_PID=$!
+    KIOSK_PID=$!
 
-    wait "$KIOSK_PID" 2>/dev/null || true
+    wait "$KIOSK_PID" 2>/dev/null
     local EXIT_CODE=$?
+    KIOSK_PID=""
 
     if [ -f "$QUIT_FLAG" ]; then
       sup_log "kiosk: exited ($(decode_exit $EXIT_CODE)) and quit requested — stopping"

@@ -927,6 +927,7 @@ function notePanelActivity(key, eventType) {
 
 function setupViewEventHandlers(key, win, view) {
   view.webContents.on('page-title-updated', (_e, title) => {
+    if (panelViews[key] !== view) return;
     if (!win.isDestroyed()) win.webContents.send('panel-title', title);
   });
 
@@ -935,11 +936,13 @@ function setupViewEventHandlers(key, win, view) {
     view.webContents.debugger.attach('1.3');
     view.webContents.debugger.sendCommand('Network.enable').catch(() => {});
     view.webContents.debugger.on('message', (_event, method, params) => {
+      if (panelViews[key] !== view) return;
       if (method !== 'Network.loadingFinished') return;
       const ps = panelStates.get(key);
       if (ps) ps.carbonBytes += Math.max(0, params.encodedDataLength || 0);
     });
     view.webContents.debugger.on('detach', (_event, reason) => {
+      if (panelViews[key] !== view) return;
       console.log(`[kiosk-carbon] ${key} debugger detached (${reason})`);
     });
   } catch (e) {
@@ -949,6 +952,7 @@ function setupViewEventHandlers(key, win, view) {
   // Reset carbon byte counter at the start of each main-frame navigation so the
   // score reflects only the current page's transferred data.
   view.webContents.on('did-start-navigation', (_e, url, isInPlace, isMainFrame) => {
+    if (panelViews[key] !== view) return;
     if (!isMainFrame || isInPlace) return;
     if (!url || url.startsWith('data:') || url === 'about:blank' || url.startsWith('file:')) return;
     const ps = panelStates.get(key);
@@ -959,6 +963,7 @@ function setupViewEventHandlers(key, win, view) {
   });
 
   view.webContents.on('did-finish-load', () => {
+    if (panelViews[key] !== view) return;
     const url = view.webContents.getURL();
 
     // Placeholder and blank pages are never real content.
@@ -1034,6 +1039,7 @@ function setupViewEventHandlers(key, win, view) {
   });
 
   view.webContents.on('did-fail-load', (_e, errorCode, _desc, failedUrl, isMainFrame) => {
+    if (panelViews[key] !== view) return;
     if (!isMainFrame) return; // subframe failures (ads, iframes) are not our problem
     // ERR_ABORTED (-3): navigation was cancelled by our own stop() / loadURL()
     // call or by a redirect chain.  The watchdog (if still armed) will handle
@@ -1069,6 +1075,7 @@ function setupViewEventHandlers(key, win, view) {
 
   // Update the handle's Back button after each top-level or in-page navigation.
   view.webContents.on('did-navigate', (_e, url, httpResponseCode, _statusText, isMainFrame) => {
+    if (panelViews[key] !== view) return;
     if (!url || url.startsWith('data:') || url === 'about:blank') return;
 
     if (isMainFrame) {
@@ -1095,6 +1102,7 @@ function setupViewEventHandlers(key, win, view) {
   });
 
   view.webContents.on('did-navigate-in-page', () => {
+    if (panelViews[key] !== view) return;
     pushForkKnifeNavState();
     if (key === 'hub') pushAddressBarUrl(view.webContents.getURL());
   });
@@ -1103,6 +1111,7 @@ function setupViewEventHandlers(key, win, view) {
   // JS redirects, link clicks).  webContents.loadURL() from the main process is
   // exempt: will-navigate does not fire for programmatic loads.
   view.webContents.on('will-navigate', (event, url) => {
+    if (panelViews[key] !== view) return; // stale view — allow navigation (view is being destroyed)
     const ps = panelStates.get(key);
     if (!ps) return;
 
@@ -1202,6 +1211,7 @@ function setupViewEventHandlers(key, win, view) {
   // the URL into the same panel view if it passes the browsing policy; in auto
   // mode ignore it entirely.
   view.webContents.setWindowOpenHandler(({ url }) => {
+    if (panelViews[key] !== view) return { action: 'deny' };
     const ps = panelStates.get(key);
     if (ps && ps.mode === 'active' && isPassesPolicy(url)) {
       console.log(`[kiosk-auto] ${key} new-tab link redirected to same panel: ${url}`);
@@ -1213,14 +1223,17 @@ function setupViewEventHandlers(key, win, view) {
   });
 
   view.webContents.on('dom-ready', () => {
+    if (panelViews[key] !== view) return;
     view.webContents.insertCSS(PANEL_CURSOR_CSS).catch(() => {});
   });
 
   view.webContents.on('render-process-gone', (_e, details) => {
+    if (panelViews[key] !== view) return;
     const msg = `panel ${key} view render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
     console.log(`[kiosk] ${msg}`);
     kioskLog(msg);
     setTimeout(() => {
+      if (panelViews[key] !== view) return;
       if (view.webContents.isDestroyed()) return;
       const ps = panelStates.get(key);
       if (!ps) return;
@@ -1233,6 +1246,7 @@ function setupViewEventHandlers(key, win, view) {
   });
 
   view.webContents.on('unresponsive', () => {
+    if (panelViews[key] !== view) return;
     kioskLog(`panel ${key} view webContents unresponsive`);
   });
 }
@@ -2234,7 +2248,7 @@ function createKioskWindow() {
       cancelTween(key);
       if (enlargedKey === key) enlargedKey = null;
       panelWindows.delete(key);
-      homeBounds.delete(key);
+      // homeBounds intentionally NOT deleted — health check needs it to rebuild.
       delete panelViews[key];
       delete gripViews[key];
       resizeState.delete(key);
@@ -2654,14 +2668,40 @@ function _windowOnDisplay(win) {
   );
 }
 
-// Every 30 s: verify each overlay window exists, is visible, and is on a
-// connected display.  Recreate or re-show anything that fails, then
-// re-assert alwaysOnTop and re-stack.
+// Every 30 s: verify each panel window and overlay window exists and is
+// visible.  Rebuild or re-show anything that fails, then re-assert
+// alwaysOnTop and re-stack.  Uses showInactive() so the health check never
+// steals focus from a customer.
 function startHealthCheck() {
   setInterval(() => {
     if (!_lastWorkArea) return;
     let repairs = 0;
 
+    // ---- Check the 5 panel windows -----------------------------------------
+    const panelOrder = ['hub', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
+    for (const key of panelOrder) {
+      const win = panelWindows.get(key);
+      if (!win || win.isDestroyed()) {
+        kioskLog(`health: panel ${key} window destroyed — rebuilding`);
+        rebuildPanelWindow(key);
+        repairs++;
+        continue;
+      }
+      if (win.isMinimized() || !win.isVisible()) {
+        kioskLog(`health: panel ${key} window hidden/minimized — showing`);
+        try { win.showInactive(); } catch (_) {}
+        repairs++;
+      }
+      // If the view's renderer crashed or was destroyed, recycle it.
+      const view = panelViews[key];
+      if (!view || view.webContents.isDestroyed()) {
+        kioskLog(`health: panel ${key} view destroyed — recycling`);
+        recyclePanelView(key);
+        repairs++;
+      }
+    }
+
+    // ---- Check overlay windows ----------------------------------------------
     function checkOverlay(name, getWin, recreate, restore) {
       const win = getWin();
       if (!win || win.isDestroyed()) {
@@ -2673,7 +2713,7 @@ function startHealthCheck() {
       }
       if (!win.isVisible()) {
         kioskLog(`health: ${name} hidden — showing`);
-        try { win.show(); } catch (_) {}
+        try { win.showInactive(); } catch (_) {}
         repairs++;
       }
       if (!_windowOnDisplay(win)) {
@@ -2721,7 +2761,7 @@ function startHealthCheck() {
     restackOverlays();
 
     if (repairs > 0) {
-      kioskLog(`health: repaired ${repairs} overlay window(s)`);
+      kioskLog(`health: repaired ${repairs} window(s)`);
     }
   }, 30_000);
 }
@@ -2743,15 +2783,32 @@ function recyclePanelView(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
 
+  const beforeMetrics = app.getAppMetrics();
+  kioskLog(`recycle ${key}: start processes=${beforeMetrics.length}`);
+
   stopBrowsingLoop(key);
 
   const oldView = panelViews[key];
   if (oldView) {
-    try { win.removeBrowserView(oldView); } catch (_) {}
-    // Remove the stale webContents-to-key mapping.
     if (!oldView.webContents.isDestroyed()) {
-      webContentsIdToKey.delete(oldView.webContents.id);
+      const oldWcId = oldView.webContents.id;
+      // Detach CDP debugger so no more 'message' events fire from the old view.
+      try { oldView.webContents.debugger.detach(); } catch (_) {}
+      // Remove all webContents listeners — prevents stale callbacks from
+      // acting on the new view's panelStates entries after the swap.
+      oldView.webContents.removeAllListeners();
+      // Destroy the renderer process; close() is graceful (Electron 22+),
+      // destroy() is the hard fallback for older versions.
+      try {
+        if (typeof oldView.webContents.close === 'function') {
+          oldView.webContents.close();
+        } else {
+          oldView.webContents.destroy();
+        }
+      } catch (_) {}
+      webContentsIdToKey.delete(oldWcId);
     }
+    try { win.removeBrowserView(oldView); } catch (_) {}
   }
 
   const M     = HARDWARE_MARGIN;
@@ -2776,6 +2833,195 @@ function recyclePanelView(key) {
 
   startBrowsingLoop(key);
   kioskLog(`recycled panel view for ${key}`);
+
+  // Log process count after a short delay to confirm the old renderer is gone.
+  setTimeout(() => {
+    try {
+      const afterMetrics = app.getAppMetrics();
+      kioskLog(`recycle ${key}: done processes=${afterMetrics.length} (was ${beforeMetrics.length})`);
+    } catch (e) {
+      kioskLog(`recycle ${key}: process count check failed: ${e.message}`);
+    }
+  }, 2000);
+}
+
+// Rebuild a destroyed (or missing) panel window at its home bounds.
+// Called by the health check when panelWindows.get(key) is gone.
+function rebuildPanelWindow(key) {
+  const bounds = homeBounds.get(key);
+  if (!bounds) {
+    kioskLog(`health: rebuildPanelWindow ${key}: no home bounds, cannot rebuild`);
+    return;
+  }
+  const M      = HARDWARE_MARGIN;
+  const panelW = bounds.width  - 2 * M;
+  const panelH = bounds.height - HANDLE_HEIGHT - 2 * M;
+
+  // Clean up any stale state from before the crash.
+  const oldWin = panelWindows.get(key);
+  if (oldWin && !oldWin.isDestroyed()) {
+    webContentsIdToKey.delete(oldWin.webContents.id);
+    try { oldWin.destroy(); } catch (_) {}
+  }
+  panelWindows.delete(key);
+
+  const oldView = panelViews[key];
+  if (oldView && !oldView.webContents.isDestroyed()) {
+    const oldWcId = oldView.webContents.id;
+    try { oldView.webContents.debugger.detach(); } catch (_) {}
+    oldView.webContents.removeAllListeners();
+    try {
+      if (typeof oldView.webContents.close === 'function') oldView.webContents.close();
+      else oldView.webContents.destroy();
+    } catch (_) {}
+    webContentsIdToKey.delete(oldWcId);
+  }
+  delete panelViews[key];
+
+  const oldGrip = gripViews[key];
+  if (oldGrip && !oldGrip.webContents.isDestroyed()) {
+    webContentsIdToKey.delete(oldGrip.webContents.id);
+    oldGrip.webContents.removeAllListeners();
+    try { oldGrip.webContents.destroy(); } catch (_) {}
+  }
+  delete gripViews[key];
+
+  // Create the new panel window at home bounds.
+  const win = new BrowserWindow({
+    x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+    frame:       false,
+    resizable:   true,
+    movable:     true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    transparent: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'kiosk-handle-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  panelWindows.set(key, win);
+  webContentsIdToKey.set(win.webContents.id, key);
+
+  const minSize = minSizeFor(key);
+  win.setMinimumSize(minSize.width, minSize.height);
+  win.loadFile(path.join(__dirname, 'kiosk-handle.html'));
+
+  win.webContents.on('dom-ready', () => {
+    win.webContents.insertCSS(HANDLE_CURSOR_CSS).catch(() => {});
+  });
+  win.webContents.once('did-finish-load', () => {
+    win.webContents.send('panel-hardware', { key, margin: M });
+    updateWindowShape(key);
+    if (USE_WINDOW_SHAPE && process.platform === 'linux') updateWindowShape(key);
+  });
+  win.webContents.on('render-process-gone', (_e, details) => {
+    const msg = `panel ${key} handle render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
+    console.error(`[kiosk] ${msg}`);
+    kioskLog(msg);
+    setTimeout(() => {
+      const w = panelWindows.get(key);
+      if (!w || w !== win || w.isDestroyed()) return;
+      w.webContents.once('did-finish-load', () => {
+        w.webContents.send('panel-hardware', { key, margin: M });
+        updateWindowShape(key);
+      });
+      w.loadFile(path.join(__dirname, 'kiosk-handle.html'));
+    }, 500);
+  });
+  win.on('unresponsive', () => {
+    kioskLog(`panel ${key} handle window unresponsive`);
+  });
+
+  // Panel content view.
+  const view = makePanelView();
+  win.addBrowserView(view);
+  view.setBounds({ x: M, y: HANDLE_HEIGHT + M, width: panelW, height: panelH });
+  view.setAutoResize({ width: true, height: true });
+  const cachedPage = path.join(cacheDir, `${key}.html`);
+  if (fs.existsSync(cachedPage)) {
+    view.webContents.loadFile(cachedPage);
+  } else {
+    view.webContents.loadURL(PLACEHOLDER_URL);
+  }
+  panelViews[key] = view;
+  webContentsIdToKey.set(view.webContents.id, key);
+  setupViewEventHandlers(key, win, view);
+
+  // Resize grip.
+  const grip = makeGripView();
+  win.addBrowserView(grip);
+  grip.webContents.loadFile(path.join(__dirname, 'kiosk-resize-grip.html'));
+  grip.webContents.on('dom-ready', () => {
+    grip.webContents.insertCSS(GRIP_CURSOR_CSS).catch(() => {});
+  });
+  gripViews[key] = grip;
+  webContentsIdToKey.set(grip.webContents.id, key);
+  positionGrip(key);
+
+  grip.webContents.on('render-process-gone', (_e, details) => {
+    const msg = `panel ${key} grip render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
+    console.error(`[kiosk] ${msg}`);
+    kioskLog(msg);
+    setTimeout(() => {
+      const g = gripViews[key];
+      if (!g || g !== grip || g.webContents.isDestroyed()) return;
+      g.webContents.loadFile(path.join(__dirname, 'kiosk-resize-grip.html'));
+    }, 500);
+  });
+
+  win.on('resize', () => {
+    positionGrip(key);
+    updateWindowShape(key);
+    if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
+    if (key === 'hub') repositionAddressBar();
+  });
+
+  let moveDebounce = null;
+  win.on('move', () => {
+    if (key === 'hub') repositionAddressBar();
+    if (ignoreNextMoves.get(key)) return;
+    if (Date.now() - windowsCreatedAt < 5_000) {
+      console.log(`[kiosk-auto] ${key} startup move ignored`);
+      return;
+    }
+    clearTimeout(moveDebounce);
+    moveDebounce = setTimeout(() => {
+      const ps = panelStates.get(key);
+      if (ps && ps.mode === 'active' && !ps.manualLayout) {
+        ps.manualLayout = true;
+        cancelTween(key);
+      }
+      notePanelActivity(key, 'move');
+      clampToDisplay(key);
+    }, 250);
+  });
+
+  win.on('closed', () => {
+    cancelTween(key);
+    if (enlargedKey === key) enlargedKey = null;
+    panelWindows.delete(key);
+    // homeBounds intentionally NOT deleted — health check needs it to rebuild.
+    delete panelViews[key];
+    delete gripViews[key];
+    resizeState.delete(key);
+    tweenTimers.delete(key);
+  });
+
+  if (key === 'hub') repositionAddressBar();
+
+  // Resume the browsing loop on the new view.
+  const ps = panelStates.get(key);
+  if (ps) {
+    ps.mode        = 'auto';
+    ps.manualLayout = false;
+    startBrowsingLoop(key);
+  }
+
+  kioskLog(`health: rebuilt panel window ${key}`);
 }
 
 // Every 30 min: recycle auto-mode panel views one at a time (staggered by 1 min).
@@ -2825,4 +3071,5 @@ module.exports = {
   createKioskWindow,
   computeClusterLayout,
   getKioskWindows: () => [...panelWindows.values()],
+  areAllPanelsAuto: () => Array.from(panelStates.values()).every(s => s.mode === 'auto'),
 };

@@ -524,15 +524,35 @@ fatal messages (e.g. "GPU process isn't usable") appear in the process log
 files at `/tmp/internet-cafe-wallpaper/`. Output is tee'd to both the terminal
 and the log file so you can watch it live and read it later.
 
+**Log file paths** are printed to the terminal at startup so you always know
+where to look:
+- `/tmp/internet-cafe-wallpaper/supervisor.log` — supervisor decisions (restart, quit, signal decode)
+- `/tmp/internet-cafe-wallpaper/kiosk-electron.log` — kiosk Chromium output
+- `/tmp/internet-cafe-wallpaper/wallpaper-electron.log` — wallpaper Chromium output
+- `~/.config/internet-cafe/logs/kiosk.log` — structured kiosk events
+- `~/.config/internet-cafe/logs/wallpaper.log` — structured wallpaper events
+
+**Terminal-close resilience.** The supervisor and its loop subshells run
+`trap '' HUP` so closing the terminal that launched `relaunch.sh` has no
+effect on them. Electron children are launched with `setsid` so they are in
+their own session and never receive a terminal SIGHUP regardless.
+
+**Signal handling.** SIGTERM and SIGHUP received by the Electron processes now
+exit with 128+N codes (143 for SIGTERM, 129 for SIGHUP) instead of writing the
+quit flag. This lets the supervisor log the exact signal name and restart as
+expected. Only `Ctrl+Alt+Q` (and `relaunch.sh`) write the quit flag.
+
 **Ctrl+Alt+Q** still stops everything for good: whichever Electron process
 handles the shortcut writes a `quit-requested` flag to
 `/tmp/internet-cafe-wallpaper/quit-requested`, and both loops exit when they
-see it. `relaunch.sh` also writes the flag before killing processes (to prevent
-the old loops from racing), then the new launch clears it at startup.
+see it. The flag is written **before** `killOthers()` is called, so the
+sibling's SIGTERM exit is treated as intentional and not restarted. `relaunch.sh`
+also writes the flag before killing processes (to prevent the old loops from
+racing), then the new launch clears it at startup.
 
 The supervisor script saves its PID to `/tmp/internet-cafe-wallpaper/launcher.pid`
 so `relaunch.sh` can send it a clean SIGTERM — the trap handler kills both
-loop subshells before exiting.
+loop subshells (and their setsid'd Electron children) before exiting.
 
 Each restart is logged with the decoded exit code or signal name to
 `/tmp/internet-cafe-wallpaper/supervisor.log`.
@@ -575,10 +595,14 @@ HTML file and re-sends the window's initial IPC state (SVG, timezone, URL,
 nav state) within 500 ms. The window stays at its current on-screen position;
 no visible flash for the user.
 
-A **health-check** runs every 30 s to catch any window that disappeared without
-firing `render-process-gone` (e.g. closed by the compositor). Missing overlay
-windows are recreated, `alwaysOnTop` is re-asserted on all windows, and
-`restackOverlays()` is called to restore z-order.
+A **health-check** runs every 30 s. It checks **every panel BrowserWindow** as
+well as all four overlay windows. For each panel: a destroyed window is
+rebuilt at its home bounds (with a fresh BrowserView, grip, and all event
+handlers); a hidden or minimized window is shown with `showInactive()` (never
+`show()`, so focus is never stolen from a customer); a crashed or destroyed
+BrowserView is recycled via `recyclePanelView`. Missing overlay windows are
+recreated, `alwaysOnTop` is re-asserted on all windows, and `restackOverlays()`
+is called to restore z-order. All repairs are logged.
 
 ### Memory management
 
@@ -589,11 +613,17 @@ windows are recreated, `alwaysOnTop` is re-asserted on all windows, and
   customer is using) get a fresh `BrowserView` one at a time (staggered by
   1 min) to release accumulated renderer-heap. The browsing loop restarts
   immediately on the new view.
-- **Nightly restart** (opt-in): set `KIOSK_NIGHTLY_RESTART_HOUR=4` (or any
-  0-23 hour) in the launch script. When all panels are in auto mode at that
-  hour, `kiosk-main.js` exits cleanly and the supervisor loop restarts it with
-  a fully fresh renderer stack. No quit flag is written, so the loop always
-  restarts after a nightly exit.
+- **Nightly restart** (on by default): both launch scripts now default
+  `KIOSK_NIGHTLY_RESTART_HOUR=4`. When all panels are in auto mode at 4 AM,
+  `kiosk-main.js` exits cleanly and the supervisor loop restarts it with a
+  fully fresh renderer stack. Override by setting the variable in your
+  environment before running the launch script. No quit flag is written, so
+  the loop always restarts after a nightly exit.
+- **Memory guard**: every 5 minutes the kiosk checks its total working set
+  across all Chromium processes. If it exceeds `KIOSK_MEMORY_LIMIT_MB`
+  (default 60 % of total system RAM) and every panel is in auto mode, it
+  exits cleanly so the supervisor restarts it before the Linux OOM killer
+  strikes. The memory snapshot and guard decision are always logged.
 
 ### Preventing display sleep and GPU loss
 

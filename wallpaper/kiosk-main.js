@@ -13,8 +13,9 @@
 // unwrapped Electron process — see linux/xwinwrap-launch.sh and
 // linux/native-launch.sh, which start both. Running it standalone for
 // dev/testing works too: `electron kiosk-main.js`.
+const os = require('os');
 const { app, globalShortcut, powerMonitor, screen } = require('electron');
-const { createKioskWindow } = require('./kiosk-browsers');
+const { createKioskWindow, areAllPanelsAuto } = require('./kiosk-browsers');
 const { registerSelf, killOthers, requestQuit, clearQuitFlag } = require('./process-pair');
 const { kioskLog, LOG_FILE } = require('./kiosk-log');
 
@@ -49,22 +50,22 @@ process.on('unhandledRejection', (reason) => {
 // Track the reason the kiosk is quitting so quit-event handlers can log it.
 let _quitReason = null;
 
-// SIGTERM: sent by killOthers() when the wallpaper process handles Ctrl+Alt+Q.
-// Write the quit flag so the supervisor loop does not restart us.
+// SIGTERM/SIGHUP: exit with 128+N so the supervisor can log the signal name
+// from the exit code.  Do NOT write the quit flag here — only Ctrl+Alt+Q
+// (and relaunch.sh) may write it.  The supervisor sees the non-zero exit code
+// and restarts the kiosk, which is the correct behavior on an unexpected signal.
 if (process.platform === 'linux') {
   process.on('SIGTERM', () => {
     _quitReason = 'SIGTERM';
-    kioskLog('received SIGTERM — writing quit flag and exiting');
-    requestQuit();
+    kioskLog('received SIGTERM — exiting with code 143');
     try { cleanupPidFile(); } catch (_) {}
-    process.exit(0);
+    process.exit(143);
   });
   process.on('SIGHUP', () => {
     _quitReason = 'SIGHUP';
-    kioskLog('received SIGHUP — writing quit flag and exiting');
-    requestQuit();
+    kioskLog('received SIGHUP — exiting with code 129');
     try { cleanupPidFile(); } catch (_) {}
-    process.exit(0);
+    process.exit(129);
   });
 }
 
@@ -123,6 +124,9 @@ app.whenReady().then(() => {
   }
 
   // Memory metrics every 5 minutes so we can spot leaks before a disappearance.
+  // Memory guard: if total working set exceeds KIOSK_MEMORY_LIMIT_MB (default
+  // 60 % of total system RAM) and every panel is in auto mode, exit cleanly so
+  // the supervisor restarts before the Linux OOM killer strikes.
   setInterval(() => {
     try {
       const mem     = process.memoryUsage();
@@ -131,12 +135,26 @@ app.whenReady().then(() => {
       for (const m of metrics) {
         totalWS += (m.memory && m.memory.workingSetSize) ? m.memory.workingSetSize : 0;
       }
+      const totalWSMb = Math.round(totalWS / 1024);
       kioskLog(
         `memory heap=${Math.round(mem.heapUsed / 1024 / 1024)}MB` +
         ` rss=${Math.round(mem.rss / 1024 / 1024)}MB` +
-        ` all-processes-ws=${Math.round(totalWS / 1024)}MB` +
+        ` all-processes-ws=${totalWSMb}MB` +
         ` processes=${metrics.length}`
       );
+
+      const rawLimit = process.env.KIOSK_MEMORY_LIMIT_MB;
+      const limitMb  = rawLimit
+        ? parseInt(rawLimit, 10)
+        : Math.round(os.totalmem() / 1024 / 1024 * 0.6);
+      if (Number.isFinite(limitMb) && limitMb > 0 && totalWSMb > limitMb) {
+        if (kioskWindows && areAllPanelsAuto()) {
+          kioskLog(`memory guard: ${totalWSMb}MB exceeds limit ${limitMb}MB — exiting for supervisor restart`);
+          app.quit();
+        } else {
+          kioskLog(`memory guard: ${totalWSMb}MB exceeds limit ${limitMb}MB — panel active, skipping restart`);
+        }
+      }
     } catch (e) {
       kioskLog(`memory log failed: ${e.message}`);
     }

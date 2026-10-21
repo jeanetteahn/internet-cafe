@@ -35,25 +35,22 @@ function registerSelf(name) {
   };
 }
 
-// Kills every other registered process (by PID file), leaving the caller
-// to quit itself afterward.
+// Kills the known sibling processes (wallpaper and kiosk), leaving the caller
+// to quit itself afterward.  Only targets the two known process names so that
+// launcher.pid (which lives in the same PID_DIR) is never accidentally killed.
+const KNOWN_PROCESS_NAMES = ['wallpaper', 'kiosk'];
+
 function killOthers(exceptName) {
-  let entries;
-  try {
-    entries = fs.readdirSync(PID_DIR);
-  } catch {
-    return;
+  for (const name of KNOWN_PROCESS_NAMES) {
+    if (name === exceptName) continue;
+    const pidFile = path.join(PID_DIR, `${name}.pid`);
+    try {
+      const pid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+      if (pid && pid !== process.pid) process.kill(pid, 'SIGTERM');
+    } catch {
+      /* sibling already gone, or no pid file — fine */
+    }
   }
-  entries
-    .filter((f) => f.endsWith('.pid') && f !== `${exceptName}.pid`)
-    .forEach((f) => {
-      try {
-        const pid = parseInt(fs.readFileSync(path.join(PID_DIR, f), 'utf8'), 10);
-        if (pid && pid !== process.pid) process.kill(pid, 'SIGTERM');
-      } catch {
-        /* sibling already gone, or PID reused/stale — fine either way */
-      }
-    });
 }
 
 // Write the quit-requested flag so the supervisor loop in xwinwrap-launch.sh /

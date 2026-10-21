@@ -34,6 +34,12 @@
 # tolerant your compositor is of X11 clients requesting background
 # placement — it is not guaranteed, unlike on a real X11 session.
 set -uo pipefail
+# Ignore SIGHUP so closing the terminal doesn't kill the supervisor.
+# SIG_IGN is inherited by child processes spawned after this point, which
+# means the loop subshells also inherit it.  Electron children are started
+# with setsid (below) so they are in their own session and are never reached
+# by a terminal-close SIGHUP regardless.
+trap '' HUP
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -133,14 +139,30 @@ rm -f "$QUIT_FLAG"
 # xset is the X11-level belt-and-suspenders. Ignore errors if xset is absent.
 xset s off s noblank -dpms 2>/dev/null || true
 
+# Default nightly restart to 4 AM if not already set in the environment.
+export KIOSK_NIGHTLY_RESTART_HOUR=${KIOSK_NIGHTLY_RESTART_HOUR:-4}
+
+# Resolve the Electron userData log directory (default XDG location on Linux).
+_USER_DATA_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/internet-cafe"
+
 sup_log "starting (pid=$$, electron=$ELECTRON_BIN, geometry=${WIDTH}x${HEIGHT})"
+sup_log "log files:"
+sup_log "  supervisor:         $SUPERVISOR_LOG"
+sup_log "  kiosk-electron:     $KIOSK_ELECTRON_LOG"
+sup_log "  wallpaper-electron: $WALLPAPER_ELECTRON_LOG"
+sup_log "  kiosk-app:          $_USER_DATA_DIR/logs/kiosk.log"
+sup_log "  wallpaper-app:      $_USER_DATA_DIR/logs/wallpaper.log"
 
 # ---- Wallpaper supervisor loop -----------------------------------------------
 # Restarts xwinwrap + electron (main.js) whenever they exit.
 # NOTE: deliberately no `-fs` here (see the original xwinwrap-launch comments
 # above about BadMatch on Cinnamon when combining -ov with -fs).
 run_wallpaper_loop() {
-  trap 'exit 0' TERM INT
+  local WALL_PID=""
+  # Kill the current child before exiting so the setsid'd process doesn't
+  # become an orphan when the supervisor sends SIGTERM to this subshell.
+  trap 'kill -TERM "${WALL_PID:-}" 2>/dev/null; exit 0' TERM INT
+  trap '' HUP
   local crash_count=0
   local crash_window_start
   crash_window_start=$(date +%s)
@@ -152,14 +174,18 @@ run_wallpaper_loop() {
     fi
 
     sup_log "wallpaper: launching xwinwrap+electron (crash_count=$crash_count)"
-    ELECTRON_ENABLE_LOGGING=1 xwinwrap -ov -s -st -sp -nf -b -un \
+    # setsid puts xwinwrap+electron in its own session so a terminal-close
+    # SIGHUP cannot reach it even if the supervisor's trap '' HUP is somehow
+    # bypassed.
+    ELECTRON_ENABLE_LOGGING=1 setsid xwinwrap -ov -s -st -sp -nf -b -un \
       -g "${WIDTH}x${HEIGHT}+0+0" -- \
       "$ELECTRON_BIN" "$PROJECT_DIR" \
       > >(tee -a "$WALLPAPER_ELECTRON_LOG") 2>&1 &
-    local WALL_PID=$!
+    WALL_PID=$!
 
-    wait "$WALL_PID" 2>/dev/null || true
+    wait "$WALL_PID" 2>/dev/null
     local EXIT_CODE=$?
+    WALL_PID=""
 
     if [ -f "$QUIT_FLAG" ]; then
       sup_log "wallpaper: exited ($(decode_exit $EXIT_CODE)) and quit requested — stopping"
@@ -195,7 +221,9 @@ run_wallpaper_loop() {
 # xwinwrap can establish its desktop-layer window before the kiosk appears on
 # top.  Subsequent restarts get the normal 3 s / 60 s backoff.
 run_kiosk_loop() {
-  trap 'exit 0' TERM INT
+  local KIOSK_PID=""
+  trap 'kill -TERM "${KIOSK_PID:-}" 2>/dev/null; exit 0' TERM INT
+  trap '' HUP
   local crash_count=0
   local crash_window_start
   crash_window_start=$(date +%s)
@@ -208,12 +236,13 @@ run_kiosk_loop() {
     fi
 
     sup_log "kiosk: launching (crash_count=$crash_count)"
-    ELECTRON_ENABLE_LOGGING=1 "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" \
+    ELECTRON_ENABLE_LOGGING=1 setsid "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" \
       > >(tee -a "$KIOSK_ELECTRON_LOG") 2>&1 &
-    local KIOSK_PID=$!
+    KIOSK_PID=$!
 
-    wait "$KIOSK_PID" 2>/dev/null || true
+    wait "$KIOSK_PID" 2>/dev/null
     local EXIT_CODE=$?
+    KIOSK_PID=""
 
     if [ -f "$QUIT_FLAG" ]; then
       sup_log "kiosk: exited ($(decode_exit $EXIT_CODE)) and quit requested — stopping"

@@ -35,19 +35,20 @@ process.on('unhandledRejection', (reason) => {
   try { wallpaperLog(msg); } catch (_) {}
 });
 
+// SIGTERM/SIGHUP: exit with 128+N so the supervisor can log the signal name.
+// Do NOT write the quit flag — only Ctrl+Alt+Q (and relaunch.sh) may do that.
 if (process.platform === 'linux') {
   process.on('SIGTERM', () => {
     _quitReason = 'SIGTERM';
-    wallpaperLog('received SIGTERM — writing quit flag and exiting');
-    requestQuit();
+    wallpaperLog('received SIGTERM — exiting with code 143');
     try { cleanupPidFile(); } catch (_) {}
-    process.exit(0);
+    process.exit(143);
   });
   process.on('SIGHUP', () => {
     _quitReason = 'SIGHUP';
-    wallpaperLog('received SIGHUP — exiting');
+    wallpaperLog('received SIGHUP — exiting with code 129');
     try { cleanupPidFile(); } catch (_) {}
-    process.exit(0);
+    process.exit(129);
   });
 }
 
