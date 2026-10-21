@@ -253,7 +253,7 @@ const _spoonSvg = [
   `</svg>`,
 ].join('');
 const SPOON_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSvg).toString('base64');
-const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') ${_spoonHotX} ${_spoonHotY},auto!important}input,textarea{cursor:text!important}`;
+const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') ${_spoonHotX} ${_spoonHotY},default!important}input,textarea{cursor:text!important}`;
 const PANEL_CURSOR_CSS      = _spoonRule;
 const HANDLE_CURSOR_CSS     = _spoonRule + '#strip{cursor:grab!important}';
 const GRIP_CURSOR_CSS       = _spoonRule + '.grip{cursor:nwse-resize!important}';

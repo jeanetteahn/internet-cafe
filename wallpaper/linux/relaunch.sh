@@ -16,12 +16,19 @@ QUIT_FLAG="$PID_DIR/quit-requested"
 LAUNCHER_PID_FILE="$PID_DIR/launcher.pid"
 mkdir -p "$PID_DIR"
 
-# Apply the spoon cursor theme now so it is active from this point.
-# The state file persists across the exec below; xwinwrap-launch.sh reads it
-# (crash-safety logic) and owns the restore-on-exit trap.
-# shellcheck source=cursor-theme-switch.sh
-. "$PROJECT_DIR/linux/cursor-theme-switch.sh"
-spoon_cursor_apply
+# If a previous session left the cursor stuck on "spoon" (e.g. crashed before
+# restoring), reset it now so the desktop cursor looks normal during the gap.
+_CURSOR_STATE_FILE="$PID_DIR/cursor-theme-state"
+if command -v gsettings >/dev/null 2>&1; then
+  _CURRENT_CURSOR=$(gsettings get org.gnome.desktop.interface cursor-theme 2>/dev/null | tr -d "'")
+  if [ "$_CURRENT_CURSOR" = "spoon" ]; then
+    _SAVED_CURSOR=""
+    [ -f "$_CURSOR_STATE_FILE" ] && _SAVED_CURSOR=$(cat "$_CURSOR_STATE_FILE" 2>/dev/null | tr -d "'")
+    _RESTORE_CURSOR="${_SAVED_CURSOR:-Adwaita}"
+    gsettings set org.gnome.desktop.interface cursor-theme "$_RESTORE_CURSOR" 2>/dev/null || true
+    rm -f "$_CURSOR_STATE_FILE"
+  fi
+fi
 
 # Signal the supervisor loop(s) to stop before we kill the Electron processes.
 # This prevents either loop from restarting in the window between our pkill

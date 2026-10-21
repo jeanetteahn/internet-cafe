@@ -76,16 +76,6 @@ WALLPAPER_ELECTRON_LOG="$PID_DIR/wallpaper-electron.log"
 KIOSK_ELECTRON_LOG="$PID_DIR/kiosk-electron.log"
 mkdir -p "$PID_DIR"
 
-# Spoon system cursor — must be exported before Electron starts so the custom
-# cursor is visible from the very first frame and during X11 button grabs.
-export XCURSOR_THEME=spoon
-
-# Switch the desktop cursor theme to spoon for the duration of this session,
-# and register a restore on exit via the cleanup trap below.
-# shellcheck source=cursor-theme-switch.sh
-. "$PROJECT_DIR/linux/cursor-theme-switch.sh"
-spoon_cursor_apply
-
 sup_log() {
   local msg
   msg="$(date -Iseconds) [supervisor] $1"
@@ -124,7 +114,6 @@ cleanup() {
   [ -n "$WALLPAPER_LOOP_PID" ] && kill "$WALLPAPER_LOOP_PID" 2>/dev/null || true
   [ -n "$KIOSK_LOOP_PID"     ] && kill "$KIOSK_LOOP_PID"     2>/dev/null || true
   rm -f "$LAUNCHER_PID_FILE"
-  spoon_cursor_restore
   sup_log "supervisor cleanup — exiting"
   exit 0
 }
@@ -219,7 +208,7 @@ run_wallpaper_loop() {
 # ---- Kiosk supervisor loop ---------------------------------------------------
 # Relaunches kiosk-main.js whenever it exits.  First start is delayed 15 s so
 # xwinwrap can establish its desktop-layer window before the kiosk appears on
-# top.  Subsequent restarts get the normal 3 s / 60 s backoff.
+# top.  Subsequent restarts get the normal 1 s / 60 s backoff.
 run_kiosk_loop() {
   local KIOSK_PID=""
   trap 'kill -TERM "${KIOSK_PID:-}" 2>/dev/null; exit 0' TERM INT
@@ -227,7 +216,15 @@ run_kiosk_loop() {
   local crash_count=0
   local crash_window_start
   crash_window_start=$(date +%s)
-  local first_start=1
+  local consecutive_seg=0
+  local GPU_FLAG="$PID_DIR/kiosk-gpu-off"
+  local KIOSK_DISABLE_GPU=0
+
+  # Persist GPU fallback across supervisor restarts.
+  if [ -f "$GPU_FLAG" ]; then
+    KIOSK_DISABLE_GPU=1
+    sup_log "kiosk: GPU fallback active (persistent flag found)"
+  fi
 
   while true; do
     if [ -f "$QUIT_FLAG" ]; then
@@ -235,9 +232,14 @@ run_kiosk_loop() {
       break
     fi
 
-    sup_log "kiosk: launching (crash_count=$crash_count)"
-    ELECTRON_ENABLE_LOGGING=1 setsid "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" \
-      > >(tee -a "$KIOSK_ELECTRON_LOG") 2>&1 &
+    sup_log "kiosk: launching (crash_count=$crash_count${KIOSK_DISABLE_GPU:+, gpu-disabled})"
+    if [ "$KIOSK_DISABLE_GPU" = "1" ]; then
+      ELECTRON_ENABLE_LOGGING=1 setsid "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" --disable-gpu \
+        > >(tee -a "$KIOSK_ELECTRON_LOG") 2>&1 &
+    else
+      ELECTRON_ENABLE_LOGGING=1 setsid "$ELECTRON_BIN" "$PROJECT_DIR/kiosk-main.js" \
+        > >(tee -a "$KIOSK_ELECTRON_LOG") 2>&1 &
+    fi
     KIOSK_PID=$!
 
     wait "$KIOSK_PID" 2>/dev/null
@@ -250,6 +252,19 @@ run_kiosk_loop() {
     fi
 
     sup_log "kiosk: exited with $(decode_exit $EXIT_CODE) — will restart"
+
+    # GPU crash detection: SIGSEGV=139, SIGABRT=134, SIGTRAP=133.
+    # After 2 consecutive low-level crashes, disable GPU acceleration.
+    if [ "$EXIT_CODE" = "139" ] || [ "$EXIT_CODE" = "134" ] || [ "$EXIT_CODE" = "133" ]; then
+      consecutive_seg=$(( consecutive_seg + 1 ))
+      if [ "$KIOSK_DISABLE_GPU" != "1" ] && [ "$consecutive_seg" -ge 2 ]; then
+        sup_log "kiosk: fallback: GPU disabled (${consecutive_seg} consecutive crash exits)"
+        KIOSK_DISABLE_GPU=1
+        touch "$GPU_FLAG"
+      fi
+    else
+      consecutive_seg=0
+    fi
 
     local now
     now=$(date +%s)
@@ -267,9 +282,8 @@ run_kiosk_loop() {
       crash_count=0
       crash_window_start=$(date +%s)
     else
-      sleep 3
+      sleep 1
     fi
-    first_start=0
   done
   sup_log "kiosk loop exiting"
 }
