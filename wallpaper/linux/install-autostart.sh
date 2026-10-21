@@ -51,7 +51,7 @@ sed "s|Exec=.*|Exec=$EXEC_LINE|" \
   | grep -v '^Environment=' > "$DEST"
 
 # Append after Terminal=false so the file stays well-formed.
-sed -i "s|^Terminal=false|Terminal=false\nEnvironment=XCURSOR_THEME=spoon\nEnvironment=XCURSOR_SIZE=128|" "$DEST"
+sed -i "s|^Terminal=false|Terminal=false\nEnvironment=XCURSOR_THEME=spoon|" "$DEST"
 
 echo "Installed autostart entry: $DEST"
 echo "Launch method: $EXEC_LINE"

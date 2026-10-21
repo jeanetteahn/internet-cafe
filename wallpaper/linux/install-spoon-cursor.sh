@@ -21,7 +21,6 @@ ICONS_DIR="$HOME/.icons"
 THEME_DIR="$ICONS_DIR/$THEME_NAME"
 CURSORS_DIR="$THEME_DIR/cursors"
 DEFAULT_DIR="$ICONS_DIR/default"
-PREV_FILE="$THEME_DIR/.previous-theme"
 
 # ---- Detect desktop environment -----------------------------------------------
 detect_de() {
@@ -60,18 +59,9 @@ if [ "${1:-}" = "--uninstall" ]; then
     echo "Nothing to uninstall ($THEME_DIR does not exist)."
     exit 0
   fi
-  PREV="$(cat "$PREV_FILE" 2>/dev/null || echo "Adwaita")"
-  echo "Uninstalling spoon cursor theme, restoring: $PREV"
-  mkdir -p "$DEFAULT_DIR"
-  printf '[Icon Theme]\nInherits=%s\n' "$PREV" > "$DEFAULT_DIR/index.theme"
-  if command -v gsettings &>/dev/null; then
-    if gsettings set org.gnome.desktop.interface cursor-theme "$PREV" 2>/dev/null; then
-      echo "  gsettings: cursor-theme = $PREV"
-    fi
-  fi
   rm -rf "$THEME_DIR"
   echo "Removed $THEME_DIR"
-  echo "Log out and back in (or restart the kiosk) for the change to take effect."
+  echo "The desktop cursor theme is managed by the kiosk launcher — run it once to restore."
   exit 0
 fi
 
@@ -247,18 +237,13 @@ CURSOR_BIN="$TMP_DIR/spoon.cursor"
 xcursorgen "$CFG" "$CURSOR_BIN"
 echo "  xcursorgen: built $CURSOR_BIN"
 
-# ---- Detect previous theme (saved for --uninstall) ----------------------------
-PREV_THEME="$(detect_current_theme)"
-echo "Previous cursor theme: $PREV_THEME"
+# ---- Detect current theme for Inherits= fallback in the spoon index.theme ----
+INHERIT_THEME="$(detect_current_theme)"
+echo "Cursor fallback (Inherits) theme: $INHERIT_THEME"
 
 # ---- Install theme directory --------------------------------------------------
 echo "Installing theme to $CURSORS_DIR..."
 mkdir -p "$CURSORS_DIR"
-
-# Save the previous theme once (don't overwrite on re-run if already pointing at spoon)
-if [ ! -f "$PREV_FILE" ] || [ "$(cat "$PREV_FILE")" = "spoon" ]; then
-  echo "$PREV_THEME" > "$PREV_FILE"
-fi
 
 # Place the single cursor binary
 cp "$CURSOR_BIN" "$CURSORS_DIR/spoon.cursor"
@@ -323,30 +308,13 @@ cat > "$THEME_DIR/index.theme" << EOF
 [Icon Theme]
 Name=spoon
 Comment=Spoon cursor for internet-cafe kiosk
-Inherits=$PREV_THEME
+Inherits=$INHERIT_THEME
 EOF
-echo "  wrote index.theme (Inherits=$PREV_THEME)"
-
-# ---- Set as default -----------------------------------------------------------
-mkdir -p "$DEFAULT_DIR"
-printf '[Icon Theme]\nInherits=%s\n' "$THEME_NAME" > "$DEFAULT_DIR/index.theme"
-echo "  set ~/.icons/default/index.theme → $THEME_NAME"
-
-DE="$(detect_de)"
-if command -v gsettings &>/dev/null; then
-  if gsettings set org.gnome.desktop.interface cursor-theme "$THEME_NAME" 2>/dev/null; then
-    echo "  gsettings: cursor-theme = $THEME_NAME"
-  fi
-fi
+echo "  wrote index.theme (Inherits=$INHERIT_THEME)"
 
 echo ""
-echo "Desktop environment detected: $DE"
-echo "Cursor theme 'spoon' installed. Changes:"
-echo "  ~/.icons/spoon/         — theme files"
-echo "  ~/.icons/default/       — X11 default override"
-if command -v gsettings &>/dev/null; then
-  echo "  gsettings cursor-theme  — set to spoon"
-fi
+echo "Cursor theme 'spoon' installed to ~/.icons/spoon/"
+echo "The launcher scripts (native-launch.sh / xwinwrap-launch.sh) switch the"
+echo "desktop cursor theme to spoon on start and restore it on exit."
 echo ""
-echo "Log out and back in (or restart the kiosk) for the change to take effect."
 echo "To uninstall: bash $0 --uninstall"

@@ -34,7 +34,12 @@ mkdir -p "$PID_DIR"
 # Spoon system cursor — must be exported before Electron starts so the custom
 # cursor is visible from the very first frame and during X11 button grabs.
 export XCURSOR_THEME=spoon
-export XCURSOR_SIZE=128
+
+# Switch the desktop cursor theme to spoon for the duration of this session,
+# and register a restore on exit via the cleanup trap below.
+# shellcheck source=cursor-theme-switch.sh
+. "$PROJECT_DIR/linux/cursor-theme-switch.sh"
+spoon_cursor_apply
 
 sup_log() {
   local msg
@@ -71,6 +76,7 @@ cleanup() {
   [ -n "$WALLPAPER_LOOP_PID" ] && kill "$WALLPAPER_LOOP_PID" 2>/dev/null || true
   [ -n "$KIOSK_LOOP_PID"     ] && kill "$KIOSK_LOOP_PID"     2>/dev/null || true
   rm -f "$LAUNCHER_PID_FILE"
+  spoon_cursor_restore
   sup_log "supervisor cleanup — exiting"
   exit 0
 }

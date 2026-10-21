@@ -7,4 +7,3 @@ X-GNOME-Autostart-enabled=true
 NoDisplay=true
 Terminal=false
 Environment=XCURSOR_THEME=spoon
-Environment=XCURSOR_SIZE=128

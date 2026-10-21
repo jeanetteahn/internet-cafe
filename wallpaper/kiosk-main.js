@@ -180,6 +180,14 @@ app.on('will-quit', () => {
   kioskLog(`will-quit (reason=${_quitReason || 'unknown'})`);
   globalShortcut.unregisterAll();
   cleanupPidFile();
+  if (process.platform === 'linux') {
+    try {
+      const { spawnSync } = require('child_process');
+      const path = require('path');
+      const helper = path.join(__dirname, 'linux', 'cursor-theme-switch.sh');
+      spawnSync('bash', ['-c', `. "${helper}" && spoon_cursor_restore`], { timeout: 2000 });
+    } catch (_) {}
+  }
 });
 
 app.on('quit', (_e, exitCode) => {

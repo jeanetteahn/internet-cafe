@@ -16,6 +16,13 @@ QUIT_FLAG="$PID_DIR/quit-requested"
 LAUNCHER_PID_FILE="$PID_DIR/launcher.pid"
 mkdir -p "$PID_DIR"
 
+# Apply the spoon cursor theme now so it is active from this point.
+# The state file persists across the exec below; xwinwrap-launch.sh reads it
+# (crash-safety logic) and owns the restore-on-exit trap.
+# shellcheck source=cursor-theme-switch.sh
+. "$PROJECT_DIR/linux/cursor-theme-switch.sh"
+spoon_cursor_apply
+
 # Signal the supervisor loop(s) to stop before we kill the Electron processes.
 # This prevents either loop from restarting in the window between our pkill
 # and the new launch script starting.
