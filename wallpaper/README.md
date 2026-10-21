@@ -650,3 +650,39 @@ work on Cinnamon.
 | `/tmp/internet-cafe-wallpaper/kiosk-electron.log` | Raw kiosk Electron stdout+stderr (Chromium-level messages) |
 | `/tmp/internet-cafe-wallpaper/wallpaper-electron.log` | Raw wallpaper Electron stdout+stderr |
 | `/tmp/internet-cafe-wallpaper/quit-requested` | Exists only during an intentional shutdown |
+
+## Spoon system cursor
+
+By default Chromium can only apply the spoon cursor to content it controls. When a customer holds a mouse button and drags — even over blank whitespace — the X11 server takes over the cursor via an implicit pointer grab and falls back to the system theme. This replaces the spoon with a plain white arrow.
+
+The fix is to install the spoon as the system cursor theme so X11's grab layer also shows the spoon.
+
+### Installing (on Linux, after git pull)
+
+```bash
+bash linux/install-spoon-cursor.sh
+```
+
+The script:
+- Installs `librsvg2-bin` (`rsvg-convert`) and `x11-apps` (`xcursorgen`) via `apt` if missing.
+- Computes pixel dimensions using the same math as `kiosk-browsers.js` (uniform scale that matches the fork/knife nav buttons), then renders `assets/utensils/spoon-cursor.svg` to PNGs at 1× and 2× with the drop shadow baked in.
+- Builds an X11 cursor theme named **spoon** at `~/.icons/spoon/`, with `Inherits=` pointing at whatever theme was active before (detected from `gsettings` or `~/.icons/default/index.theme`, fallback: Adwaita), so `xterm`, resize, grab, and fleur cursors are inherited unchanged.
+- Maps `left_ptr`, `default`, `arrow`, `top_left_arrow`, `circle`, `not-allowed`, `no-drop`, `crossed_circle`, `dnd-none/move/copy/link/ask/no-drop`, `X_cursor`, `wait`, `watch`, `progress`, `left_ptr_watch`, and `half-busy` — plus their standard hash-named aliases — to the spoon.
+- Sets it as the default via `~/.icons/default/index.theme` and `gsettings org.gnome.desktop.interface cursor-theme` (if available).
+- Prints the detected desktop environment and what it changed.
+
+The script is safe to re-run. To uninstall and restore the previous theme:
+
+```bash
+bash linux/install-spoon-cursor.sh --uninstall
+```
+
+### How it fits together
+
+`linux/native-launch.sh`, `linux/xwinwrap-launch.sh`, and the installed autostart entry (`install-autostart.sh`) all export `XCURSOR_THEME=spoon` and `XCURSOR_SIZE=128` before Electron starts, so the cursor is active from the first rendered frame.
+
+`kiosk-preload.js` also blocks native HTML5 drag-and-drop at the renderer level (capture-phase `dragstart` + `-webkit-user-drag:none` CSS) to prevent Chromium from handing the drag cursor to the OS in the first place. The two fixes together cover every case: the CSS + dragstart guard keeps the spoon during image drags, and the system theme keeps it during blank-area button-holds. Text selection, scrolling, links, and panel-activity events are unaffected.
+
+### Generated files (not committed to git)
+
+The PNGs and X11 cursor binary are built by `install-spoon-cursor.sh` on Linux and stored in `~/.icons/spoon/`. They are not committed to this repo.

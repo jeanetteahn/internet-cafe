@@ -5,6 +5,17 @@ const { ipcRenderer, webFrame } = require('electron');
 // covers Chromium builds that ignore ::-webkit-scrollbar in user sheets.
 // Both calls are repeated at DOMContentLoaded so they survive any early-load
 // style reset the page might apply.
+// Suppress native HTML5 drag-and-drop so X11 never hands cursor control back
+// to the system drag layer during a mousedown+move in the panels. Works on
+// all platforms. Text selection, links, scrolling, and panel-activity IPC are
+// unaffected because those don't go through dragstart.
+window.addEventListener('dragstart', (event) => { event.preventDefault(); }, true);
+
+// Belt-and-suspenders CSS: removes the browser's built-in "you can drag this"
+// cursor hint on images and other draggable elements (injected at user-agent
+// origin so it beats any site stylesheet including !important rules).
+try { webFrame.insertCSS('*{-webkit-user-drag:none!important}', { cssOrigin: 'user' }); } catch (_) {}
+
 const KIOSK_SCROLLBAR_CSS =
   '*:not(#__kiosk){scrollbar-color:auto!important;scrollbar-width:auto!important}' +
   '*:not(#__kiosk)::-webkit-scrollbar{width:12px!important;height:12px!important;background:#ffffff!important;display:block!important}' +

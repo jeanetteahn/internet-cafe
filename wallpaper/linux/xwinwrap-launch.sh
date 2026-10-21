@@ -70,6 +70,11 @@ WALLPAPER_ELECTRON_LOG="$PID_DIR/wallpaper-electron.log"
 KIOSK_ELECTRON_LOG="$PID_DIR/kiosk-electron.log"
 mkdir -p "$PID_DIR"
 
+# Spoon system cursor — must be exported before Electron starts so the custom
+# cursor is visible from the very first frame and during X11 button grabs.
+export XCURSOR_THEME=spoon
+export XCURSOR_SIZE=128
+
 sup_log() {
   local msg
   msg="$(date -Iseconds) [supervisor] $1"
