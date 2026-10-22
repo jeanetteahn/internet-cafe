@@ -35,152 +35,303 @@ ipcRenderer.invoke('get-cursor-css').then(function(css) {
 }).catch(function() {});
 
 // ---- Custom overlay scrollbar -----------------------------------------------
-// Built from plain divs in a closed shadow root on <html>.  Only tracks the
-// main-document scroll (window.scrollY / scrollX); does not affect layout
-// (position:fixed).  The spoon cursor is inherited from the user-origin CSS
-// injected above.  Fade-in on scroll/hover, fade-out after 1.5 s idle.
+// Shadow host must be a div — attachShadow throws NotSupportedError on <html>.
+// Main-doc bars always visible when content overflows; inner bars show on hover.
 function createOverlayScrollbar() {
+  var host = document.createElement('div');
+  host.id = '__kiosk_sb';
+  host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;overflow:visible;';
+
+  var shadow;
   try {
-    var shadow = document.documentElement.attachShadow({ mode: 'closed' });
+    shadow = host.attachShadow({ mode: 'closed' });
+  } catch(e) {
+    console.warn('[kiosk-sb] attachShadow failed:', e);
+    return;
+  }
 
-    var style = document.createElement('style');
-    style.textContent =
-      '.v,.h{position:fixed;z-index:2147483647;pointer-events:none;' +
-        'opacity:0;transition:opacity .25s;}' +
-      '.v{right:2px;top:0;width:8px;bottom:0;}' +
-      '.h{bottom:2px;left:0;height:8px;right:0;}' +
-      '.vt{position:absolute;left:0;right:0;background:rgba(0,0,0,.42);' +
-        'border-radius:4px;min-height:24px;}' +
-      '.ht{position:absolute;top:0;bottom:0;background:rgba(0,0,0,.42);' +
-        'border-radius:4px;min-width:24px;}' +
-      '.vt:hover,.ht:hover{background:rgba(0,0,0,.65);}';
-    shadow.appendChild(style);
+  var sty = document.createElement('style');
+  sty.textContent =
+    '.kv{position:fixed;right:0;top:0;width:12px;bottom:0;background:#fff;pointer-events:auto;}' +
+    '.kh{position:fixed;bottom:0;left:0;right:0;height:12px;background:#fff;pointer-events:auto;}' +
+    '.kc{position:fixed;right:0;bottom:0;width:12px;height:12px;background:#fff;pointer-events:none;}' +
+    '.iv{position:fixed;width:12px;background:#fff;pointer-events:auto;}' +
+    '.ih{position:fixed;height:12px;background:#fff;pointer-events:auto;}' +
+    '.kv .t,.iv .t{position:absolute;left:0;right:0;min-height:40px;' +
+      'background:#ea4b00;border:2px solid #fff;border-radius:6px;}' +
+    '.kh .t,.ih .t{position:absolute;top:0;bottom:0;min-width:40px;' +
+      'background:#ea4b00;border:2px solid #fff;border-radius:6px;}';
+  shadow.appendChild(sty);
 
-    var vBar   = document.createElement('div'); vBar.className = 'v';
-    var vThumb = document.createElement('div'); vThumb.className = 'vt';
-    vBar.appendChild(vThumb);
-    shadow.appendChild(vBar);
+  function makeBar(cls) {
+    var bar = document.createElement('div'); bar.className = cls;
+    var thumb = document.createElement('div'); thumb.className = 't';
+    bar.appendChild(thumb);
+    shadow.appendChild(bar);
+    return { bar: bar, thumb: thumb };
+  }
 
-    var hBar   = document.createElement('div'); hBar.className = 'h';
-    var hThumb = document.createElement('div'); hThumb.className = 'ht';
-    hBar.appendChild(hThumb);
-    shadow.appendChild(hBar);
+  var KV = makeBar('kv');
+  var KH = makeBar('kh');
+  var corner = document.createElement('div'); corner.className = 'kc'; shadow.appendChild(corner);
+  var IV = makeBar('iv');
+  var IH = makeBar('ih');
+  IV.bar.style.display = 'none';
+  IH.bar.style.display = 'none';
+  corner.style.display = 'none';
 
-    var hideTimer = null;
+  function ensureHost() {
+    if (!host.isConnected) document.documentElement.appendChild(host);
+  }
+  ensureHost();
+  new MutationObserver(ensureHost).observe(document.documentElement, { childList: true });
 
-    function showBars() {
-      clearTimeout(hideTimer);
-      vBar.style.opacity = '1';
-      vBar.style.pointerEvents = 'auto';
-      hBar.style.opacity = '1';
-      hBar.style.pointerEvents = 'auto';
-      hideTimer = setTimeout(function() {
-        vBar.style.opacity = '0';
-        vBar.style.pointerEvents = 'none';
-        hBar.style.opacity = '0';
-        hBar.style.pointerEvents = 'none';
-      }, 1500);
+  // ---- Main doc scrollbars ----
+  function updateMain() {
+    var sc = document.scrollingElement || document.documentElement;
+    if (!sc) return;
+    var scrollH = sc.scrollHeight, scrollW = sc.scrollWidth;
+    var viewH = window.innerHeight, viewW = window.innerWidth;
+    var hasV = scrollH > viewH + 1;
+    var hasH = scrollW > viewW + 1;
+
+    if (hasV) {
+      var trackH = viewH - (hasH ? 12 : 0);
+      var thumbH = Math.max(40, (viewH / scrollH) * trackH);
+      var maxST = scrollH - viewH;
+      var thumbT = maxST > 0 ? (window.scrollY / maxST) * (trackH - thumbH) : 0;
+      KV.bar.style.display = 'block';
+      KV.thumb.style.height = thumbH + 'px';
+      KV.thumb.style.top = Math.round(thumbT) + 'px';
+    } else {
+      KV.bar.style.display = 'none';
     }
 
-    function updateBars() {
-      var sc = document.scrollingElement || document.documentElement;
-      if (!sc) return;
-      var scrollH = sc.scrollHeight;
-      var scrollW = sc.scrollWidth;
-      var ih = window.innerHeight;
-      var iw = window.innerWidth;
-      var st = window.scrollY;
-      var sl = window.scrollX;
-
-      if (scrollH > ih + 1) {
-        var trackH = ih - 4;
-        var thumbH = Math.max(24, (ih / scrollH) * trackH);
-        var thumbT = (scrollH - ih) > 0 ? (st / (scrollH - ih)) * (trackH - thumbH) : 0;
-        vBar.style.display = '';
-        vThumb.style.height = thumbH + 'px';
-        vThumb.style.top    = Math.round(thumbT) + 'px';
-      } else {
-        vBar.style.display = 'none';
-      }
-
-      if (scrollW > iw + 1) {
-        var trackW = iw - 4;
-        var thumbW = Math.max(24, (iw / scrollW) * trackW);
-        var thumbL = (scrollW - iw) > 0 ? (sl / (scrollW - iw)) * (trackW - thumbW) : 0;
-        hBar.style.display = '';
-        hThumb.style.width = thumbW + 'px';
-        hThumb.style.left  = Math.round(thumbL) + 'px';
-      } else {
-        hBar.style.display = 'none';
-      }
+    if (hasH) {
+      var trackW = viewW - (hasV ? 12 : 0);
+      var thumbW = Math.max(40, (viewW / scrollW) * trackW);
+      var maxSL = scrollW - viewW;
+      var thumbL = maxSL > 0 ? (window.scrollX / maxSL) * (trackW - thumbW) : 0;
+      KH.bar.style.display = 'block';
+      KH.thumb.style.width = thumbW + 'px';
+      KH.thumb.style.left = Math.round(thumbL) + 'px';
+    } else {
+      KH.bar.style.display = 'none';
     }
 
-    // ---- Vertical thumb drag ----
-    var vActive = false, vStartY = 0, vStartST = 0;
-    vThumb.addEventListener('pointerdown', function(e) {
-      e.preventDefault(); e.stopPropagation();
-      vThumb.setPointerCapture(e.pointerId);
-      vActive = true; vStartY = e.clientY; vStartST = window.scrollY;
-    });
-    vThumb.addEventListener('pointermove', function(e) {
-      if (!vActive) return;
-      var sc = document.scrollingElement || document.documentElement;
-      var trackH = window.innerHeight - 4;
-      var thumbH = Math.max(24, (window.innerHeight / sc.scrollHeight) * trackH);
-      var ratio  = (sc.scrollHeight - window.innerHeight) / Math.max(1, trackH - thumbH);
-      window.scrollTo(window.scrollX, vStartST + (e.clientY - vStartY) * ratio);
-      showBars(); updateBars();
-    });
-    vThumb.addEventListener('pointerup',     function() { vActive = false; });
-    vThumb.addEventListener('pointercancel', function() { vActive = false; });
-    vThumb.addEventListener('click', function(e) { e.stopPropagation(); });
+    corner.style.display = (hasV && hasH) ? 'block' : 'none';
+  }
 
-    // ---- Horizontal thumb drag ----
-    var hActive = false, hStartX = 0, hStartSL = 0;
-    hThumb.addEventListener('pointerdown', function(e) {
-      e.preventDefault(); e.stopPropagation();
-      hThumb.setPointerCapture(e.pointerId);
-      hActive = true; hStartX = e.clientX; hStartSL = window.scrollX;
-    });
-    hThumb.addEventListener('pointermove', function(e) {
-      if (!hActive) return;
-      var sc = document.scrollingElement || document.documentElement;
-      var trackW = window.innerWidth - 4;
-      var thumbW = Math.max(24, (window.innerWidth / sc.scrollWidth) * trackW);
-      var ratio  = (sc.scrollWidth - window.innerWidth) / Math.max(1, trackW - thumbW);
-      window.scrollTo(hStartSL + (e.clientX - hStartX) * ratio, window.scrollY);
-      showBars(); updateBars();
-    });
-    hThumb.addEventListener('pointerup',     function() { hActive = false; });
-    hThumb.addEventListener('pointercancel', function() { hActive = false; });
-    hThumb.addEventListener('click', function(e) { e.stopPropagation(); });
+  // ---- KV drag ----
+  var kvActive = false, kvStartY = 0, kvStartST = 0;
+  KV.thumb.addEventListener('pointerdown', function(e) {
+    e.preventDefault(); e.stopPropagation();
+    KV.thumb.setPointerCapture(e.pointerId);
+    kvActive = true; kvStartY = e.clientY; kvStartST = window.scrollY;
+  });
+  KV.thumb.addEventListener('pointermove', function(e) {
+    if (!kvActive) return;
+    var sc = document.scrollingElement || document.documentElement;
+    var hasH = sc.scrollWidth > window.innerWidth + 1;
+    var trackH = window.innerHeight - (hasH ? 12 : 0);
+    var thumbH = Math.max(40, (window.innerHeight / sc.scrollHeight) * trackH);
+    var ratio = (sc.scrollHeight - window.innerHeight) / Math.max(1, trackH - thumbH);
+    window.scrollTo(window.scrollX, kvStartST + (e.clientY - kvStartY) * ratio);
+    updateMain();
+  });
+  KV.thumb.addEventListener('pointerup',     function() { kvActive = false; });
+  KV.thumb.addEventListener('pointercancel', function() { kvActive = false; });
+  KV.thumb.addEventListener('click',         function(e) { e.stopPropagation(); });
+  KV.bar.addEventListener('click', function(e) {
+    if (e.composedPath()[0] === KV.thumb) return;
+    var sc = document.scrollingElement || document.documentElement;
+    var rect = KV.bar.getBoundingClientRect();
+    window.scrollTo(window.scrollX,
+      ((e.clientY - rect.top) / rect.height) * (sc.scrollHeight - window.innerHeight));
+    updateMain();
+  });
 
-    // ---- Click track scrolls to that position ----
-    vBar.addEventListener('click', function(e) {
-      if (e.composedPath()[0] === vThumb) return;
-      var rect = vBar.getBoundingClientRect();
-      var sc   = document.scrollingElement || document.documentElement;
-      window.scrollTo(window.scrollX,
-        ((e.clientY - rect.top) / rect.height) * (sc.scrollHeight - window.innerHeight));
-      showBars(); updateBars();
-    });
-    hBar.addEventListener('click', function(e) {
-      if (e.composedPath()[0] === hThumb) return;
-      var rect = hBar.getBoundingClientRect();
-      var sc   = document.scrollingElement || document.documentElement;
-      window.scrollTo(
-        ((e.clientX - rect.left) / rect.width) * (sc.scrollWidth - window.innerWidth),
-        window.scrollY);
-      showBars(); updateBars();
-    });
+  // ---- KH drag ----
+  var khActive = false, khStartX = 0, khStartSL = 0;
+  KH.thumb.addEventListener('pointerdown', function(e) {
+    e.preventDefault(); e.stopPropagation();
+    KH.thumb.setPointerCapture(e.pointerId);
+    khActive = true; khStartX = e.clientX; khStartSL = window.scrollX;
+  });
+  KH.thumb.addEventListener('pointermove', function(e) {
+    if (!khActive) return;
+    var sc = document.scrollingElement || document.documentElement;
+    var hasV = sc.scrollHeight > window.innerHeight + 1;
+    var trackW = window.innerWidth - (hasV ? 12 : 0);
+    var thumbW = Math.max(40, (window.innerWidth / sc.scrollWidth) * trackW);
+    var ratio = (sc.scrollWidth - window.innerWidth) / Math.max(1, trackW - thumbW);
+    window.scrollTo(khStartSL + (e.clientX - khStartX) * ratio, window.scrollY);
+    updateMain();
+  });
+  KH.thumb.addEventListener('pointerup',     function() { khActive = false; });
+  KH.thumb.addEventListener('pointercancel', function() { khActive = false; });
+  KH.thumb.addEventListener('click',         function(e) { e.stopPropagation(); });
+  KH.bar.addEventListener('click', function(e) {
+    if (e.composedPath()[0] === KH.thumb) return;
+    var sc = document.scrollingElement || document.documentElement;
+    var rect = KH.bar.getBoundingClientRect();
+    window.scrollTo(
+      ((e.clientX - rect.left) / rect.width) * (sc.scrollWidth - window.innerWidth),
+      window.scrollY);
+    updateMain();
+  });
 
-    window.addEventListener('scroll',    function() { updateBars(); showBars(); }, { passive: true });
-    window.addEventListener('resize',    updateBars,  { passive: true });
-    window.addEventListener('load',      updateBars,  { passive: true });
-    window.addEventListener('mousemove', showBars,    { passive: true });
+  // ---- Inner scroll containers ----
+  var innerEl = null, innerHideTimer = null;
 
-    updateBars();
-  } catch(e) {}
+  function findScrollable(el) {
+    while (el && el.nodeType === 1 && el !== document.documentElement) {
+      var cs = window.getComputedStyle(el);
+      if (/auto|scroll/.test(cs.overflow + ' ' + cs.overflowY + ' ' + cs.overflowX)) {
+        if (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1) return el;
+      }
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function updateInner() {
+    if (!innerEl || !innerEl.isConnected) {
+      IV.bar.style.display = 'none'; IH.bar.style.display = 'none'; return;
+    }
+    var rect = innerEl.getBoundingClientRect();
+    var scrollH = innerEl.scrollHeight, scrollW = innerEl.scrollWidth;
+    var ch = innerEl.clientHeight, cw = innerEl.clientWidth;
+    var hasV = scrollH > ch + 1;
+    var hasH = scrollW > cw + 1;
+
+    if (hasV) {
+      var barH = ch - (hasH ? 12 : 0);
+      var thumbH = Math.max(40, (ch / scrollH) * barH);
+      var maxST = scrollH - ch;
+      var thumbT = maxST > 0 ? (innerEl.scrollTop / maxST) * (barH - thumbH) : 0;
+      IV.bar.style.top     = rect.top + 'px';
+      IV.bar.style.height  = barH + 'px';
+      IV.bar.style.left    = (rect.right - 12) + 'px';
+      IV.bar.style.display = 'block';
+      IV.thumb.style.height = thumbH + 'px';
+      IV.thumb.style.top    = Math.round(thumbT) + 'px';
+    } else {
+      IV.bar.style.display = 'none';
+    }
+
+    if (hasH) {
+      var barW = cw - (hasV ? 12 : 0);
+      var thumbW = Math.max(40, (cw / scrollW) * barW);
+      var maxSL = scrollW - cw;
+      var thumbL = maxSL > 0 ? (innerEl.scrollLeft / maxSL) * (barW - thumbW) : 0;
+      IH.bar.style.left    = rect.left + 'px';
+      IH.bar.style.width   = barW + 'px';
+      IH.bar.style.top     = (rect.bottom - 12) + 'px';
+      IH.bar.style.display = 'block';
+      IH.thumb.style.width = thumbW + 'px';
+      IH.thumb.style.left  = Math.round(thumbL) + 'px';
+    } else {
+      IH.bar.style.display = 'none';
+    }
+  }
+
+  function activateInnerEl(el) {
+    if (el._kioskSbBound) return;
+    el._kioskSbBound = true;
+    el.addEventListener('scroll', function() {
+      if (innerEl === el) updateInner();
+    }, { passive: true });
+  }
+
+  function showInner(el) {
+    clearTimeout(innerHideTimer);
+    innerEl = el;
+    updateInner();
+    innerHideTimer = setTimeout(function() {
+      innerEl = null;
+      IV.bar.style.display = 'none';
+      IH.bar.style.display = 'none';
+    }, 1500);
+  }
+
+  // ---- IV drag ----
+  var ivActive = false, ivStartY = 0, ivStartST = 0;
+  IV.thumb.addEventListener('pointerdown', function(e) {
+    e.preventDefault(); e.stopPropagation();
+    IV.thumb.setPointerCapture(e.pointerId);
+    ivActive = true; ivStartY = e.clientY; ivStartST = innerEl ? innerEl.scrollTop : 0;
+  });
+  IV.thumb.addEventListener('pointermove', function(e) {
+    if (!ivActive || !innerEl) return;
+    var ch = innerEl.clientHeight;
+    var hasH = innerEl.scrollWidth > innerEl.clientWidth + 1;
+    var barH = ch - (hasH ? 12 : 0);
+    var thumbH = Math.max(40, (ch / innerEl.scrollHeight) * barH);
+    var ratio = (innerEl.scrollHeight - ch) / Math.max(1, barH - thumbH);
+    innerEl.scrollTop = ivStartST + (e.clientY - ivStartY) * ratio;
+    updateInner();
+  });
+  IV.thumb.addEventListener('pointerup',     function() { ivActive = false; });
+  IV.thumb.addEventListener('pointercancel', function() { ivActive = false; });
+  IV.thumb.addEventListener('click',         function(e) { e.stopPropagation(); });
+  IV.bar.addEventListener('click', function(e) {
+    if (!innerEl || e.composedPath()[0] === IV.thumb) return;
+    var rect = IV.bar.getBoundingClientRect();
+    innerEl.scrollTop =
+      ((e.clientY - rect.top) / rect.height) * (innerEl.scrollHeight - innerEl.clientHeight);
+    updateInner();
+  });
+
+  // ---- IH drag ----
+  var ihActive = false, ihStartX = 0, ihStartSL = 0;
+  IH.thumb.addEventListener('pointerdown', function(e) {
+    e.preventDefault(); e.stopPropagation();
+    IH.thumb.setPointerCapture(e.pointerId);
+    ihActive = true; ihStartX = e.clientX; ihStartSL = innerEl ? innerEl.scrollLeft : 0;
+  });
+  IH.thumb.addEventListener('pointermove', function(e) {
+    if (!ihActive || !innerEl) return;
+    var cw = innerEl.clientWidth;
+    var hasV = innerEl.scrollHeight > innerEl.clientHeight + 1;
+    var barW = cw - (hasV ? 12 : 0);
+    var thumbW = Math.max(40, (cw / innerEl.scrollWidth) * barW);
+    var ratio = (innerEl.scrollWidth - cw) / Math.max(1, barW - thumbW);
+    innerEl.scrollLeft = ihStartSL + (e.clientX - ihStartX) * ratio;
+    updateInner();
+  });
+  IH.thumb.addEventListener('pointerup',     function() { ihActive = false; });
+  IH.thumb.addEventListener('pointercancel', function() { ihActive = false; });
+  IH.thumb.addEventListener('click',         function(e) { e.stopPropagation(); });
+  IH.bar.addEventListener('click', function(e) {
+    if (!innerEl || e.composedPath()[0] === IH.thumb) return;
+    var rect = IH.bar.getBoundingClientRect();
+    innerEl.scrollLeft =
+      ((e.clientX - rect.left) / rect.width) * (innerEl.scrollWidth - innerEl.clientWidth);
+    updateInner();
+  });
+
+  // ---- Detect inner scrollable on pointer hover / wheel ----
+  var pmThrottle = false;
+  window.addEventListener('pointermove', function(e) {
+    if (pmThrottle || !e.target || e.target === host) return;
+    pmThrottle = true;
+    setTimeout(function() { pmThrottle = false; }, 50);
+    var el = findScrollable(e.target);
+    if (el) { activateInnerEl(el); showInner(el); }
+  }, { passive: true, capture: true });
+
+  window.addEventListener('wheel', function(e) {
+    if (!e.target || e.target === host) return;
+    var el = findScrollable(e.target);
+    if (el) { activateInnerEl(el); showInner(el); }
+  }, { passive: true, capture: true });
+
+  window.addEventListener('scroll', function() { updateMain(); },                              { passive: true });
+  window.addEventListener('resize', function() { updateMain(); if (innerEl) updateInner(); }, { passive: true });
+  window.addEventListener('load',   updateMain,                                                { passive: true });
+
+  updateMain();
 }
 
 window.addEventListener('DOMContentLoaded', createOverlayScrollbar, { once: true });
