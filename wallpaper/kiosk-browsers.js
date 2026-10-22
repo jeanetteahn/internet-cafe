@@ -343,6 +343,12 @@ const ignoreNextMoves  = new Map(); // key -> timeout-id | null
 const resizeState      = new Map(); // key -> { startBounds, cornerDx, cornerDy } | null
 const panelDragOffsets = new Map(); // key -> { dx, dy } | null
 
+// ---- Drag shield state -------------------------------------------------------
+const dragShields     = [];    // one BrowserWindow per display, created at startup
+let shieldDragType    = null;  // 'forkknife'|'clock'|'panel'|'resize'|'addressbar'|'carbon'
+let shieldDragKey     = null;  // panel key when shieldDragType is 'panel' or 'resize'
+let shieldSafetyTimer = null;
+
 // webContentsIdToKey is module-level (not scoped to attachActivityHandling)
 // so it is available to any future code that needs to route IPC by view id.
 const webContentsIdToKey = new Map();
@@ -406,13 +412,138 @@ function computeClusterLayout(screenW, screenH) {
   return result;
 }
 
+// ---- Drag shield helpers ----------------------------------------------------
+
+function isShieldSender(wc) {
+  return dragShields.some(w => !w.isDestroyed() && w.webContents === wc);
+}
+
+function createDragShields() {
+  if (dragShields.length > 0) return;
+  for (const display of screen.getAllDisplays()) {
+    const { x, y, width, height } = display.bounds;
+    const w = new BrowserWindow({
+      x, y, width, height,
+      frame:       false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      focusable:   false,
+      show:        false,
+      webPreferences: {
+        preload:          path.join(__dirname, 'kiosk-drag-shield-preload.js'),
+        contextIsolation: true,
+        nodeIntegration:  false,
+        sandbox:          true,
+      },
+    });
+    w.loadFile(path.join(__dirname, 'kiosk-drag-shield.html'));
+    w.webContents.on('dom-ready', () => {
+      w.webContents.insertCSS(PANEL_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
+    });
+    dragShields.push(w);
+  }
+}
+
+function showDragShield(type, key) {
+  shieldDragType = type;
+  shieldDragKey  = key || null;
+  clearTimeout(shieldSafetyTimer);
+  shieldSafetyTimer = setTimeout(hideDragShield, 2000);
+  for (const w of dragShields) {
+    if (!w.isDestroyed()) w.showInactive();
+  }
+}
+
+function hideDragShield() {
+  clearTimeout(shieldSafetyTimer);
+  shieldSafetyTimer = null;
+  shieldDragType = null;
+  shieldDragKey  = null;
+  for (const w of dragShields) {
+    if (!w.isDestroyed()) w.hide();
+  }
+}
+
+// Factored-out move logic — called by both the original source-window IPC
+// handler (pointer still inside the source window) and the shield IPC handler.
+function doForkknifeDragMove() {
+  if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
+  if (!forkKnifeDragOffset) return;
+  const cursor       = screen.getCursorScreenPoint();
+  const { workArea } = screen.getDisplayMatching(forkKnifeWindow.getBounds());
+  const MIN_VIS      = 20;
+  let nx = cursor.x - forkKnifeDragOffset.dx;
+  let ny = cursor.y - forkKnifeDragOffset.dy;
+  nx = Math.max(workArea.x - FK_GRAPHIC_W + MIN_VIS - FK_SHADOW_PAD,
+                Math.min(nx, workArea.x + workArea.width  - MIN_VIS - FK_SHADOW_PAD));
+  ny = Math.max(workArea.y - FK_SHADOW_PAD,
+                Math.min(ny, workArea.y + workArea.height - FK_GRAPHIC_H - FK_SHADOW_PAD));
+  forkKnifeWindow.setPosition(Math.round(nx), Math.round(ny));
+}
+
+function doClockDragMove() {
+  if (!clockWindow || clockWindow.isDestroyed()) return;
+  if (!clockDragOffset) return;
+  const cursor       = screen.getCursorScreenPoint();
+  const { workArea } = screen.getDisplayMatching(clockWindow.getBounds());
+  const MIN_VIS      = 20;
+  let nx = cursor.x - clockDragOffset.dx;
+  let ny = cursor.y - clockDragOffset.dy;
+  nx = Math.max(workArea.x - CLOCK_SIZE + MIN_VIS - CLOCK_SHADOW_PAD,
+                Math.min(nx, workArea.x + workArea.width  - MIN_VIS - CLOCK_SHADOW_PAD));
+  ny = Math.max(workArea.y - CLOCK_SHADOW_PAD,
+                Math.min(ny, workArea.y + workArea.height - CLOCK_SIZE - CLOCK_SHADOW_PAD));
+  clockWindow.setPosition(Math.round(nx), Math.round(ny));
+}
+
+function doPanelDragMove(key) {
+  const win = panelWindows.get(key);
+  if (!win || win.isDestroyed()) return;
+  const offset = panelDragOffsets.get(key);
+  if (!offset) return;
+  const cursor = screen.getCursorScreenPoint();
+  win.setPosition(Math.round(cursor.x - offset.dx), Math.round(cursor.y - offset.dy));
+}
+
+function doAddressBarDragMove() {
+  if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
+  if (!addressBarDragOffset) return;
+  const cursor       = screen.getCursorScreenPoint();
+  const { workArea } = screen.getDisplayMatching(addressBarWindow.getBounds());
+  const MIN_VIS      = 20;
+  let nx = cursor.x - addressBarDragOffset.dx;
+  let ny = cursor.y - addressBarDragOffset.dy;
+  nx = Math.max(workArea.x - AB_WIN_W + MIN_VIS, Math.min(nx, workArea.x + workArea.width  - MIN_VIS));
+  ny = Math.max(workArea.y, Math.min(ny, workArea.y + workArea.height - AB_WIN_H));
+  addressBarWindow.setPosition(Math.round(nx), Math.round(ny));
+}
+
+function doCarbonDragMove() {
+  if (!carbonWindow || carbonWindow.isDestroyed()) return;
+  if (!carbonDragOffset) return;
+  const cursor       = screen.getCursorScreenPoint();
+  const { workArea } = screen.getDisplayMatching(carbonWindow.getBounds());
+  const MIN_VIS      = 20;
+  let nx = cursor.x - carbonDragOffset.dx;
+  let ny = cursor.y - carbonDragOffset.dy;
+  nx = Math.max(workArea.x - CARBON_SIZE + MIN_VIS - CARBON_SHADOW_PAD,
+                Math.min(nx, workArea.x + workArea.width  - MIN_VIS - CARBON_SHADOW_PAD));
+  ny = Math.max(workArea.y - CARBON_SHADOW_PAD,
+                Math.min(ny, workArea.y + workArea.height - CARBON_SIZE - CARBON_SHADOW_PAD));
+  carbonWindow.setPosition(Math.round(nx), Math.round(ny));
+}
+
+// ---- Panel view factory ------------------------------------------------------
+
 function makePanelView() {
   const view = new BrowserView({
     webPreferences: {
-      preload: path.join(__dirname, 'kiosk-preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
+      preload:                    path.join(__dirname, 'kiosk-preload.js'),
+      contextIsolation:           true,
+      nodeIntegration:            false,
+      sandbox:                    true,
+      nodeIntegrationInSubFrames: true,
     },
   });
   // Electron 30+ BrowserView defaults to transparent; without this, pages
@@ -1239,7 +1370,23 @@ function setupViewEventHandlers(key, win, view) {
 
   view.webContents.on('dom-ready', () => {
     if (panelViews[key] !== view) return;
-    view.webContents.insertCSS(PANEL_CURSOR_CSS).catch(() => {});
+    view.webContents.insertCSS(PANEL_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
+  });
+
+  // Inject cursor CSS into cross-origin subframes (iframes) via executeJavaScript.
+  // Author-origin with !important; belt-and-suspenders alongside the preload's
+  // user-origin injection that runs when nodeIntegrationInSubFrames is true.
+  view.webContents.on('frame-created', (_e, { frame }) => {
+    if (panelViews[key] !== view) return;
+    if (!frame.parent) return;
+    setTimeout(() => {
+      if (frame.isDestroyed()) return;
+      frame.executeJavaScript(
+        '(function(){try{var s=document.createElement("style");s.textContent=' +
+        JSON.stringify(_spoonRule) +
+        ';(document.head||document.documentElement).appendChild(s);}catch(_){}})();'
+      ).catch(() => {});
+    }, 100);
   });
 
   view.webContents.on('render-process-gone', (_e, details) => {
@@ -1763,7 +1910,7 @@ function createForkKnifeWindow(workArea) {
   });
   forkKnifeWindow.loadFile(path.join(__dirname, 'kiosk-forkknife.html'));
   forkKnifeWindow.webContents.on('dom-ready', () => {
-    forkKnifeWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS).catch(() => {});
+    forkKnifeWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
   });
   forkKnifeWindow.webContents.once('did-finish-load', () => {
     if (USE_WINDOW_SHAPE && process.platform === 'linux') {
@@ -1850,7 +1997,7 @@ function createClockWindow(workArea) {
 
   clockWindow.loadFile(path.join(__dirname, 'kiosk-clock.html'));
   clockWindow.webContents.on('dom-ready', () => {
-    clockWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS).catch(() => {});
+    clockWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
   });
   clockWindow.webContents.once('did-finish-load', () => {
     if (USE_WINDOW_SHAPE && process.platform === 'linux') {
@@ -1926,7 +2073,7 @@ function createAddressBarWindow(workArea) {
   addressBarWindow.loadFile(path.join(__dirname, 'kiosk-addressbar.html'));
 
   addressBarWindow.webContents.on('dom-ready', () => {
-    addressBarWindow.webContents.insertCSS(ADDRESSBAR_CURSOR_CSS).catch(() => {});
+    addressBarWindow.webContents.insertCSS(ADDRESSBAR_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
   });
 
   addressBarWindow.webContents.once('did-finish-load', () => {
@@ -2070,7 +2217,7 @@ function createCarbonWindow(workArea) {
 
   carbonWindow.loadFile(path.join(__dirname, 'kiosk-carbon.html'));
   carbonWindow.webContents.on('dom-ready', () => {
-    carbonWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS).catch(() => {});
+    carbonWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
   });
   carbonWindow.webContents.once('did-finish-load', () => {
     if (USE_WINDOW_SHAPE && process.platform === 'linux') {
@@ -2170,7 +2317,7 @@ function createKioskWindow() {
     win.setMinimumSize(minSize.width, minSize.height);
     win.loadFile(path.join(__dirname, 'kiosk-handle.html'));
     win.webContents.on('dom-ready', () => {
-      win.webContents.insertCSS(HANDLE_CURSOR_CSS).catch(() => {});
+      win.webContents.insertCSS(HANDLE_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
     });
     win.webContents.once('did-finish-load', () => {
       win.webContents.send('panel-hardware', { key, margin: M });
@@ -2215,7 +2362,7 @@ function createKioskWindow() {
     win.addBrowserView(grip);
     grip.webContents.loadFile(path.join(__dirname, 'kiosk-resize-grip.html'));
     grip.webContents.on('dom-ready', () => {
-      grip.webContents.insertCSS(GRIP_CURSOR_CSS).catch(() => {});
+      grip.webContents.insertCSS(GRIP_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
     });
     gripViews[key] = grip;
     positionGrip(key);
@@ -2341,6 +2488,43 @@ function attachActivityHandling() {
     webContentsIdToKey.set(grip.webContents.id, key);
   }
 
+  createDragShields();
+
+  // Preload requests this to inject the spoon rule at user origin in every frame.
+  ipcMain.handle('get-cursor-css', () => PANEL_CURSOR_CSS);
+
+  // Shield window sends shield-move-tick on every pointermove.
+  // Resets the 2 s safety timer and drives the active drag/resize.
+  ipcMain.on('shield-move-tick', (event) => {
+    if (!isShieldSender(event.sender)) return;
+    clearTimeout(shieldSafetyTimer);
+    shieldSafetyTimer = setTimeout(hideDragShield, 2000);
+    switch (shieldDragType) {
+      case 'forkknife':  doForkknifeDragMove(); break;
+      case 'clock':      doClockDragMove(); break;
+      case 'panel':      if (shieldDragKey) doPanelDragMove(shieldDragKey); break;
+      case 'resize':     if (shieldDragKey) updateResize(shieldDragKey); break;
+      case 'addressbar': doAddressBarDragMove(); break;
+      case 'carbon':     doCarbonDragMove(); break;
+    }
+  });
+
+  // Shield window sends shield-done on pointerup/pointercancel.
+  ipcMain.on('shield-done', (event) => {
+    if (!isShieldSender(event.sender)) return;
+    switch (shieldDragType) {
+      case 'forkknife':  forkKnifeDragOffset = null; break;
+      case 'clock':      clockDragOffset = null; break;
+      case 'panel':
+        if (shieldDragKey) { panelDragOffsets.set(shieldDragKey, null); clampToDisplay(shieldDragKey); }
+        break;
+      case 'resize':     if (shieldDragKey) endResize(shieldDragKey); break;
+      case 'addressbar': addressBarDragOffset = null; break;
+      case 'carbon':     carbonDragOffset = null; break;
+    }
+    hideDragShield();
+  });
+
   ipcMain.on('panel-activity', (event, eventType) => {
     const key = webContentsIdToKey.get(event.sender.id);
     if (!key) return;
@@ -2379,28 +2563,20 @@ function attachActivityHandling() {
     const cursor = screen.getCursorScreenPoint();
     const pos    = forkKnifeWindow.getPosition();
     forkKnifeDragOffset = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
+    showDragShield('forkknife');
   });
 
   ipcMain.on('forkknife-drag-move', (event) => {
     if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
     if (event.sender !== forkKnifeWindow.webContents) return;
-    if (!forkKnifeDragOffset) return;
-    const cursor       = screen.getCursorScreenPoint();
-    const { workArea } = screen.getDisplayMatching(forkKnifeWindow.getBounds());
-    const MIN_VIS      = 20;
-    let nx = cursor.x - forkKnifeDragOffset.dx;
-    let ny = cursor.y - forkKnifeDragOffset.dy;
-    nx = Math.max(workArea.x - FK_GRAPHIC_W + MIN_VIS - FK_SHADOW_PAD,
-                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS - FK_SHADOW_PAD));
-    ny = Math.max(workArea.y - FK_SHADOW_PAD,
-                  Math.min(ny, workArea.y + workArea.height - FK_GRAPHIC_H - FK_SHADOW_PAD));
-    forkKnifeWindow.setPosition(Math.round(nx), Math.round(ny));
+    doForkknifeDragMove();
   });
 
   ipcMain.on('forkknife-drag-end', (event) => {
     if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
     if (event.sender !== forkKnifeWindow.webContents) return;
     forkKnifeDragOffset = null;
+    hideDragShield();
   });
 
   ipcMain.on('forkknife-drag-reset', (event) => {
@@ -2417,28 +2593,20 @@ function attachActivityHandling() {
     const cursor = screen.getCursorScreenPoint();
     const pos    = clockWindow.getPosition();
     clockDragOffset = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
+    showDragShield('clock');
   });
 
   ipcMain.on('clock-drag-move', (event) => {
     if (!clockWindow || clockWindow.isDestroyed()) return;
     if (event.sender !== clockWindow.webContents) return;
-    if (!clockDragOffset) return;
-    const cursor       = screen.getCursorScreenPoint();
-    const { workArea } = screen.getDisplayMatching(clockWindow.getBounds());
-    const MIN_VIS      = 20;
-    let nx = cursor.x - clockDragOffset.dx;
-    let ny = cursor.y - clockDragOffset.dy;
-    nx = Math.max(workArea.x - CLOCK_SIZE + MIN_VIS - CLOCK_SHADOW_PAD,
-                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS - CLOCK_SHADOW_PAD));
-    ny = Math.max(workArea.y - CLOCK_SHADOW_PAD,
-                  Math.min(ny, workArea.y + workArea.height - CLOCK_SIZE - CLOCK_SHADOW_PAD));
-    clockWindow.setPosition(Math.round(nx), Math.round(ny));
+    doClockDragMove();
   });
 
   ipcMain.on('clock-drag-end', (event) => {
     if (!clockWindow || clockWindow.isDestroyed()) return;
     if (event.sender !== clockWindow.webContents) return;
     clockDragOffset = null;
+    hideDragShield();
   });
 
   ipcMain.on('clock-drag-reset', (event) => {
@@ -2464,17 +2632,13 @@ function attachActivityHandling() {
     const cursor = screen.getCursorScreenPoint();
     const pos    = win.getPosition();
     panelDragOffsets.set(key, { dx: cursor.x - pos[0], dy: cursor.y - pos[1] });
+    showDragShield('panel', key);
   });
 
   ipcMain.on('panel-drag-move', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
     if (!key) return;
-    const win = panelWindows.get(key);
-    if (!win || win.isDestroyed()) return;
-    const offset = panelDragOffsets.get(key);
-    if (!offset) return;
-    const cursor = screen.getCursorScreenPoint();
-    win.setPosition(Math.round(cursor.x - offset.dx), Math.round(cursor.y - offset.dy));
+    doPanelDragMove(key);
   });
 
   ipcMain.on('panel-drag-end', (event) => {
@@ -2482,11 +2646,14 @@ function attachActivityHandling() {
     if (!key) return;
     panelDragOffsets.set(key, null);
     clampToDisplay(key);
+    hideDragShield();
   });
 
   ipcMain.on('panel-resize-start', (event, offset) => {
     const key = webContentsIdToKey.get(event.sender.id);
-    if (key) startResize(key, offset);
+    if (!key) return;
+    startResize(key, offset);
+    showDragShield('resize', key);
   });
 
   ipcMain.on('panel-resize-move', (event) => {
@@ -2496,7 +2663,9 @@ function attachActivityHandling() {
 
   ipcMain.on('panel-resize-end', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
-    if (key) endResize(key);
+    if (!key) return;
+    endResize(key);
+    hideDragShield();
   });
 
   ipcMain.on('addressbar-navigate', (event, raw) => {
@@ -2555,26 +2724,20 @@ function attachActivityHandling() {
     const pos    = addressBarWindow.getPosition();
     addressBarDragOffset = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
     addressBarDocked = false;
+    showDragShield('addressbar');
   });
 
   ipcMain.on('addressbar-drag-move', (event) => {
     if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
     if (event.sender !== addressBarWindow.webContents) return;
-    if (!addressBarDragOffset) return;
-    const cursor       = screen.getCursorScreenPoint();
-    const { workArea } = screen.getDisplayMatching(addressBarWindow.getBounds());
-    const MIN_VIS      = 20;
-    let nx = cursor.x - addressBarDragOffset.dx;
-    let ny = cursor.y - addressBarDragOffset.dy;
-    nx = Math.max(workArea.x - AB_WIN_W + MIN_VIS, Math.min(nx, workArea.x + workArea.width  - MIN_VIS));
-    ny = Math.max(workArea.y, Math.min(ny, workArea.y + workArea.height - AB_WIN_H));
-    addressBarWindow.setPosition(Math.round(nx), Math.round(ny));
+    doAddressBarDragMove();
   });
 
   ipcMain.on('addressbar-drag-end', (event) => {
     if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
     if (event.sender !== addressBarWindow.webContents) return;
     addressBarDragOffset = null;
+    hideDragShield();
   });
 
   ipcMain.on('addressbar-dock', (event) => {
@@ -2624,28 +2787,20 @@ function attachActivityHandling() {
     carbonDragOffset  = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
     carbonUserPlaced  = true;
     if (carbonGlideTimer) { clearInterval(carbonGlideTimer); carbonGlideTimer = null; }
+    showDragShield('carbon');
   });
 
   ipcMain.on('carbon-drag-move', (event) => {
     if (!carbonWindow || carbonWindow.isDestroyed()) return;
     if (event.sender !== carbonWindow.webContents) return;
-    if (!carbonDragOffset) return;
-    const cursor       = screen.getCursorScreenPoint();
-    const { workArea } = screen.getDisplayMatching(carbonWindow.getBounds());
-    const MIN_VIS      = 20;
-    let nx = cursor.x - carbonDragOffset.dx;
-    let ny = cursor.y - carbonDragOffset.dy;
-    nx = Math.max(workArea.x - CARBON_SIZE + MIN_VIS - CARBON_SHADOW_PAD,
-                  Math.min(nx, workArea.x + workArea.width  - MIN_VIS - CARBON_SHADOW_PAD));
-    ny = Math.max(workArea.y - CARBON_SHADOW_PAD,
-                  Math.min(ny, workArea.y + workArea.height - CARBON_SIZE - CARBON_SHADOW_PAD));
-    carbonWindow.setPosition(Math.round(nx), Math.round(ny));
+    doCarbonDragMove();
   });
 
   ipcMain.on('carbon-drag-end', (event) => {
     if (!carbonWindow || carbonWindow.isDestroyed()) return;
     if (event.sender !== carbonWindow.webContents) return;
     carbonDragOffset = null;
+    hideDragShield();
   });
 
   ipcMain.on('carbon-drag-reset', (event) => {
@@ -2965,7 +3120,7 @@ function rebuildPanelWindow(key) {
   win.loadFile(path.join(__dirname, 'kiosk-handle.html'));
 
   win.webContents.on('dom-ready', () => {
-    win.webContents.insertCSS(HANDLE_CURSOR_CSS).catch(() => {});
+    win.webContents.insertCSS(HANDLE_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
   });
   win.webContents.once('did-finish-load', () => {
     win.webContents.send('panel-hardware', { key, margin: M });
@@ -3010,7 +3165,7 @@ function rebuildPanelWindow(key) {
   win.addBrowserView(grip);
   grip.webContents.loadFile(path.join(__dirname, 'kiosk-resize-grip.html'));
   grip.webContents.on('dom-ready', () => {
-    grip.webContents.insertCSS(GRIP_CURSOR_CSS).catch(() => {});
+    grip.webContents.insertCSS(GRIP_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
   });
   gripViews[key] = grip;
   webContentsIdToKey.set(grip.webContents.id, key);

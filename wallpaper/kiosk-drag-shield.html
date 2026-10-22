@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    #cap { position: fixed; inset: 0; }
+  </style>
+</head>
+<body>
+  <div id="cap"></div>
+  <script>
+    var cap = document.getElementById('cap');
+    // Capture on pointerdown in case a press occurs while shield is visible.
+    cap.addEventListener('pointerdown', function(e) {
+      try { cap.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    cap.addEventListener('pointermove', function() {
+      if (window.kioskShield) window.kioskShield.move();
+    });
+    cap.addEventListener('pointerup', function() {
+      if (window.kioskShield) window.kioskShield.up();
+    });
+    cap.addEventListener('pointercancel', function() {
+      if (window.kioskShield) window.kioskShield.up();
+    });
+  </script>
+</body>
+</html>
