@@ -788,6 +788,7 @@ function resetPanelLayout(key) {
   if (ps) ps.manualLayout = false;
   if (key === 'hub') addressBarDocked = true;
   sendPanelHome(key);
+  restackAll();
 }
 
 // ---- Forkknife nav helpers --------------------------------------------------
@@ -850,6 +851,18 @@ function restackOverlays() {
   if (forkKnifeWindow  && !forkKnifeWindow.isDestroyed())  forkKnifeWindow.moveTop();
 }
 
+// Enforce the full stacking order: corner panels < hub < overlays.
+// Uses moveTop() only — never focus() or show() — to avoid stealing focus.
+function restackAll() {
+  for (const key of ['topLeft', 'topRight', 'bottomLeft', 'bottomRight']) {
+    const win = panelWindows.get(key);
+    if (win && !win.isDestroyed()) win.moveTop();
+  }
+  const hubWin = panelWindows.get('hub');
+  if (hubWin && !hubWin.isDestroyed()) hubWin.moveTop();
+  restackOverlays();
+}
+
 // ---- Activity ---------------------------------------------------------------
 
 // eventType is the DOM event type from kiosk-preload.js ('mousedown', 'click',
@@ -901,6 +914,7 @@ function notePanelActivity(key, eventType) {
     }
     // Carbon follows whichever panel is now active (or hub if all idle).
     updateCarbonFollow(getActiveKey());
+    restackAll();
   }, INACTIVITY_TIMEOUT_MS);
 
   // Only deliberate events enlarge the panel.
@@ -2746,24 +2760,32 @@ function startHealthCheck() {
       () => updateCarbonFollow(getActiveKey())
     );
 
-    // Re-assert alwaysOnTop on all overlays and panel windows.
+    // Re-assert alwaysOnTop. Overlays first, then panels in corners-before-hub
+    // order so hub is the last one touched and sits highest among alwaysOnTop peers.
     for (const w of [clockWindow, forkKnifeWindow, addressBarWindow, carbonWindow]) {
       if (w && !w.isDestroyed()) {
         try { w.setAlwaysOnTop(true); } catch (_) {}
       }
     }
-    for (const [, win] of panelWindows) {
+    for (const key of ['topLeft', 'topRight', 'bottomLeft', 'bottomRight', 'hub']) {
+      const win = panelWindows.get(key);
       if (win && !win.isDestroyed()) {
         try { win.setAlwaysOnTop(true); } catch (_) {}
       }
     }
 
-    restackOverlays();
+    restackAll();
 
     if (repairs > 0) {
       kioskLog(`health: repaired ${repairs} window(s)`);
     }
   }, 30_000);
+
+  // Safety net: re-enforce hub-above-corners while nobody is using the kiosk.
+  setInterval(() => {
+    const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
+    if (allAuto) restackAll();
+  }, 5_000);
 }
 
 // Every 30 min: clear the browser cache to prevent unbounded memory growth.
@@ -2832,6 +2854,7 @@ function recyclePanelView(key) {
   }
 
   startBrowsingLoop(key);
+  restackAll();
   kioskLog(`recycled panel view for ${key}`);
 
   // Log process count after a short delay to confirm the old renderer is gone.
@@ -3021,6 +3044,7 @@ function rebuildPanelWindow(key) {
     startBrowsingLoop(key);
   }
 
+  restackAll();
   kioskLog(`health: rebuilt panel window ${key}`);
 }
 
