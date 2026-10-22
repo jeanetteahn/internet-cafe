@@ -16,18 +16,20 @@ QUIT_FLAG="$PID_DIR/quit-requested"
 LAUNCHER_PID_FILE="$PID_DIR/launcher.pid"
 mkdir -p "$PID_DIR"
 
-# If a previous session left the cursor stuck on "spoon" (e.g. crashed before
-# restoring), reset it now so the desktop cursor looks normal during the gap.
+# One-time cleanup: if a previous session (old code) left the cursor stuck on
+# "spoon" in either the Cinnamon or GNOME schema, restore it now.
 _CURSOR_STATE_FILE="$PID_DIR/cursor-theme-state"
 if command -v gsettings >/dev/null 2>&1; then
-  _CURRENT_CURSOR=$(gsettings get org.gnome.desktop.interface cursor-theme 2>/dev/null | tr -d "'")
-  if [ "$_CURRENT_CURSOR" = "spoon" ]; then
-    _SAVED_CURSOR=""
-    [ -f "$_CURSOR_STATE_FILE" ] && _SAVED_CURSOR=$(cat "$_CURSOR_STATE_FILE" 2>/dev/null | tr -d "'")
-    _RESTORE_CURSOR="${_SAVED_CURSOR:-Adwaita}"
-    gsettings set org.gnome.desktop.interface cursor-theme "$_RESTORE_CURSOR" 2>/dev/null || true
-    rm -f "$_CURSOR_STATE_FILE"
-  fi
+  _SAVED_CURSOR=""
+  [ -f "$_CURSOR_STATE_FILE" ] && _SAVED_CURSOR=$(cat "$_CURSOR_STATE_FILE" 2>/dev/null | tr -d "'" | tr -d '"')
+  [ -z "$_SAVED_CURSOR" ] && _SAVED_CURSOR="Adwaita"
+  for _SCHEMA in org.cinnamon.desktop.interface org.gnome.desktop.interface; do
+    _CURR=$(gsettings get "$_SCHEMA" cursor-theme 2>/dev/null | tr -d "'" | tr -d '"' || true)
+    if [ "$_CURR" = "spoon" ]; then
+      gsettings set "$_SCHEMA" cursor-theme "$_SAVED_CURSOR" 2>/dev/null || true
+    fi
+  done
+  rm -f "$_CURSOR_STATE_FILE"
 fi
 
 # Signal the supervisor loop(s) to stop before we kill the Electron processes.

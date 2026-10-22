@@ -253,14 +253,14 @@ const _spoonSvg = [
   `</svg>`,
 ].join('');
 const SPOON_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSvg).toString('base64');
-const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') ${_spoonHotX} ${_spoonHotY},default!important}input,textarea{cursor:text!important}`;
+// Single rule covers every state (grab, grabbing, resize, pointer, text).
+// Fallback is `default` so the host system cursor shows outside the app.
+const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') ${_spoonHotX} ${_spoonHotY},default!important}`;
 const PANEL_CURSOR_CSS      = _spoonRule;
-const HANDLE_CURSOR_CSS     = _spoonRule + '#strip{cursor:grab!important}';
-const GRIP_CURSOR_CSS       = _spoonRule + '.grip{cursor:nwse-resize!important}';
+const HANDLE_CURSOR_CSS     = _spoonRule;
+const GRIP_CURSOR_CSS       = _spoonRule;
 const FORKKNIFE_CURSOR_CSS  = _spoonRule;
-const ADDRESSBAR_CURSOR_CSS = _spoonRule +
-  '#drag-pad{cursor:grab!important}' +
-  '#bar.dragging,#bar.dragging *{cursor:grabbing!important}';
+const ADDRESSBAR_CURSOR_CSS = _spoonRule;
 
 // ---- Clock window ------------------------------------------------------------
 // SVG viewBox is 87.2×87.2; the window is square.
@@ -339,8 +339,9 @@ const panelStates     = new Map(); // key -> { mode, inactivityTimer, searchInde
                                    //          dwellTimer, scrollTimer, rotationStartTimer,
                                    //          autoPhase, recentResultUrls,
                                    //          highlightTimer, resultDwellTimer }
-const ignoreNextMoves = new Map(); // key -> timeout-id | null
-const resizeState     = new Map(); // key -> { startBounds, cornerDx, cornerDy } | null
+const ignoreNextMoves  = new Map(); // key -> timeout-id | null
+const resizeState      = new Map(); // key -> { startBounds, cornerDx, cornerDy } | null
+const panelDragOffsets = new Map(); // key -> { dx, dy } | null
 
 // webContentsIdToKey is module-level (not scoped to attachActivityHandling)
 // so it is available to any future code that needs to route IPC by view id.
@@ -2451,6 +2452,36 @@ function attachActivityHandling() {
   ipcMain.on('panel-reset-position', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
     if (key) resetPanelLayout(key);
+  });
+
+  // Pointer-event drag from the handle strip (replaces -webkit-app-region: drag).
+  ipcMain.on('panel-drag-start', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (!key) return;
+    const win = panelWindows.get(key);
+    if (!win || win.isDestroyed()) return;
+    cancelTween(key);
+    const cursor = screen.getCursorScreenPoint();
+    const pos    = win.getPosition();
+    panelDragOffsets.set(key, { dx: cursor.x - pos[0], dy: cursor.y - pos[1] });
+  });
+
+  ipcMain.on('panel-drag-move', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (!key) return;
+    const win = panelWindows.get(key);
+    if (!win || win.isDestroyed()) return;
+    const offset = panelDragOffsets.get(key);
+    if (!offset) return;
+    const cursor = screen.getCursorScreenPoint();
+    win.setPosition(Math.round(cursor.x - offset.dx), Math.round(cursor.y - offset.dy));
+  });
+
+  ipcMain.on('panel-drag-end', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (!key) return;
+    panelDragOffsets.set(key, null);
+    clampToDisplay(key);
   });
 
   ipcMain.on('panel-resize-start', (event, offset) => {

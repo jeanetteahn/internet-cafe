@@ -19,6 +19,11 @@ contextBridge.exposeInMainWorld('kioskHandle', {
     ipcRenderer.send('panel-reset-position');
   },
 
+  // Pointer-event drag — mirrors the clock/forkknife drag pattern.
+  dragStart: () => ipcRenderer.send('panel-drag-start'),
+  dragMove:  () => ipcRenderer.send('panel-drag-move'),
+  dragEnd:   () => ipcRenderer.send('panel-drag-end'),
+
   // Call fn({ key, margin }) once after the handle loads and again after
   // each window resize.  Use this to position the border and hinges.
   onHardware: (fn) => {

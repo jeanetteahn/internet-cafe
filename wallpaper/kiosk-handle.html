@@ -37,8 +37,6 @@
       align-items: center;
       padding: 0 8px 0 6px;
       gap: 6px;
-      -webkit-app-region: drag;
-      cursor: grab;
     }
 
     #strip.active {
@@ -53,7 +51,6 @@
       grid-template-rows: repeat(3, 5px);
       gap: 2px;
       opacity: 0.55;
-      -webkit-app-region: drag;
     }
 
     .grip-dot {
@@ -71,7 +68,6 @@
       color: #999;
       font-size: 11px;
       letter-spacing: 0.01em;
-      -webkit-app-region: drag;
     }
 
     .btn {
@@ -85,7 +81,6 @@
       font-size: 11px;
       line-height: 1.4;
       cursor: pointer;
-      -webkit-app-region: no-drag;
       transition: border-color 0.12s, color 0.12s, opacity 0.12s;
       display: flex;
       align-items: center;
@@ -369,6 +364,60 @@
         window.kioskHandle.resetPosition();
       });
     }
+
+    // ---- Handle strip drag ----
+    // Pointer-event dragging keeps the cursor inside Electron so the
+    // OS/WM never takes control and shows a system cursor during the drag.
+    var strip      = document.getElementById('strip');
+    var isDragging = false;
+    var capturedId = null;
+    var dragStartX = 0;
+    var dragStartY = 0;
+    var DRAG_THRESHOLD = 5;
+
+    strip.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest('.btn')) return;
+      e.preventDefault();
+      strip.setPointerCapture(e.pointerId);
+      capturedId = e.pointerId;
+      isDragging = false;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+    });
+
+    strip.addEventListener('pointermove', function (e) {
+      if (capturedId === null) return;
+      var dx = e.clientX - dragStartX;
+      var dy = e.clientY - dragStartY;
+      if (!isDragging && Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
+        isDragging = true;
+        if (window.kioskHandle) {
+          window.kioskHandle.dragStart();
+          window.kioskHandle.dragMove();
+        }
+      } else if (isDragging) {
+        if (window.kioskHandle) window.kioskHandle.dragMove();
+      }
+    });
+
+    strip.addEventListener('pointerup', function (e) {
+      if (capturedId === null) return;
+      try { strip.releasePointerCapture(capturedId); } catch (_) {}
+      capturedId = null;
+      if (isDragging) {
+        isDragging = false;
+        if (window.kioskHandle) window.kioskHandle.dragEnd();
+      }
+    });
+
+    strip.addEventListener('pointercancel', function () {
+      capturedId = null;
+      if (isDragging) {
+        isDragging = false;
+        if (window.kioskHandle) window.kioskHandle.dragEnd();
+      }
+    });
   </script>
 </body>
 </html>

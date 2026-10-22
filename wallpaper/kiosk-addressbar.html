@@ -55,7 +55,6 @@
     #drag-pad {
       flex-shrink: 0;
       width: 29px;
-      cursor: grab;
     }
 
     #url {
@@ -69,14 +68,11 @@
       color: #ea4b00;
       padding: 0;
       margin: 0;
-      cursor: text;
       /* Resting state: truncate long URLs with an ellipsis.
          When focused, Chromium ignores this and scrolls normally. */
       text-overflow: ellipsis;
     }
 
-    /* Grabbing cursor during drag — beats the injected spoon rule. */
-    #bar.dragging, #bar.dragging * { cursor: grabbing !important; }
   </style>
 </head>
 <body>
