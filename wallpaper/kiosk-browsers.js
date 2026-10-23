@@ -368,9 +368,10 @@ let clockDragOffset = null; // { dx, dy } set at drag-start, cleared at drag-end
 let clockHomePos    = null; // home position, restored when all panels go idle
 let clockTimezone   = null; // IANA timezone from ip-api.com, null = use system time
 let clockTzTimer    = null; // setInterval id for hourly re-fetch
-let addressBarWindow     = null;     // floating address bar for the hub panel
+let addressBarWindow     = null;     // floating address bar for the active panel
 let addressBarDragOffset = null;     // { dx, dy } set at drag-start, cleared at drag-end
-let addressBarDocked     = true;     // true = follows hub; false = free-floating
+let addressBarDocked     = true;     // true = follows target; false = free-floating
+let addressBarKey        = 'hub';    // which panel the address bar currently tracks
 let addressBarLiveUrl    = '';       // current URL shown in the bar
 let addressBarCurrentW   = AB_WIN_W; // current window width (AB_WIN_W when collapsed)
 let carbonWindow      = null;  // carbon indicator overlay window
@@ -683,7 +684,7 @@ function setPanelBoundsIgnored(key, bounds) {
   ignoreNextMoves.set(key, setTimeout(() => ignoreNextMoves.set(key, null), 400));
   const win = panelWindows.get(key);
   if (win && !win.isDestroyed()) win.setBounds(bounds);
-  if (key === 'hub') repositionAddressBarTo(bounds);
+  if (key === addressBarKey) repositionAddressBarTo(bounds);
 }
 
 function sendPanelHome(key) {
@@ -918,7 +919,7 @@ function resetPanelLayout(key) {
   if (enlargedKey === key) enlargedKey = null;
   const ps = panelStates.get(key);
   if (ps) ps.manualLayout = false;
-  if (key === 'hub') addressBarDocked = true;
+  if (key === addressBarKey) addressBarDocked = true;
   sendPanelHome(key);
   restackAll();
 }
@@ -963,9 +964,20 @@ function repositionAddressBarTo(hubBounds) {
 }
 
 function repositionAddressBar() {
-  const hubWin = panelWindows.get('hub');
-  if (!hubWin || hubWin.isDestroyed()) return;
-  repositionAddressBarTo(hubWin.getBounds());
+  const win = panelWindows.get(addressBarKey);
+  if (!win || win.isDestroyed()) return;
+  repositionAddressBarTo(win.getBounds());
+}
+
+function retargetAddressBar(key) {
+  if (key === addressBarKey) return;
+  addressBarKey = key;
+  repositionAddressBar();
+  const view = panelViews[key];
+  if (view && !view.webContents.isDestroyed()) {
+    const url = view.webContents.getURL();
+    if (url) pushAddressBarUrl(url);
+  }
 }
 
 function pushAddressBarUrl(url) {
@@ -1014,6 +1026,7 @@ function notePanelActivity(key, eventType) {
     sendModeToHandle(key, 'active');
     pushForkKnifeNavState();
     updateCarbonFollow(key);
+    retargetAddressBar(key);
   }
 
   clearTimeout(ps.inactivityTimer);
@@ -1022,7 +1035,7 @@ function notePanelActivity(key, eventType) {
     // resized during this active session, animate the shrink.  If they did
     // (manualLayout), use an instant snap so we don't override their layout
     // choice mid-animation, or skip entirely if RETURN_HOME_WHEN_IDLE is off.
-    if (key === 'hub') addressBarDocked = true;
+    if (key === addressBarKey) { addressBarDocked = true; repositionAddressBar(); }
     if (!ps.manualLayout) {
       shrinkPanelToHome(key);
     } else if (RETURN_HOME_WHEN_IDLE) {
@@ -1046,6 +1059,7 @@ function notePanelActivity(key, eventType) {
     }
     // Carbon follows whichever panel is now active (or hub if all idle).
     updateCarbonFollow(getActiveKey());
+    retargetAddressBar(getActiveKey());
     restackAll();
   }, INACTIVITY_TIMEOUT_MS);
 
@@ -1067,6 +1081,7 @@ function notePanelActivity(key, eventType) {
       enlargePanel(key);
     }
   }
+  if (isDeliberate) retargetAddressBar(key);
 }
 
 // ---- View event handler setup -----------------------------------------------
@@ -1244,13 +1259,13 @@ function setupViewEventHandlers(key, win, view) {
     }
 
     pushForkKnifeNavState();
-    if (key === 'hub') pushAddressBarUrl(url);
+    if (key === addressBarKey) pushAddressBarUrl(url);
   });
 
   view.webContents.on('did-navigate-in-page', () => {
     if (panelViews[key] !== view) return;
     pushForkKnifeNavState();
-    if (key === 'hub') pushAddressBarUrl(view.webContents.getURL());
+    if (key === addressBarKey) pushAddressBarUrl(view.webContents.getURL());
   });
 
   // Navigation guard -- applies to all page-initiated navigations (meta-refresh,
@@ -2047,6 +2062,7 @@ function createAddressBarWindow(workArea) {
   }
 
   addressBarDocked   = true;
+  addressBarKey      = 'hub';
   addressBarLiveUrl  = '';
   addressBarCurrentW = AB_WIN_W;
 
@@ -2080,9 +2096,9 @@ function createAddressBarWindow(workArea) {
     if (USE_WINDOW_SHAPE && process.platform === 'linux') {
       addressBarWindow.setShape([{ x: 0, y: 0, width: AB_WIN_W, height: AB_WIN_H }]);
     }
-    const hubView = panelViews['hub'];
-    if (hubView && !hubView.webContents.isDestroyed()) {
-      pushAddressBarUrl(hubView.webContents.getURL());
+    const targetView = panelViews[addressBarKey];
+    if (targetView && !targetView.webContents.isDestroyed()) {
+      pushAddressBarUrl(targetView.webContents.getURL());
     }
   });
 
@@ -2381,12 +2397,12 @@ function createKioskWindow() {
       positionGrip(key);
       updateWindowShape(key);
       if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
-      if (key === 'hub') repositionAddressBar();
+      if (key === addressBarKey) repositionAddressBar();
     });
 
     let moveDebounce = null;
     win.on('move', () => {
-      if (key === 'hub') repositionAddressBar();
+      if (key === addressBarKey) repositionAddressBar();
       if (ignoreNextMoves.get(key)) return;
       if (Date.now() - windowsCreatedAt < 5_000) {
         console.log(`[kiosk-auto] ${key} startup move ignored`);
@@ -2683,38 +2699,38 @@ function attachActivityHandling() {
       } catch {}
     }
     if (!isPassesPolicy(url)) { console.log(`[kiosk] addressbar blocked: ${url}`); return; }
-    const hubView = panelViews['hub'];
-    if (!hubView || hubView.webContents.isDestroyed()) return;
-    hubView.webContents.loadURL(url).catch(() => {});
-    notePanelActivity('hub', 'click');
-    const hubWin = panelWindows.get('hub');
-    if (hubWin && !hubWin.isDestroyed()) { hubWin.focus(); hubView.webContents.focus(); }
+    const targetView = panelViews[addressBarKey];
+    if (!targetView || targetView.webContents.isDestroyed()) return;
+    targetView.webContents.loadURL(url).catch(() => {});
+    notePanelActivity(addressBarKey, 'click');
+    const targetWin = panelWindows.get(addressBarKey);
+    if (targetWin && !targetWin.isDestroyed()) { targetWin.focus(); targetView.webContents.focus(); }
   });
 
   ipcMain.on('addressbar-focus', (event) => {
     if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
     if (event.sender !== addressBarWindow.webContents) return;
-    const ps = panelStates.get('hub');
+    const ps = panelStates.get(addressBarKey);
     if (ps) ps.lastTrustedInputAt = Date.now();
-    notePanelActivity('hub', 'click');
+    notePanelActivity(addressBarKey, 'click');
   });
 
   ipcMain.on('addressbar-keydown', (event) => {
     if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
     if (event.sender !== addressBarWindow.webContents) return;
-    const ps = panelStates.get('hub');
+    const ps = panelStates.get(addressBarKey);
     if (ps) ps.lastTrustedInputAt = Date.now();
-    notePanelActivity('hub', 'keydown');
+    notePanelActivity(addressBarKey, 'keydown');
   });
 
   ipcMain.on('addressbar-escape', (event) => {
     if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
     if (event.sender !== addressBarWindow.webContents) return;
     pushAddressBarUrl(addressBarLiveUrl);
-    const hubWin  = panelWindows.get('hub');
-    const hubView = panelViews['hub'];
-    if (hubWin  && !hubWin.isDestroyed())              hubWin.focus();
-    if (hubView && !hubView.webContents.isDestroyed()) hubView.webContents.focus();
+    const targetWin  = panelWindows.get(addressBarKey);
+    const targetView = panelViews[addressBarKey];
+    if (targetWin  && !targetWin.isDestroyed())              targetWin.focus();
+    if (targetView && !targetView.webContents.isDestroyed()) targetView.webContents.focus();
   });
 
   ipcMain.on('addressbar-drag-start', (event) => {
@@ -3186,12 +3202,12 @@ function rebuildPanelWindow(key) {
     positionGrip(key);
     updateWindowShape(key);
     if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
-    if (key === 'hub') repositionAddressBar();
+    if (key === addressBarKey) repositionAddressBar();
   });
 
   let moveDebounce = null;
   win.on('move', () => {
-    if (key === 'hub') repositionAddressBar();
+    if (key === addressBarKey) repositionAddressBar();
     if (ignoreNextMoves.get(key)) return;
     if (Date.now() - windowsCreatedAt < 5_000) {
       console.log(`[kiosk-auto] ${key} startup move ignored`);
@@ -3220,7 +3236,7 @@ function rebuildPanelWindow(key) {
     tweenTimers.delete(key);
   });
 
-  if (key === 'hub') repositionAddressBar();
+  if (key === addressBarKey) repositionAddressBar();
 
   // Resume the browsing loop on the new view.
   const ps = panelStates.get(key);
