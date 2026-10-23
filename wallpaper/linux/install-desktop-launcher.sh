@@ -18,30 +18,34 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DESKTOP_FILE_CONTENT="[Desktop Entry]
 Version=1.0
 Type=Application
-Name=Internet Cafe Wallpaper
+Name=The Internet
 Comment=(Re)start the video wallpaper + kiosk browser cluster
 Exec=/bin/bash \"$PROJECT_DIR/linux/relaunch.sh\"
-Icon=video-x-generic
+Icon=$PROJECT_DIR/assets/icon/the-internet.png
 Terminal=false
 Categories=Utility;
 "
 
 mkdir -p "$HOME/.local/share/applications"
-printf '%s' "$DESKTOP_FILE_CONTENT" > "$HOME/.local/share/applications/internet-cafe-wallpaper.desktop"
-chmod +x "$HOME/.local/share/applications/internet-cafe-wallpaper.desktop"
-echo "Installed to the app menu: internet-cafe-wallpaper.desktop"
+# Remove old launcher if present
+rm -f "$HOME/.local/share/applications/internet-cafe-wallpaper.desktop"
+printf '%s' "$DESKTOP_FILE_CONTENT" > "$HOME/.local/share/applications/the-internet.desktop"
+chmod +x "$HOME/.local/share/applications/the-internet.desktop"
+echo "Installed to the app menu: the-internet.desktop"
 
 if [ -d "$HOME/Desktop" ]; then
-  printf '%s' "$DESKTOP_FILE_CONTENT" > "$HOME/Desktop/internet-cafe-wallpaper.desktop"
-  chmod +x "$HOME/Desktop/internet-cafe-wallpaper.desktop"
+  # Remove old launcher if present
+  rm -f "$HOME/Desktop/internet-cafe-wallpaper.desktop"
+  printf '%s' "$DESKTOP_FILE_CONTENT" > "$HOME/Desktop/the-internet.desktop"
+  chmod +x "$HOME/Desktop/the-internet.desktop"
 
   # Nemo (like most modern file managers) treats a freshly-placed .desktop
   # file as untrusted until told otherwise, and won't run it on
   # double-click until you do. This marks it trusted automatically where
   # `gio` supports it; if double-clicking still does nothing, right-click
   # the icon once and choose "Allow Launching" — a one-time step.
-  gio set "$HOME/Desktop/internet-cafe-wallpaper.desktop" metadata::trusted true 2>/dev/null || true
+  gio set "$HOME/Desktop/the-internet.desktop" metadata::trusted true 2>/dev/null || true
 
-  echo "Installed a Desktop icon: ~/Desktop/internet-cafe-wallpaper.desktop"
+  echo "Installed a Desktop icon: ~/Desktop/the-internet.desktop"
   echo "(If double-clicking it does nothing at first, right-click it once and choose \"Allow Launching\".)"
 fi

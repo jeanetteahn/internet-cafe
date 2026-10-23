@@ -18,10 +18,11 @@
   },
   "build": {
     "appId": "com.example.weatherwallpaper",
-    "productName": "WeatherWallpaper",
+    "productName": "The Internet",
     "linux": {
       "target": ["AppImage"],
-      "category": "Utility"
+      "category": "Utility",
+      "icon": "assets/icon/the-internet.png"
     }
   }
 }
