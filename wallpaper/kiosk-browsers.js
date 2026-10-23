@@ -684,7 +684,7 @@ function setPanelBoundsIgnored(key, bounds) {
   ignoreNextMoves.set(key, setTimeout(() => ignoreNextMoves.set(key, null), 400));
   const win = panelWindows.get(key);
   if (win && !win.isDestroyed()) win.setBounds(bounds);
-  if (key === addressBarKey) repositionAddressBarTo(bounds);
+  if (key === 'hub') repositionAddressBarTo(bounds);
 }
 
 function sendPanelHome(key) {
@@ -919,7 +919,7 @@ function resetPanelLayout(key) {
   if (enlargedKey === key) enlargedKey = null;
   const ps = panelStates.get(key);
   if (ps) ps.manualLayout = false;
-  if (key === addressBarKey) addressBarDocked = true;
+  if (key === 'hub') addressBarDocked = true;
   sendPanelHome(key);
   restackAll();
 }
@@ -964,7 +964,7 @@ function repositionAddressBarTo(hubBounds) {
 }
 
 function repositionAddressBar() {
-  const win = panelWindows.get(addressBarKey);
+  const win = panelWindows.get('hub');
   if (!win || win.isDestroyed()) return;
   repositionAddressBarTo(win.getBounds());
 }
@@ -972,7 +972,6 @@ function repositionAddressBar() {
 function retargetAddressBar(key) {
   if (key === addressBarKey) return;
   addressBarKey = key;
-  repositionAddressBar();
   const view = panelViews[key];
   if (view && !view.webContents.isDestroyed()) {
     const url = view.webContents.getURL();
@@ -1035,7 +1034,6 @@ function notePanelActivity(key, eventType) {
     // resized during this active session, animate the shrink.  If they did
     // (manualLayout), use an instant snap so we don't override their layout
     // choice mid-animation, or skip entirely if RETURN_HOME_WHEN_IDLE is off.
-    if (key === addressBarKey) { addressBarDocked = true; repositionAddressBar(); }
     if (!ps.manualLayout) {
       shrinkPanelToHome(key);
     } else if (RETURN_HOME_WHEN_IDLE) {
@@ -1056,6 +1054,11 @@ function notePanelActivity(key, eventType) {
     if (clockWindow && !clockWindow.isDestroyed() && clockHomePos) {
       const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
       if (allAuto) clockWindow.setPosition(clockHomePos.x, clockHomePos.y);
+    }
+    // Address bar re-docks to hub when all panels are idle.
+    if (addressBarWindow && !addressBarWindow.isDestroyed()) {
+      const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
+      if (allAuto) { addressBarDocked = true; repositionAddressBar(); }
     }
     // Carbon follows whichever panel is now active (or hub if all idle).
     updateCarbonFollow(getActiveKey());
@@ -2397,12 +2400,12 @@ function createKioskWindow() {
       positionGrip(key);
       updateWindowShape(key);
       if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
-      if (key === addressBarKey) repositionAddressBar();
+      if (key === 'hub') repositionAddressBar();
     });
 
     let moveDebounce = null;
     win.on('move', () => {
-      if (key === addressBarKey) repositionAddressBar();
+      if (key === 'hub') repositionAddressBar();
       if (ignoreNextMoves.get(key)) return;
       if (Date.now() - windowsCreatedAt < 5_000) {
         console.log(`[kiosk-auto] ${key} startup move ignored`);
@@ -3202,12 +3205,12 @@ function rebuildPanelWindow(key) {
     positionGrip(key);
     updateWindowShape(key);
     if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
-    if (key === addressBarKey) repositionAddressBar();
+    if (key === 'hub') repositionAddressBar();
   });
 
   let moveDebounce = null;
   win.on('move', () => {
-    if (key === addressBarKey) repositionAddressBar();
+    if (key === 'hub') repositionAddressBar();
     if (ignoreNextMoves.get(key)) return;
     if (Date.now() - windowsCreatedAt < 5_000) {
       console.log(`[kiosk-auto] ${key} startup move ignored`);
@@ -3236,7 +3239,7 @@ function rebuildPanelWindow(key) {
     tweenTimers.delete(key);
   });
 
-  if (key === addressBarKey) repositionAddressBar();
+  if (key === 'hub') repositionAddressBar();
 
   // Resume the browsing loop on the new view.
   const ps = panelStates.get(key);
