@@ -376,8 +376,7 @@ let addressBarLiveUrl    = '';       // current URL shown in the bar
 let addressBarCurrentW   = AB_WIN_W; // current window width (AB_WIN_W when collapsed)
 let carbonWindow      = null;  // carbon indicator overlay window
 let carbonDragOffset  = null;  // { dx, dy } set at drag-start, cleared at drag-end
-let carbonUserPlaced  = false; // true once the user has manually dragged it
-let carbonGlideTimer  = null;  // setInterval id for glideCarbonTo tween
+let carbonDocked      = true;  // true = follows hub; false = free-floating after drag
 
 // Set in createKioskWindow; needed by health check and crash recovery to recreate
 // overlay windows without requiring the caller to pass workArea again.
@@ -685,6 +684,7 @@ function setPanelBoundsIgnored(key, bounds) {
   const win = panelWindows.get(key);
   if (win && !win.isDestroyed()) win.setBounds(bounds);
   if (key === 'hub') repositionAddressBarTo(bounds);
+  if (key === 'hub') repositionCarbonTo(bounds);
 }
 
 function sendPanelHome(key) {
@@ -920,6 +920,7 @@ function resetPanelLayout(key) {
   const ps = panelStates.get(key);
   if (ps) ps.manualLayout = false;
   if (key === 'hub') addressBarDocked = true;
+  if (key === 'hub') { carbonDocked = true; kioskLog('[kiosk-carbon] re-docked on hub reset'); repositionCarbon(); }
   sendPanelHome(key);
   restackAll();
 }
@@ -967,6 +968,21 @@ function repositionAddressBar() {
   const win = panelWindows.get('hub');
   if (!win || win.isDestroyed()) return;
   repositionAddressBarTo(win.getBounds());
+}
+
+function repositionCarbonTo(hubBounds) {
+  if (!carbonWindow || carbonWindow.isDestroyed()) return;
+  if (!carbonDocked) return;
+  carbonWindow.setPosition(
+    Math.round(hubBounds.x + CARBON_ANCHOR.x - CARBON_SHADOW_PAD),
+    Math.round(hubBounds.y + CARBON_ANCHOR.y - CARBON_SHADOW_PAD)
+  );
+}
+
+function repositionCarbon() {
+  const win = panelWindows.get('hub');
+  if (!win || win.isDestroyed()) return;
+  repositionCarbonTo(win.getBounds());
 }
 
 function retargetAddressBar(key) {
@@ -1024,7 +1040,7 @@ function notePanelActivity(key, eventType) {
     if (_v && !_v.webContents.isDestroyed()) _v.webContents.setAudioMuted(false);
     sendModeToHandle(key, 'active');
     pushForkKnifeNavState();
-    updateCarbonFollow(key);
+    pushCarbonState(key);
     retargetAddressBar(key);
   }
 
@@ -1060,8 +1076,13 @@ function notePanelActivity(key, eventType) {
       const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
       if (allAuto) { addressBarDocked = true; repositionAddressBar(); }
     }
-    // Carbon follows whichever panel is now active (or hub if all idle).
-    updateCarbonFollow(getActiveKey());
+    // Carbon re-docks to hub when all panels are idle.
+    if (carbonWindow && !carbonWindow.isDestroyed()) {
+      const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
+      if (allAuto) { carbonDocked = true; kioskLog('[kiosk-carbon] re-docked all panels idle'); repositionCarbon(); }
+    }
+    // Push carbon state for whichever panel is now active (or hub if all idle).
+    pushCarbonState(getActiveKey());
     retargetAddressBar(getActiveKey());
     restackAll();
   }, INACTIVITY_TIMEOUT_MS);
@@ -2150,53 +2171,6 @@ function pushCarbonState(key) {
   carbonWindow.webContents.send('carbon-state', { score, loading: !!ps.carbonLoading });
 }
 
-// Returns the screen position where the carbon window's top-left corner should
-// sit for a given panel key.  Subtracts CARBON_SHADOW_PAD so the circle face
-// lands at CARBON_ANCHOR from the panel's top-left corner (the window origin is
-// that many pixels further up/left to make room for the shadow).
-function computeCarbonAnchor(key) {
-  const win = panelWindows.get(key);
-  if (!win || win.isDestroyed()) return null;
-  const b = win.getBounds();
-  return {
-    x: Math.round(b.x + CARBON_ANCHOR.x - CARBON_SHADOW_PAD),
-    y: Math.round(b.y + CARBON_ANCHOR.y - CARBON_SHADOW_PAD),
-  };
-}
-
-// Smoothly move the carbon window to a target {x, y} position.
-function glideCarbonTo(pos) {
-  if (!carbonWindow || carbonWindow.isDestroyed() || !pos) return;
-  if (carbonGlideTimer) { clearInterval(carbonGlideTimer); carbonGlideTimer = null; }
-  const from = { x: carbonWindow.getPosition()[0], y: carbonWindow.getPosition()[1] };
-  if (from.x === pos.x && from.y === pos.y) return;
-  const GLIDE_MS    = 220;
-  const STEP_MS     = TWEEN_INTERVAL_MS;
-  const steps       = Math.max(1, Math.round(GLIDE_MS / STEP_MS));
-  let   step        = 0;
-  carbonGlideTimer  = setInterval(() => {
-    if (!carbonWindow || carbonWindow.isDestroyed()) {
-      clearInterval(carbonGlideTimer); carbonGlideTimer = null; return;
-    }
-    step++;
-    const t  = step / steps;
-    const f  = 1 - Math.pow(1 - t, 3); // ease-out cubic
-    const nx = Math.round(from.x + (pos.x - from.x) * f);
-    const ny = Math.round(from.y + (pos.y - from.y) * f);
-    carbonWindow.setPosition(nx, ny);
-    if (step >= steps) { clearInterval(carbonGlideTimer); carbonGlideTimer = null; }
-  }, STEP_MS);
-}
-
-// Move the carbon window to follow the given panel key, unless the user has
-// manually placed it.
-function updateCarbonFollow(key) {
-  if (carbonUserPlaced) return;
-  const pos = computeCarbonAnchor(key);
-  if (pos) glideCarbonTo(pos);
-  pushCarbonState(key);
-}
-
 // ---- Carbon window ------------------------------------------------------------
 
 function createCarbonWindow(workArea) {
@@ -2213,7 +2187,7 @@ function createCarbonWindow(workArea) {
     startY  = b.y + CARBON_ANCHOR.y - CARBON_SHADOW_PAD;
   }
 
-  carbonUserPlaced = false;
+  carbonDocked = true;
 
   carbonWindow = new BrowserWindow({
     x:           Math.round(startX),
@@ -2401,11 +2375,13 @@ function createKioskWindow() {
       updateWindowShape(key);
       if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
       if (key === 'hub') repositionAddressBar();
+      if (key === 'hub') repositionCarbon();
     });
 
     let moveDebounce = null;
     win.on('move', () => {
       if (key === 'hub') repositionAddressBar();
+      if (key === 'hub') repositionCarbon();
       if (ignoreNextMoves.get(key)) return;
       if (Date.now() - windowsCreatedAt < 5_000) {
         console.log(`[kiosk-auto] ${key} startup move ignored`);
@@ -2803,9 +2779,9 @@ function attachActivityHandling() {
     if (event.sender !== carbonWindow.webContents) return;
     const cursor = screen.getCursorScreenPoint();
     const pos    = carbonWindow.getPosition();
-    carbonDragOffset  = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
-    carbonUserPlaced  = true;
-    if (carbonGlideTimer) { clearInterval(carbonGlideTimer); carbonGlideTimer = null; }
+    carbonDragOffset = { dx: cursor.x - pos[0], dy: cursor.y - pos[1] };
+    carbonDocked = false;
+    kioskLog('[kiosk-carbon] undocked on drag-start');
     showDragShield('carbon');
   });
 
@@ -2825,8 +2801,9 @@ function attachActivityHandling() {
   ipcMain.on('carbon-drag-reset', (event) => {
     if (!carbonWindow || carbonWindow.isDestroyed()) return;
     if (event.sender !== carbonWindow.webContents) return;
-    carbonUserPlaced = false;
-    glideCarbonTo(computeCarbonAnchor(getActiveKey()));
+    carbonDocked = true;
+    kioskLog('[kiosk-carbon] re-docked on double-click');
+    repositionCarbon();
   });
 }
 
@@ -2962,7 +2939,7 @@ function startHealthCheck() {
     checkOverlay('carbon',
       () => carbonWindow,
       () => createCarbonWindow(_lastWorkArea),
-      () => updateCarbonFollow(getActiveKey())
+      () => { repositionCarbon(); pushCarbonState(getActiveKey()); }
     );
 
     // Re-assert alwaysOnTop. Overlays first, then panels in corners-before-hub
@@ -3206,11 +3183,13 @@ function rebuildPanelWindow(key) {
     updateWindowShape(key);
     if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
     if (key === 'hub') repositionAddressBar();
+    if (key === 'hub') repositionCarbon();
   });
 
   let moveDebounce = null;
   win.on('move', () => {
     if (key === 'hub') repositionAddressBar();
+    if (key === 'hub') repositionCarbon();
     if (ignoreNextMoves.get(key)) return;
     if (Date.now() - windowsCreatedAt < 5_000) {
       console.log(`[kiosk-auto] ${key} startup move ignored`);
@@ -3240,6 +3219,7 @@ function rebuildPanelWindow(key) {
   });
 
   if (key === 'hub') repositionAddressBar();
+  if (key === 'hub') repositionCarbon();
 
   // Resume the browsing loop on the new view.
   const ps = panelStates.get(key);
