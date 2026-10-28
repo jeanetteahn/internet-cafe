@@ -2,6 +2,7 @@ const { app, BrowserWindow, screen, globalShortcut, powerMonitor, powerSaveBlock
 const path = require('path');
 const { registerSelf, killOthers, requestQuit } = require('./process-pair');
 const { makeLogger } = require('./kiosk-log');
+const { useSystemSpoonCursor } = require('./spoon-theme');
 
 const { log: wallpaperLog, logFile: WALLPAPER_LOG_FILE } = makeLogger('wallpaper');
 
@@ -102,6 +103,15 @@ function createWallpaperWindows() {
     });
 
     win.loadFile('index.html');
+
+    // index.html carries the CSS spoon for Windows/macOS dev.  On Linux with
+    // the "spoon" X11 theme active, override it with the native `default`
+    // cursor (drawn by the theme) so the spoon is one size everywhere.
+    if (useSystemSpoonCursor()) {
+      win.webContents.on('dom-ready', () => {
+        win.webContents.insertCSS('*{cursor:default!important}', { cssOrigin: 'user' }).catch(() => {});
+      });
+    }
 
     win.webContents.on('render-process-gone', (_e, details) => {
       const msg = `render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;

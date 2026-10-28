@@ -114,6 +114,25 @@ const svg = [
 const b64  = Buffer.from(svg).toString('base64');
 const uri  = `data:image/svg+xml;base64,${b64}`;
 
+// ---- 32×32 fallback ------------------------------------------------------------
+// Chromium skips a >32 px cursor whenever the image would not fit inside the
+// viewport, so a small spoon follows the big one (same as kiosk-browsers.js).
+const SMALL     = 32, SMALL_PAD = 2, smallArt = SMALL - 2 * SMALL_PAD;
+const smallScale = smallArt / Math.max(spoonVbW, spoonVbH);
+const smallHotX  = Math.round(3.47 * smallScale) + SMALL_PAD;
+const smallHotY  = Math.round(0.50 * smallScale) + SMALL_PAD;
+const smallSvg = [
+  `<svg width="${SMALL}" height="${SMALL}" xmlns="http://www.w3.org/2000/svg">`,
+  `<defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">`,
+  `<feDropShadow dx="0" dy="1" stdDeviation="0.8" flood-color="#000" flood-opacity="0.42"/>`,
+  `</filter></defs>`,
+  `<svg x="${SMALL_PAD}" y="${SMALL_PAD}" width="${smallArt}" height="${smallArt}" viewBox="0 0 ${spoonVbW} ${spoonVbH}" filter="url(#s)">`,
+  body,
+  `</svg>`,
+  `</svg>`,
+].join('');
+const smallUri = `data:image/svg+xml;base64,${Buffer.from(smallSvg).toString('base64')}`;
+
 // ---- Output ------------------------------------------------------------------
 console.log(`fork rendered:  ${forkRendPx.toFixed(1)} px  (extent=${forkExtUnits.toFixed(2)} units × ${CLOCK_SIZE}/${fkVbW})`);
 console.log(`spoon diagonal: ${(spoonDiag * spoonScale).toFixed(1)} px  (${spoonDiag.toFixed(2)} units × ${spoonScale.toFixed(4)})`);
@@ -122,4 +141,4 @@ console.log(`outer size:     ${outerW}×${outerH} px  (pad L${padLeft}/T${padTop
 console.log(`hotspot:        (${hotX}, ${hotY})`);
 console.log('');
 console.log(`/* ${outerW}×${outerH} px (${artW}px art + shadow ${padLeft}/${padTop}/${padRight}/${padBot} L/T/R/B), hotspot (${hotX}, ${hotY}) */`);
-console.log(`cursor: url('${uri}') ${hotX} ${hotY}, auto;`);
+console.log(`cursor: url('${uri}') ${hotX} ${hotY}, url('${smallUri}') ${smallHotX} ${smallHotY}, auto;`);

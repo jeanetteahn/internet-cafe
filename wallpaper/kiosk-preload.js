@@ -327,7 +327,13 @@ function createOverlayScrollbar() {
     if (el) { activateInnerEl(el); showInner(el); }
   }, { passive: true, capture: true });
 
-  window.addEventListener('scroll', function() { updateMain(); },                              { passive: true });
+  // Scroll fires every frame during auto-scroll and wheel scrolling; reading
+  // scrollHeight each time forces layout, so coalesce to one update per frame.
+  var mainRaf = 0;
+  window.addEventListener('scroll', function() {
+    if (mainRaf) return;
+    mainRaf = requestAnimationFrame(function() { mainRaf = 0; updateMain(); });
+  }, { passive: true });
   window.addEventListener('resize', function() { updateMain(); if (innerEl) updateInner(); }, { passive: true });
   window.addEventListener('load',   updateMain,                                                { passive: true });
 
@@ -336,13 +342,102 @@ function createOverlayScrollbar() {
 
 window.addEventListener('DOMContentLoaded', createOverlayScrollbar, { once: true });
 
+// ---- Hinge overlap layer ----------------------------------------------------
+// The orange hinges are drawn by kiosk-handle.html, which sits UNDER this
+// BrowserView, so any part reaching past the border is hidden by the page.
+// This layer redraws the same hinges (same placements, shifted into page
+// coordinates) on top of the page; the page viewport clips everything
+// outside it, so the two layers join seamlessly.  pointer-events:none keeps
+// the page fully clickable underneath.
+function createHingeLayer() {
+  if (window.top !== window) return; // main frame only
+
+  var host = document.createElement('div');
+  host.id = '__kiosk_hinges';
+  host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;overflow:hidden;';
+  var shadow;
+  try { shadow = host.attachShadow({ mode: 'closed' }); } catch (e) { return; }
+
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  var pieces = [];
+
+  // The handle page's 1 px orange border sits exactly on the page's left,
+  // right and bottom edges, so the page hides it there — redraw those lines.
+  var edges = ['left:0;top:0;bottom:0;width:1px', 'right:0;top:0;bottom:0;width:1px',
+               'left:0;right:0;bottom:0;height:1px'].map(function (pos) {
+    var line = document.createElement('div');
+    line.style.cssText = 'position:absolute;display:none;' + pos;
+    shadow.appendChild(line);
+    return line;
+  });
+
+  function render(cfg) {
+    if (!cfg) return;
+    edges.forEach(function (line) {
+      line.style.display = 'block';
+      line.style.background = cfg.borderColor;
+    });
+    var list = cfg.hinges || [];
+    if (pieces.length !== list.length) {
+      pieces.forEach(function (p) { p.remove(); });
+      pieces = list.map(function (h) {
+        var el  = document.createElement('div');
+        var svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('viewBox', h.viewBox);
+        svg.style.cssText = 'display:block;width:100%;height:100%;overflow:visible;';
+        h.shapes.forEach(function (s) {
+          var shape = document.createElementNS(SVG_NS, s.tag);
+          Object.keys(s.attrs).forEach(function (k) { shape.setAttribute(k, s.attrs[k]); });
+          svg.appendChild(shape);
+        });
+        el.appendChild(svg);
+        shadow.appendChild(el);
+        return el;
+      });
+    }
+    list.forEach(function (h, i) {
+      pieces[i].style.cssText =
+        'position:absolute;margin:0;padding:0;' +
+        'left:'   + (h.left - cfg.offsetX) + 'px;' +
+        'top:'    + (h.top  - cfg.offsetY) + 'px;' +
+        'width:'  + h.w + 'px;height:' + h.h + 'px;' +
+        'transform:' + (h.transform || 'none') + ';';
+    });
+  }
+
+  function ensureHost() {
+    if (document.documentElement && !host.isConnected) document.documentElement.appendChild(host);
+  }
+
+  function mount() {
+    ensureHost();
+    new MutationObserver(ensureHost).observe(document.documentElement, { childList: true });
+    ipcRenderer.invoke('get-panel-hinges').then(render).catch(function () {});
+    ipcRenderer.on('panel-hinges', function (_e, cfg) { render(cfg); });
+  }
+
+  // Mount as early as possible so the overlap doesn't flicker on navigation.
+  if (document.documentElement) mount();
+  else window.addEventListener('DOMContentLoaded', mount, { once: true });
+}
+createHingeLayer();
+
 // ---- Panel activity IPC ----
 // Notifies the main process that a customer is actively using this panel.
 // event.isTrusted filters out programmatic events (executeJavaScript auto-scroll
 // etc.) so they never accidentally trigger panel-active mode.
+// Wheel fires dozens of times per second while scrolling; it only needs to
+// reset the idle timer, so send at most one wheel IPC per WHEEL_IPC_MS.
+const WHEEL_IPC_MS = 250;
+let lastWheelSent = 0;
 ['mousedown', 'keydown', 'click', 'wheel'].forEach((evt) => {
   window.addEventListener(evt, (event) => {
     if (!event.isTrusted) return;
+    if (event.type === 'wheel') {
+      const now = Date.now();
+      if (now - lastWheelSent < WHEEL_IPC_MS) return;
+      lastWheelSent = now;
+    }
     ipcRenderer.send('panel-activity', event.type);
-  }, true);
+  }, { capture: true, passive: true });
 });

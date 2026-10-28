@@ -33,6 +33,11 @@
     /* Drag strip — positioned absolutely inside the top margin */
     #strip {
       position: absolute;
+      /* Not fully transparent on purpose: Windows passes the mouse through
+         alpha-0 pixels of a transparent window, so the pointer showed the
+         desktop arrow over an idle strip and the strip couldn't be grabbed.
+         1 % black is invisible but still counts as part of the window. */
+      background: rgba(0, 0, 0, 0.01);
       display: flex;
       align-items: center;
       padding: 0 8px 0 6px;
@@ -138,21 +143,32 @@
   <div id="hinges"></div>
 
   <script>
-    // Inline SVG definitions.  White fill polygons are replaced with
-    // transparent so the hinge interiors don't block the wallpaper in the
-    // transparent margin areas.
+    // Bracket paint (per Cyrus): orange brackets filled white, with the orange
+    // border line running through the middle underneath (#border is drawn
+    // before #hinges, so the white fill hides the line where it crosses).
+    var HINGE_ORANGE = '#e74e25';
+    var HINGE_FILL   = '#ffffff'; // interiors and screw holes
+
+    // Builds one piece: the white interior polygon (if any), a white copy of
+    // the outer outline so the screw holes read white, then the orange shape.
+    function hingeSvg(viewBox, interiorPoints, d) {
+      var outline = d.slice(0, d.indexOf('Z') + 1); // first subpath = outer edge, no holes
+      return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + viewBox + '">' +
+        (interiorPoints ? '<polygon fill="' + HINGE_FILL + '" points="' + interiorPoints + '"/>' : '') +
+        '<path fill="' + HINGE_FILL + '" d="' + outline + '"/>' +
+        '<path fill="' + HINGE_ORANGE + '" d="' + d + '"/>' +
+        '</svg>';
+    }
+
     var SVGS = {
-      'corner-hinge': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34.35 34.35">' +
-        '<polygon fill="transparent" points="10.79 11.16 31.12 11.16 31.12 3.25 3.42 3.25 3.42 3.42 2.88 3.42 2.88 31.12 10.79 31.12 10.79 11.16"/>' +
-        '<path fill="#e74e25" d="M28.41,1.16V0s-14.21,0-14.21,0H0s0,14.21,0,14.21v14.21s1.16,0,1.16,0c0,3.28,2.66,5.94,5.94,5.94,3.28,0,5.94-2.66,5.94-5.94h1.16s14.21-14.21,14.21-14.21v-1.16c3.28,0,5.94-2.66,5.94-5.94s-2.66-5.94-5.94-5.94ZM7.1,30.39c-1.09,0-1.98-.89-1.98-1.98s.89-1.98,1.98-1.98,1.98.89,1.98,1.98-.89,1.98-1.98,1.98ZM28.41,9.08c-1.09,0-1.98-.89-1.98-1.98s.89-1.98,1.98-1.98,1.98.89,1.98,1.98-.89,1.98-1.98,1.98Z"/>' +
-        '</svg>',
-      'strap-hinge': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 89.98 13.94">' +
-        '<path fill="#e74e25" d="M84.1.94v-.94H5.88v1.14C2.63,1.14,0,3.73,0,6.91s2.63,5.77,5.88,5.77v1.25h78.22v-1.46c3.25,0,5.88-2.58,5.88-5.77s-2.63-5.77-5.88-5.77ZM5.88,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM21.53,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM37.17,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM52.81,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM68.46,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM84.1,8.71c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94Z"/>' +
-        '</svg>',
-      'edge-hinge': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34.35 54.5">' +
-        '<polygon fill="transparent" points="22.96 31.28 22.96 51.61 30.86 51.61 30.86 23.91 30.69 23.91 30.69 23.37 2.99 23.37 2.99 31.28 22.96 31.28"/>' +
-        '<path fill="#e74e25" d="M21.31,5.94h-1.16v14.21H5.94v1.16c-3.28,0-5.94,2.66-5.94,5.94s2.66,5.94,5.94,5.94v1.16h14.21v14.21h1.16c0,3.28,2.66,5.94,5.94,5.94s5.94-2.66,5.94-5.94h1.16v-14.21h0V5.94h-1.16c0-3.28-2.66-5.94-5.94-5.94s-5.94,2.66-5.94,5.94ZM29.23,48.56c0,1.09-.89,1.98-1.98,1.98s-1.98-.89-1.98-1.98.89-1.98,1.98-1.98,1.98.89,1.98,1.98ZM7.92,27.25c0,1.09-.89,1.98-1.98,1.98s-1.98-.89-1.98-1.98.89-1.98,1.98-1.98,1.98.89,1.98,1.98ZM29.23,5.94c0,1.09-.89,1.98-1.98,1.98s-1.98-.89-1.98-1.98.89-1.98,1.98-1.98,1.98.89,1.98,1.98Z"/>' +
-        '</svg>',
+      'corner-hinge': hingeSvg('0 0 34.35 34.35',
+        '10.79 11.16 31.12 11.16 31.12 3.25 3.42 3.25 3.42 3.42 2.88 3.42 2.88 31.12 10.79 31.12 10.79 11.16',
+        'M28.41,1.16V0s-14.21,0-14.21,0H0s0,14.21,0,14.21v14.21s1.16,0,1.16,0c0,3.28,2.66,5.94,5.94,5.94,3.28,0,5.94-2.66,5.94-5.94h1.16s14.21-14.21,14.21-14.21v-1.16c3.28,0,5.94-2.66,5.94-5.94s-2.66-5.94-5.94-5.94ZM7.1,30.39c-1.09,0-1.98-.89-1.98-1.98s.89-1.98,1.98-1.98,1.98.89,1.98,1.98-.89,1.98-1.98,1.98ZM28.41,9.08c-1.09,0-1.98-.89-1.98-1.98s.89-1.98,1.98-1.98,1.98.89,1.98,1.98-.89,1.98-1.98,1.98Z'),
+      'strap-hinge': hingeSvg('0 0 89.98 13.94', null,
+        'M84.1.94v-.94H5.88v1.14C2.63,1.14,0,3.73,0,6.91s2.63,5.77,5.88,5.77v1.25h78.22v-1.46c3.25,0,5.88-2.58,5.88-5.77s-2.63-5.77-5.88-5.77ZM5.88,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM21.53,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM37.17,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM52.81,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM68.46,8.91c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94ZM84.1,8.71c-1.09,0-1.98-.87-1.98-1.94s.89-1.94,1.98-1.94,1.98.87,1.98,1.94-.89,1.94-1.98,1.94Z'),
+      'edge-hinge': hingeSvg('0 0 34.35 54.5',
+        '22.96 31.28 22.96 51.61 30.86 51.61 30.86 23.91 30.69 23.91 30.69 23.37 2.99 23.37 2.99 31.28 22.96 31.28',
+        'M21.31,5.94h-1.16v14.21H5.94v1.16c-3.28,0-5.94,2.66-5.94,5.94s2.66,5.94,5.94,5.94v1.16h14.21v14.21h1.16c0,3.28,2.66,5.94,5.94,5.94s5.94-2.66,5.94-5.94h1.16v-14.21h0V5.94h-1.16c0-3.28-2.66-5.94-5.94-5.94s-5.94,2.66-5.94,5.94ZM29.23,48.56c0,1.09-.89,1.98-1.98,1.98s-1.98-.89-1.98-1.98.89-1.98,1.98-1.98,1.98.89,1.98,1.98ZM7.92,27.25c0,1.09-.89,1.98-1.98,1.98s-1.98-.89-1.98-1.98.89-1.98,1.98-1.98,1.98.89,1.98,1.98ZM29.23,5.94c0,1.09-.89,1.98-1.98,1.98s-1.98-.89-1.98-1.98.89-1.98,1.98-1.98,1.98.89,1.98,1.98Z'),
     };
 
     // Natural pixel dimensions for each piece
@@ -204,6 +220,16 @@
     var currentMargin = 18;
     var currentKey    = null;
 
+    // How far (px) each edge piece reaches in past the orange border, over
+    // the page.  This page sits underneath the panel's BrowserView, so the
+    // overlapping part is invisible here — the same placements are reported
+    // to the main process, which forwards them to kiosk-preload.js to draw
+    // that part inside the page itself.
+    // 7 = half the strap's 14 px thickness, so the border runs through the
+    // middle of each piece.
+    var HINGE_OVERLAP = 7;
+    var lastReported  = '';
+
     // Sets position, size, and optional CSS transform on an element
     function place(el, dims, left, top, transform) {
       el.style.position  = 'absolute';
@@ -214,16 +240,44 @@
       if (transform) el.style.transform = transform;
     }
 
+    // Structured copy of a hinge's SVG (viewBox + visible shapes) so the
+    // panel page can rebuild it with createElementNS — no innerHTML, which
+    // Trusted Types pages would reject.
+    function describeSvg(el) {
+      var svg = el.firstElementChild;
+      var shapes = [];
+      Array.prototype.forEach.call(svg.children, function (c) {
+        if (c.getAttribute('fill') === 'transparent') return;
+        var attrs = {};
+        Array.prototype.forEach.call(c.attributes, function (a) { attrs[a.name] = a.value; });
+        shapes.push({ tag: c.tagName, attrs: attrs });
+      });
+      return { viewBox: svg.getAttribute('viewBox'), shapes: shapes };
+    }
+
     function renderHinges(M, H, W, Wh, panelW, panelH) {
       var container = document.getElementById('hinges');
-      container.innerHTML = '';
-      var hinges = PANEL_HINGES[currentKey];
-      if (!hinges) return;
+      var hinges = PANEL_HINGES[currentKey] || [];
 
-      hinges.forEach(function (h) {
+      // Build the pieces once per panel; resizes (60 fps during the
+      // enlarge/shrink tween) only reposition them.
+      if (container.dataset.key !== String(currentKey)) {
+        container.innerHTML = '';
+        container.dataset.key = String(currentKey);
+        hinges.forEach(function (h) {
+          var el = document.createElement('div');
+          el.innerHTML = (h.piece === 'corner-t') ? SVGS['edge-hinge'] : SVGS[h.piece];
+          container.appendChild(el);
+        });
+      }
+
+      var O = HINGE_OVERLAP;
+      var report = [];
+
+      hinges.forEach(function (h, i) {
         var dims = (h.piece === 'corner-t') ? DIMS['edge-hinge'] : DIMS[h.piece];
-        var el   = document.createElement('div');
-        el.innerHTML = (h.piece === 'corner-t') ? SVGS['edge-hinge'] : SVGS[h.piece];
+        var el   = container.children[i];
+        el.style.transform = '';
         var pct = (h.pct !== undefined) ? h.pct : 0.5;
 
         switch (h.edge) {
@@ -270,11 +324,11 @@
             // pct from frame left corner
             var cx = M + pct * panelW;
             if (h.piece === 'strap-hinge') {
-              // Bottom edge of strap sits on border (y=M)
-              place(el, dims, cx - dims.w / 2, M - dims.h);
+              // Bottom edge of strap sits O px below the border (y=M)
+              place(el, dims, cx - dims.w / 2, M - dims.h + O);
             } else {
-              // edge-hinge rotate(90deg): crossbar at bottom flush against border, stem up
-              place(el, dims, cx - 17, M - 44.5, 'rotate(90deg)');
+              // edge-hinge rotate(90deg): crossbar at bottom overlapping the border, stem up
+              place(el, dims, cx - 17, M - 44.5 + O, 'rotate(90deg)');
             }
             break;
           }
@@ -283,11 +337,11 @@
             // pct from frame left corner
             var cx2 = M + pct * panelW;
             if (h.piece === 'strap-hinge') {
-              // Top edge of strap sits on border (y=Wh-M)
-              place(el, dims, cx2 - dims.w / 2, Wh - M);
+              // Top edge of strap sits O px above the border (y=Wh-M)
+              place(el, dims, cx2 - dims.w / 2, Wh - M - O);
             } else {
-              // edge-hinge rotate(-90deg): crossbar at top flush against border, stem down
-              place(el, dims, cx2 - 17, Wh - M - 10.5, 'rotate(-90deg)');
+              // edge-hinge rotate(-90deg): crossbar at top overlapping the border, stem down
+              place(el, dims, cx2 - 17, Wh - M - 10.5 - O, 'rotate(-90deg)');
             }
             break;
           }
@@ -297,10 +351,10 @@
             var cy = M + pct * panelH;
             if (h.piece === 'strap-hinge') {
               // Rotated 90deg: visual right edge at x=M → left = M - w/2 - h/2
-              place(el, dims, M - dims.w / 2 - dims.h / 2, cy - dims.h / 2, 'rotate(90deg)');
+              place(el, dims, M - dims.w / 2 - dims.h / 2 + O, cy - dims.h / 2, 'rotate(90deg)');
             } else {
-              // edge-hinge natural: crossbar flush against border, stem points left
-              place(el, dims, M - 34, cy - 27.5);
+              // edge-hinge natural: crossbar overlapping the border, stem points left
+              place(el, dims, M - 34 + O, cy - 27.5);
             }
             break;
           }
@@ -310,17 +364,29 @@
             var cy2 = M + pct * panelH;
             if (h.piece === 'strap-hinge') {
               // Rotated 90deg: visual left edge at x=W-M → left = W-M - w/2 + h/2
-              place(el, dims, W - M - dims.w / 2 + dims.h / 2, cy2 - dims.h / 2, 'rotate(90deg)');
+              place(el, dims, W - M - dims.w / 2 + dims.h / 2 - O, cy2 - dims.h / 2, 'rotate(90deg)');
             } else {
-              // edge-hinge scaleX(-1): crossbar flush against border, stem points right
-              place(el, dims, W - M, cy2 - 27.5, 'scaleX(-1)');
+              // edge-hinge scaleX(-1): crossbar overlapping the border, stem points right
+              place(el, dims, W - M - O, cy2 - 27.5, 'scaleX(-1)');
             }
             break;
           }
         }
 
-        container.appendChild(el);
+        var svgDesc = describeSvg(el);
+        report.push({
+          left: parseFloat(el.style.left), top: parseFloat(el.style.top),
+          w: dims.w, h: dims.h, transform: el.style.transform || '',
+          viewBox: svgDesc.viewBox, shapes: svgDesc.shapes,
+        });
       });
+
+      // Only send when something moved — resize events fire every frame.
+      var json = JSON.stringify(report);
+      if (json !== lastReported && window.kioskHandle && window.kioskHandle.reportHinges) {
+        lastReported = json;
+        window.kioskHandle.reportHinges(report);
+      }
     }
 
     function render() {

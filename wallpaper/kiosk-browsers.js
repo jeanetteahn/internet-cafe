@@ -3,6 +3,7 @@ const path = require('path');
 const fs   = require('fs');
 const http = require('http');
 const { kioskLog } = require('./kiosk-log');
+const { useSystemSpoonCursor } = require('./spoon-theme');
 
 // DDG result cache — one HTML file per panel, loaded as the startup placeholder.
 const cacheDir = path.join(app.getPath('userData'), 'ddg-cache');
@@ -87,6 +88,27 @@ const ALLOWED_DOMAINS = [
   'earthobservatory.nasa.gov',
 ];
 
+// AD_TRACKER_DOMAINS: every request to these hosts (and their subdomains) is
+// cancelled in all modes.  Result pages embed dozens of ad/sync iframes, and
+// Chromium gives each cross-site iframe its own renderer process — a single
+// National Geographic page took the kiosk from ~27 to ~79 processes, which
+// the NucBox can't sustain all day.  Blocking them also keeps ads off a kids'
+// exhibit.  This does not touch site isolation or any other security setting.
+const AD_TRACKER_DOMAINS = [
+  'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
+  'googletagservices.com', 'adservice.google.com', 'amazon-adsystem.com',
+  'adnxs.com', 'adsrvr.org', 'rubiconproject.com', 'pubmatic.com',
+  'openx.net', 'casalemedia.com', 'indexww.com', 'criteo.com', 'criteo.net',
+  'taboola.com', 'outbrain.com', 'teads.tv', '3lift.com', 'sharethrough.com',
+  'yieldmo.com', 'smartadserver.com', 'adform.net', 'bidswitch.net',
+  'lijit.com', 'sovrn.com', 'media.net', 'gumgum.com', 'kargo.com',
+  'adyoulike.com', 'omnitagjs.com', 'programmaticx.ai', 'colossusssp.com',
+  '33across.com', 'id5-sync.com', 'rlcdn.com', 'demdex.net', 'krxd.net',
+  'bluekai.com', 'agkn.com', 'everesttech.net', 'moatads.com',
+  'scorecardresearch.com', 'quantserve.com', 'spotxchange.com',
+  'tremorhub.com', 'adsafeprotected.com', 'doubleverify.com',
+];
+
 // ---- Tunables ---------------------------------------------------------------
 // At the page bottom the panel jumps to the top and immediately moves to the
 // next search term.  MIN_SEARCH_INTERVAL_MS is a floor that adds a short extra
@@ -97,7 +119,8 @@ const SEARCH_INTERVAL_MS     = 45 * 1000; // max time on a results page (safety 
 const MIN_SEARCH_INTERVAL_MS =  5 * 1000; // min time between searches per panel — floor for very short pages
 const BOTTOM_HOLD_MS         = 300;       // brief pause after jumping to top before loading next search
 const SCROLL_STEP_PX         = 80;        // px scrolled per tick
-const SCROLL_STEP_MS         = 250;       // ms between scroll ticks
+const SCROLL_STEP_MS         = 250;       // ms between scroll ticks (bottom checks); speed = STEP_PX / STEP_MS
+const AUTO_SCROLL_FRAME_MS   = 33;        // in-page auto-scroll frame interval (~30 fps); 16 = 60 fps if the GPU can afford it
 const INACTIVITY_TIMEOUT_MS  = 120 * 1000; // idle grace period before auto mode resumes
 const LOAD_TIMEOUT_MS        = 15 * 1000; // per-panel watchdog: abort and retry if a DDG load takes longer
 const GLOBAL_SEARCH_GAP_MS   =  2 * 1000; // minimum gap between any two panels starting a DDG search
@@ -253,9 +276,44 @@ const _spoonSvg = [
   `</svg>`,
 ].join('');
 const SPOON_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSvg).toString('base64');
+
+// Chromium only shows a custom cursor bigger than 32×32 when the WHOLE image
+// fits inside the page's viewport; otherwise it skips to the next cursor in
+// the list.  The big spoon extends ~94 px right / ~104 px down of the
+// pointer, so near every panel's right/bottom edge — and over the small
+// overlay windows (grip, address bar, fork/knife, clock, carbon) — it was
+// skipped straight to the system arrow.  A 32×32 spoon (exempt from that
+// check) sits in between so the pointer is always a spoon.
+const SPOON_SMALL_SIZE = 32;
+const _SMALL_PAD       = 2;
+const _smallArt        = SPOON_SMALL_SIZE - 2 * _SMALL_PAD;
+const _smallScale      = _smallArt / Math.max(_spoonVbW, _spoonVbH);
+const _spoonSmallHotX  = Math.round(3.47 * _smallScale) + _SMALL_PAD;
+const _spoonSmallHotY  = Math.round(0.50 * _smallScale) + _SMALL_PAD;
+const _spoonSmallSvg = [
+  `<svg width="${SPOON_SMALL_SIZE}" height="${SPOON_SMALL_SIZE}" xmlns="http://www.w3.org/2000/svg">`,
+  `<defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">`,
+  `<feDropShadow dx="0" dy="1" stdDeviation="0.8" flood-color="#000" flood-opacity="0.42"/>`,
+  `</filter></defs>`,
+  `<svg x="${_SMALL_PAD}" y="${_SMALL_PAD}" width="${_smallArt}" height="${_smallArt}" viewBox="0 0 ${_spoonVbW} ${_spoonVbH}" filter="url(#s)">`,
+  _spoonBody,
+  `</svg>`,
+  `</svg>`,
+].join('');
+const SPOON_SMALL_CURSOR_URI = 'data:image/svg+xml;base64,' + Buffer.from(_spoonSmallSvg).toString('base64');
+
 // Single rule covers every state (grab, grabbing, resize, pointer, text).
-// Fallback is `default` so the host system cursor shows outside the app.
-const _spoonRule = `*{cursor:url('${SPOON_CURSOR_URI}') ${_spoonHotX} ${_spoonHotY},default!important}`;
+// Linux with the "spoon" X11 theme active (see spoon-theme.js): force the
+// native `default` cursor, which the theme draws as the spoon at one size
+// everywhere — also overriding pages that set their own cursor.
+// Otherwise (Windows/macOS dev, or theme missing): big spoon → small spoon →
+// `default` (only if both images fail to load).
+const SYSTEM_SPOON_CURSOR = useSystemSpoonCursor();
+const _spoonRule = SYSTEM_SPOON_CURSOR
+  ? '*{cursor:default!important}'
+  : `*{cursor:url('${SPOON_CURSOR_URI}') ${_spoonHotX} ${_spoonHotY},` +
+    `url('${SPOON_SMALL_CURSOR_URI}') ${_spoonSmallHotX} ${_spoonSmallHotY},default!important}`;
+console.log(`[kiosk-cursor] ${SYSTEM_SPOON_CURSOR ? 'using system spoon theme' : 'using CSS spoon cursor'}`);
 const PANEL_CURSOR_CSS      = _spoonRule;
 const HANDLE_CURSOR_CSS     = _spoonRule;
 const GRIP_CURSOR_CSS       = _spoonRule;
@@ -353,6 +411,21 @@ let shieldSafetyTimer = null;
 // so it is available to any future code that needs to route IPC by view id.
 const webContentsIdToKey = new Map();
 
+// key -> latest hinge placements reported by that panel's kiosk-handle.html.
+const panelHinges = new Map();
+const HINGE_BORDER_COLOR = '#e74e25'; // must match #border in kiosk-handle.html
+
+function hingePayload(key) {
+  const hinges = panelHinges.get(key);
+  if (!hinges) return null;
+  return {
+    hinges,
+    borderColor: HINGE_BORDER_COLOR,
+    offsetX: HARDWARE_MARGIN,                 // page view's origin inside the window
+    offsetY: HARDWARE_MARGIN + HANDLE_HEIGHT,
+  };
+}
+
 // ---- Active-panel tween state -----------------------------------------------
 // tweenTimers holds the setInterval id for any in-flight size animation so it
 // can be cancelled cleanly.  enlargedKey is the one panel currently at active
@@ -412,6 +485,26 @@ function computeClusterLayout(screenW, screenH) {
   return result;
 }
 
+// ---- Drag move throttling ---------------------------------------------------
+// Renderers send a *-drag-move IPC on every pointermove — hundreds a second
+// with a high-rate mouse — and each one is a window move (an X11 round trip,
+// plus two more for the hub's address bar and carbon overlays).  Every move
+// handler reads the live cursor position, so dropping the in-between calls
+// loses nothing: run at most once per frame, always with a trailing call so
+// the final position lands.
+const DRAG_FRAME_MS = 16;
+
+function frameThrottle(fn) {
+  let last = 0, timer = null, lastArgs = null;
+  return (...args) => {
+    lastArgs = args;
+    if (timer) return;
+    const wait = DRAG_FRAME_MS - (Date.now() - last);
+    if (wait <= 0) { last = Date.now(); fn(...lastArgs); return; }
+    timer = setTimeout(() => { timer = null; last = Date.now(); fn(...lastArgs); }, wait);
+  };
+}
+
 // ---- Drag shield helpers ----------------------------------------------------
 
 function isShieldSender(wc) {
@@ -441,6 +534,7 @@ function createDragShields() {
     w.webContents.on('dom-ready', () => {
       w.webContents.insertCSS(PANEL_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
     });
+    keepOnAllWorkspaces(w);
     dragShields.push(w);
   }
 }
@@ -463,6 +557,16 @@ function hideDragShield() {
   for (const w of dragShields) {
     if (!w.isDestroyed()) w.hide();
   }
+  // Every drag/resize ends here.  The window manager may have raised the
+  // dragged window over the clock/carbon/fork-knife (all alwaysOnTop peers),
+  // burying them — put the overlays back on top.
+  restackOverlays();
+}
+
+// Workspace switches and "Show Desktop" would otherwise take kiosk windows
+// with them.  No-op on Windows.
+function keepOnAllWorkspaces(win) {
+  try { win.setVisibleOnAllWorkspaces(true); } catch (_) {}
 }
 
 // Factored-out move logic — called by both the original source-window IPC
@@ -533,6 +637,17 @@ function doCarbonDragMove() {
                 Math.min(ny, workArea.y + workArea.height - CARBON_SIZE - CARBON_SHADOW_PAD));
   carbonWindow.setPosition(Math.round(nx), Math.round(ny));
 }
+
+// Frame-throttled entry points used by the drag/resize IPC handlers.
+// (updateResize is declared further down; function declarations hoist.)
+const dragMove = {
+  forkknife:  frameThrottle(doForkknifeDragMove),
+  clock:      frameThrottle(doClockDragMove),
+  panel:      frameThrottle(doPanelDragMove),
+  resize:     frameThrottle(updateResize),
+  addressbar: frameThrottle(doAddressBarDragMove),
+  carbon:     frameThrottle(doCarbonDragMove),
+};
 
 // ---- Panel view factory ------------------------------------------------------
 
@@ -656,6 +771,24 @@ function unwrapDdgRedirect(url) {
     const { protocol } = new URL(target);
     return (protocol === 'http:' || protocol === 'https:') ? target : null;
   } catch { return null; }
+}
+
+// Cancels every request to AD_TRACKER_DOMAINS.  The URL filter is matched
+// natively, so only blocked requests ever reach this JS callback.
+let adBlockInstalled = false;
+let adBlockCount     = 0;
+function installAdTrackerBlock() {
+  if (adBlockInstalled) return;
+  adBlockInstalled = true;
+  const urls = AD_TRACKER_DOMAINS.flatMap(d => [`*://${d}/*`, `*://*.${d}/*`]);
+  session.defaultSession.webRequest.onBeforeRequest({ urls }, (_details, callback) => {
+    adBlockCount += 1;
+    callback({ cancel: true });
+  });
+  setInterval(() => {
+    if (adBlockCount > 0) kioskLog(`ad/tracker requests blocked in last 5 min: ${adBlockCount}`);
+    adBlockCount = 0;
+  }, 5 * 60 * 1000);
 }
 
 function buildErrorPageUrl(message, failedUrl) {
@@ -912,6 +1045,37 @@ function sendModeToHandle(key, mode) {
   if (win && !win.isDestroyed()) win.webContents.send('panel-mode', mode);
 }
 
+// ---- Panel layering ---------------------------------------------------------
+// panelOrder is the back-to-front stacking of the five panels (last = front).
+// Any deliberate use of a panel (click, key, drag, resize) brings it to the
+// front; restackAll() replays this order instead of always forcing the hub on
+// top, so the 30 s health check no longer undoes the customer's layering.
+// When every panel is idle again the default order (hub on top) returns.
+const DEFAULT_PANEL_ORDER = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight', 'hub'];
+let panelOrder = [...DEFAULT_PANEL_ORDER];
+let frontKey   = null; // panel the customer is using now; only its strip is highlighted
+
+function bringPanelToFront(key, force) {
+  if (!panelWindows.has(key)) return;
+  const alreadyFront = panelOrder[panelOrder.length - 1] === key && frontKey === key;
+  if (alreadyFront && !force) return;
+  panelOrder = panelOrder.filter(k => k !== key).concat(key);
+  const win = panelWindows.get(key);
+  if (win && !win.isDestroyed()) win.moveTop();
+  restackOverlays();
+  setFrontPanel(key);
+}
+
+// Highlight (grey strip) only the front panel, and only while it is active;
+// every other strip stays transparent.
+function setFrontPanel(key) {
+  frontKey = key;
+  for (const k of panelWindows.keys()) {
+    const ps = panelStates.get(k);
+    sendModeToHandle(k, (k === frontKey && ps && ps.mode === 'active') ? 'active' : 'auto');
+  }
+}
+
 // Called by the Reset button IPC handler.  Cancels any in-flight tween,
 // clears the manual-layout flag, and snaps the panel back to home bounds.
 function resetPanelLayout(key) {
@@ -1010,15 +1174,14 @@ function restackOverlays() {
   if (forkKnifeWindow  && !forkKnifeWindow.isDestroyed())  forkKnifeWindow.moveTop();
 }
 
-// Enforce the full stacking order: corner panels < hub < overlays.
-// Uses moveTop() only — never focus() or show() — to avoid stealing focus.
+// Enforce the full stacking order: panels in panelOrder (back to front), then
+// overlays.  Uses moveTop() only — never focus() or show() — to avoid
+// stealing focus.
 function restackAll() {
-  for (const key of ['topLeft', 'topRight', 'bottomLeft', 'bottomRight']) {
+  for (const key of panelOrder) {
     const win = panelWindows.get(key);
     if (win && !win.isDestroyed()) win.moveTop();
   }
-  const hubWin = panelWindows.get('hub');
-  if (hubWin && !hubWin.isDestroyed()) hubWin.moveTop();
   restackOverlays();
 }
 
@@ -1038,11 +1201,15 @@ function notePanelActivity(key, eventType) {
     ps.mode = 'active';
     const _v = panelViews[key];
     if (_v && !_v.webContents.isDestroyed()) _v.webContents.setAudioMuted(false);
-    sendModeToHandle(key, 'active');
     pushForkKnifeNavState();
     pushCarbonState(key);
     retargetAddressBar(key);
   }
+
+  // Wheel only resets the idle timer; everything else is deliberate use and
+  // raises the panel.  A click always re-raises, in case the window manager
+  // reshuffled the stack since this panel last came forward.
+  if (eventType !== 'wheel') bringPanelToFront(key, eventType === 'mousedown');
 
   clearTimeout(ps.inactivityTimer);
   ps.inactivityTimer = setTimeout(() => {
@@ -1058,7 +1225,14 @@ function notePanelActivity(key, eventType) {
     if (enlargedKey === key) enlargedKey = null;
     ps.mode        = 'auto';
     ps.manualLayout = false;
-    sendModeToHandle(key, 'auto');
+    if (Array.from(panelStates.values()).every(s => s.mode === 'auto')) {
+      panelOrder = [...DEFAULT_PANEL_ORDER]; // nobody at the kiosk: hub back on top
+      setFrontPanel(null);
+    } else if (frontKey === key) {
+      setFrontPanel(getActiveKey());       // highlight passes to the next-most-recent panel
+    } else {
+      sendModeToHandle(key, 'auto');
+    }
     startBrowsingLoop(key);
     pushForkKnifeNavState();
     // Once every panel is back in auto mode, return the forkknife to its home position.
@@ -1119,7 +1293,14 @@ function setupViewEventHandlers(key, win, view) {
   // Attach CDP so we can tally transferred bytes for the carbon indicator.
   try {
     view.webContents.debugger.attach('1.3');
-    view.webContents.debugger.sendCommand('Network.enable').catch(() => {});
+    // Only byte counts are needed.  Plain Network.enable makes DevTools keep a
+    // copy of every response body (up to ~100 MB per panel), which costs CPU
+    // and memory on every page load across all five panels — so turn the
+    // body buffers off.  Fall back to the plain call if a Chromium build
+    // rejects the parameters, so the carbon indicator keeps working.
+    const dbg = view.webContents.debugger;
+    dbg.sendCommand('Network.enable', { maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 })
+      .catch(() => dbg.sendCommand('Network.enable').catch(() => {}));
     view.webContents.debugger.on('message', (_event, method, params) => {
       if (panelViews[key] !== view) return;
       if (method !== 'Network.loadingFinished') return;
@@ -1419,12 +1600,17 @@ function setupViewEventHandlers(key, win, view) {
     if (panelViews[key] !== view) return;
     if (!frame.parent) return;
     setTimeout(() => {
-      if (frame.isDestroyed()) return;
-      frame.executeJavaScript(
-        '(function(){try{var s=document.createElement("style");s.textContent=' +
-        JSON.stringify(_spoonRule) +
-        ';(document.head||document.documentElement).appendChild(s);}catch(_){}})();'
-      ).catch(() => {});
+      // WebFrameMain has no isDestroyed() in Electron 31 (calling it threw on
+      // every iframe, so iframes never got the spoon); `detached` is the
+      // equivalent, and executeJavaScript can still throw on a disposed frame.
+      if (frame.detached) return;
+      try {
+        frame.executeJavaScript(
+          '(function(){try{var s=document.createElement("style");s.textContent=' +
+          JSON.stringify(_spoonRule) +
+          ';(document.head||document.documentElement).appendChild(s);}catch(_){}})();'
+        ).catch(() => {});
+      } catch (_) {}
     }, 100);
   });
 
@@ -1504,13 +1690,37 @@ function startScrolling(key) {
       // arbitrary sites.  "scrollY didn't change after scrollBy" is treated
       // as the bottom for pages that scroll an inner container or block
       // window scrolling.
+      //
+      // The scrolling itself runs in-page on requestAnimationFrame at the
+      // same average speed (SCROLL_STEP_PX per SCROLL_STEP_MS) instead of
+      // jumping 80 px four times a second, which looked like stutter.  Each
+      // tick is a heartbeat: the in-page loop stops on its own if ticks stop
+      // arriving, so it can never outlive the auto-mode loop.
       atBottom = await view.webContents.executeJavaScript(`
         (function () {
-          var prevY = (typeof window.__kioskPrevScrollY === 'number')
-            ? window.__kioskPrevScrollY : window.scrollY;
-          window.scrollBy(0, ${SCROLL_STEP_PX});
+          var a = window.__kioskAutoScroll;
+          if (!a) a = window.__kioskAutoScroll = { until: 0, last: 0, acc: 0, raf: 0 };
+          a.until = performance.now() + ${SCROLL_STEP_MS * 3};
+          if (!a.raf) {
+            a.last = performance.now();
+            var frame = function (now) {
+              if (now > a.until) { a.raf = 0; a.acc = 0; return; }
+              var dt = now - a.last;
+              if (dt >= ${AUTO_SCROLL_FRAME_MS}) {
+                a.acc += dt * ${SCROLL_STEP_PX / SCROLL_STEP_MS};
+                a.last = now;
+                var px = Math.floor(a.acc);
+                if (px >= 1) { window.scrollBy({ top: px, behavior: 'instant' }); a.acc -= px; }
+              }
+              a.raf = requestAnimationFrame(frame);
+            };
+            a.raf = requestAnimationFrame(frame);
+          }
+          var hasPrev = typeof window.__kioskPrevScrollY === 'number';
+          var prevY = hasPrev ? window.__kioskPrevScrollY : window.scrollY;
           var newY = window.scrollY;
           window.__kioskPrevScrollY = newY;
+          if (!hasPrev) return false; // first tick: the in-page loop has not moved yet
           if (newY === prevY) return true;
           var scroller = document.scrollingElement || document.documentElement;
           if (!scroller) return true;
@@ -1527,7 +1737,8 @@ function startScrolling(key) {
 
     // Snap to top so the panel never looks frozen.
     try {
-      await view.webContents.executeJavaScript(`window.scrollTo(0, 0)`, false);
+      await view.webContents.executeJavaScript(
+        `if (window.__kioskAutoScroll) window.__kioskAutoScroll.until = 0; window.scrollTo(0, 0)`, false);
     } catch {
       return; // page is navigating — skip tick
     }
@@ -1564,8 +1775,17 @@ function startScrolling(key) {
 function stopScrolling(key) {
   const ps = panelStates.get(key);
   if (!ps) return;
+  const wasScrolling = ps.scrollTimer !== null;
   clearInterval(ps.scrollTimer);
   ps.scrollTimer = null;
+  // Halt the in-page scroll loop now rather than waiting for its heartbeat
+  // to lapse, so it never fights a customer who just took over.
+  const view = panelViews[key];
+  if (wasScrolling && view && !view.webContents.isDestroyed()) {
+    view.webContents.executeJavaScript(
+      'if (window.__kioskAutoScroll) window.__kioskAutoScroll.until = 0;', false
+    ).catch(() => {});
+  }
 }
 
 // Called after the visible view finishes loading a DuckDuckGo results page.
@@ -1938,6 +2158,7 @@ function createForkKnifeWindow(workArea) {
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
+    focusable:   false, // never takes focus, so clicking it cannot reshuffle the always-on-top stack
     resizable:   false,
     movable:     true,
     webPreferences: {
@@ -1947,6 +2168,7 @@ function createForkKnifeWindow(workArea) {
       sandbox:          true,
     },
   });
+  keepOnAllWorkspaces(forkKnifeWindow);
   forkKnifeWindow.loadFile(path.join(__dirname, 'kiosk-forkknife.html'));
   forkKnifeWindow.webContents.on('dom-ready', () => {
     forkKnifeWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
@@ -2024,6 +2246,7 @@ function createClockWindow(workArea) {
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
+    focusable:   false, // never takes focus, so clicking it cannot reshuffle the always-on-top stack
     resizable:   false,
     movable:     true,
     webPreferences: {
@@ -2034,6 +2257,7 @@ function createClockWindow(workArea) {
     },
   });
 
+  keepOnAllWorkspaces(clockWindow);
   clockWindow.loadFile(path.join(__dirname, 'kiosk-clock.html'));
   clockWindow.webContents.on('dom-ready', () => {
     clockWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
@@ -2110,6 +2334,7 @@ function createAddressBarWindow(workArea) {
     },
   });
 
+  keepOnAllWorkspaces(addressBarWindow);
   addressBarWindow.loadFile(path.join(__dirname, 'kiosk-addressbar.html'));
 
   addressBarWindow.webContents.on('dom-ready', () => {
@@ -2198,6 +2423,7 @@ function createCarbonWindow(workArea) {
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
+    focusable:   false, // never takes focus, so clicking it cannot reshuffle the always-on-top stack
     resizable:   false,
     movable:     true,
     webPreferences: {
@@ -2208,6 +2434,7 @@ function createCarbonWindow(workArea) {
     },
   });
 
+  keepOnAllWorkspaces(carbonWindow);
   carbonWindow.loadFile(path.join(__dirname, 'kiosk-carbon.html'));
   carbonWindow.webContents.on('dom-ready', () => {
     carbonWindow.webContents.insertCSS(FORKKNIFE_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
@@ -2260,6 +2487,7 @@ function createCarbonWindow(workArea) {
 function createKioskWindow() {
   _t0 = Date.now();
   session.defaultSession.preconnect({ url: 'https://html.duckduckgo.com' });
+  installAdTrackerBlock();
 
   const allDisplays  = screen.getAllDisplays();
   const envIndex     = parseInt(process.env.KIOSK_DISPLAY, 10);
@@ -2304,6 +2532,16 @@ function createKioskWindow() {
     });
 
     panelWindows.set(key, win);
+    keepOnAllWorkspaces(win);
+    // Clicking anywhere on a panel (strip, frame or page) focuses it: record
+    // it as the front panel and put the overlays back above it, since the
+    // window manager raised it over every other alwaysOnTop window.
+    win.on('focus', () => {
+      // Each new window takes focus as it is created; skip those so startup
+      // keeps the default order (same 5 s grace as the move handler).
+      if (!windowsCreatedAt || Date.now() - windowsCreatedAt < 5_000) return;
+      bringPanelToFront(key);
+    });
     console.log(`[kiosk-timing] ${key} window created: +${timingMs()} ms`);
 
     const minSize = minSizeFor(key);
@@ -2370,10 +2608,11 @@ function createKioskWindow() {
       }, 500);
     });
 
+    // The handle page re-renders its border/hinges from its own window
+    // 'resize' listener, so no panel-hardware IPC is needed here.
     win.on('resize', () => {
       positionGrip(key);
       updateWindowShape(key);
-      if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
       if (key === 'hub') repositionAddressBar();
       if (key === 'hub') repositionCarbon();
     });
@@ -2488,6 +2727,26 @@ function attachActivityHandling() {
   // Preload requests this to inject the spoon rule at user origin in every frame.
   ipcMain.handle('get-cursor-css', () => PANEL_CURSOR_CSS);
 
+  // Hinge overlap: the handle page reports its hinge placements (window
+  // coordinates); forward them to that panel's page so kiosk-preload.js can
+  // draw the part that overlaps the page.  New documents fetch the latest
+  // placements with get-panel-hinges.
+  ipcMain.on('panel-hinges', (event, hinges) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    if (!key) return;
+    const win = panelWindows.get(key);
+    if (!win || win.isDestroyed() || win.webContents !== event.sender) return;
+    panelHinges.set(key, hinges);
+    const view = panelViews[key];
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.send('panel-hinges', hingePayload(key));
+    }
+  });
+  ipcMain.handle('get-panel-hinges', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    return key ? hingePayload(key) : null;
+  });
+
   // Shield window sends shield-move-tick on every pointermove.
   // Resets the 2 s safety timer and drives the active drag/resize.
   ipcMain.on('shield-move-tick', (event) => {
@@ -2495,12 +2754,12 @@ function attachActivityHandling() {
     clearTimeout(shieldSafetyTimer);
     shieldSafetyTimer = setTimeout(hideDragShield, 2000);
     switch (shieldDragType) {
-      case 'forkknife':  doForkknifeDragMove(); break;
-      case 'clock':      doClockDragMove(); break;
-      case 'panel':      if (shieldDragKey) doPanelDragMove(shieldDragKey); break;
-      case 'resize':     if (shieldDragKey) updateResize(shieldDragKey); break;
-      case 'addressbar': doAddressBarDragMove(); break;
-      case 'carbon':     doCarbonDragMove(); break;
+      case 'forkknife':  dragMove.forkknife(); break;
+      case 'clock':      dragMove.clock(); break;
+      case 'panel':      if (shieldDragKey) dragMove.panel(shieldDragKey); break;
+      case 'resize':     if (shieldDragKey) dragMove.resize(shieldDragKey); break;
+      case 'addressbar': dragMove.addressbar(); break;
+      case 'carbon':     dragMove.carbon(); break;
     }
   });
 
@@ -2564,7 +2823,7 @@ function attachActivityHandling() {
   ipcMain.on('forkknife-drag-move', (event) => {
     if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
     if (event.sender !== forkKnifeWindow.webContents) return;
-    doForkknifeDragMove();
+    dragMove.forkknife();
   });
 
   ipcMain.on('forkknife-drag-end', (event) => {
@@ -2594,7 +2853,7 @@ function attachActivityHandling() {
   ipcMain.on('clock-drag-move', (event) => {
     if (!clockWindow || clockWindow.isDestroyed()) return;
     if (event.sender !== clockWindow.webContents) return;
-    doClockDragMove();
+    dragMove.clock();
   });
 
   ipcMain.on('clock-drag-end', (event) => {
@@ -2627,18 +2886,20 @@ function attachActivityHandling() {
     const cursor = screen.getCursorScreenPoint();
     const pos    = win.getPosition();
     panelDragOffsets.set(key, { dx: cursor.x - pos[0], dy: cursor.y - pos[1] });
+    bringPanelToFront(key, true);
     showDragShield('panel', key);
   });
 
   ipcMain.on('panel-drag-move', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
     if (!key) return;
-    doPanelDragMove(key);
+    dragMove.panel(key);
   });
 
   ipcMain.on('panel-drag-end', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
     if (!key) return;
+    doPanelDragMove(key); // land on the release point (moves are frame-throttled)
     panelDragOffsets.set(key, null);
     clampToDisplay(key);
     hideDragShield();
@@ -2653,7 +2914,7 @@ function attachActivityHandling() {
 
   ipcMain.on('panel-resize-move', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
-    if (key) updateResize(key);
+    if (key) dragMove.resize(key);
   });
 
   ipcMain.on('panel-resize-end', (event) => {
@@ -2725,7 +2986,7 @@ function attachActivityHandling() {
   ipcMain.on('addressbar-drag-move', (event) => {
     if (!addressBarWindow || addressBarWindow.isDestroyed()) return;
     if (event.sender !== addressBarWindow.webContents) return;
-    doAddressBarDragMove();
+    dragMove.addressbar();
   });
 
   ipcMain.on('addressbar-drag-end', (event) => {
@@ -2788,7 +3049,7 @@ function attachActivityHandling() {
   ipcMain.on('carbon-drag-move', (event) => {
     if (!carbonWindow || carbonWindow.isDestroyed()) return;
     if (event.sender !== carbonWindow.webContents) return;
-    doCarbonDragMove();
+    dragMove.carbon();
   });
 
   ipcMain.on('carbon-drag-end', (event) => {
@@ -2852,15 +3113,17 @@ function startAllIdleRotation() {
 
 // ---- Self-healing: health check, cache clear, view recycle, nightly restart ---
 
-// Returns true if the window's centre point falls within any connected display.
+// Returns true if any part of the window overlaps a connected display.
+// (It used to test the window's centre, but drag clamping only keeps
+// MIN_VIS = 20 px of an overlay on screen, so a customer could park the clock
+// or carbon circle mostly off-screen and the health check would destroy it and
+// recreate it at home — which looked like it had vanished.)
 function _windowOnDisplay(win) {
   if (!win || win.isDestroyed()) return false;
   const { x, y, width, height } = win.getBounds();
-  const cx = x + Math.round(width  / 2);
-  const cy = y + Math.round(height / 2);
   return screen.getAllDisplays().some(d =>
-    cx >= d.bounds.x && cx < d.bounds.x + d.bounds.width &&
-    cy >= d.bounds.y && cy < d.bounds.y + d.bounds.height
+    x < d.bounds.x + d.bounds.width  && x + width  > d.bounds.x &&
+    y < d.bounds.y + d.bounds.height && y + height > d.bounds.y
   );
 }
 
@@ -3109,6 +3372,11 @@ function rebuildPanelWindow(key) {
   });
 
   panelWindows.set(key, win);
+  keepOnAllWorkspaces(win);
+  win.on('focus', () => {
+    if (!windowsCreatedAt || Date.now() - windowsCreatedAt < 5_000) return; // see createKioskWindow
+    bringPanelToFront(key);
+  });
   webContentsIdToKey.set(win.webContents.id, key);
 
   const minSize = minSizeFor(key);
@@ -3181,7 +3449,6 @@ function rebuildPanelWindow(key) {
   win.on('resize', () => {
     positionGrip(key);
     updateWindowShape(key);
-    if (!win.isDestroyed()) win.webContents.send('panel-hardware', { key, margin: M });
     if (key === 'hub') repositionAddressBar();
     if (key === 'hub') repositionCarbon();
   });

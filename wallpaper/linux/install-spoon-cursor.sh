@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Builds and installs the spoon SVG as the system X11 cursor theme "spoon".
-# Run ON LINUX (X11) after git pull.
+# Builds and installs the spoon SVG as the system X11 cursor theme "spoon",
+# then makes it this user's cursor theme permanently (run it as the kiosk
+# user).  Every cursor name maps to the spoon, so links, text, drags and
+# window-manager moves all show it — and the kiosk app (spoon-theme.js) then
+# stops using its CSS cursor, so the spoon is one size everywhere.
+# Run ON LINUX (X11) after git pull.  Log out and back in afterwards so every
+# app picks up the new theme.
 #
 # Usage:
 #   bash wallpaper/linux/install-spoon-cursor.sh
-#   bash wallpaper/linux/install-spoon-cursor.sh --uninstall
+#   bash wallpaper/linux/install-spoon-cursor.sh --uninstall   # restores the previous theme
 #
 # The script is safe to re-run. Sizes and hotspot are computed to match the
 # in-app CSS cursor exactly (same math as kiosk-browsers.js).
@@ -21,6 +26,19 @@ ICONS_DIR="$HOME/.icons"
 THEME_DIR="$ICONS_DIR/$THEME_NAME"
 CURSORS_DIR="$THEME_DIR/cursors"
 DEFAULT_DIR="$ICONS_DIR/default"
+# The theme that was active before the first install; restored by --uninstall.
+PREV_FILE="$ICONS_DIR/.spoon-previous-theme"
+SCHEMAS=(org.cinnamon.desktop.interface org.gnome.desktop.interface)
+
+# ---- Refuse to run while the app is running -----------------------------------
+# Chromium (Electron 31, X11) segfaults when the cursor theme changes under a
+# running instance — that is why commit 82ab880 removed per-launch switching.
+# This script changes the theme once, so stop the app first (Ctrl+Alt+Q).
+if pgrep -f "electron.*(kiosk-main\.js|main\.js)" >/dev/null 2>&1; then
+  echo "ERROR: the wallpaper/kiosk app is running. Changing the cursor theme now" >&2
+  echo "would crash it. Quit it with Ctrl+Alt+Q, then run this script again." >&2
+  exit 1
+fi
 
 # ---- Detect desktop environment -----------------------------------------------
 detect_de() {
@@ -36,9 +54,18 @@ detect_de() {
 # ---- Detect currently active cursor theme -----------------------------------
 detect_current_theme() {
   local t=""
-  # 1. gsettings (GNOME / Cinnamon)
-  if command -v gsettings &>/dev/null; then
+  # 0. Saved by an earlier run of this script (the theme before spoon).
+  if [ -f "$PREV_FILE" ]; then
+    t=$(cat "$PREV_FILE" 2>/dev/null || true)
+  fi
+  # 1. gsettings (Cinnamon, then GNOME)
+  if [ -z "$t" ] && command -v gsettings &>/dev/null; then
+    t=$(gsettings get org.cinnamon.desktop.interface cursor-theme 2>/dev/null | tr -d "'" | tr -d '"' || true)
+    [ "$t" = "spoon" ] && t=""
+  fi
+  if [ -z "$t" ] && command -v gsettings &>/dev/null; then
     t=$(gsettings get org.gnome.desktop.interface cursor-theme 2>/dev/null | tr -d "'" | tr -d '"' || true)
+    [ "$t" = "spoon" ] && t=""
   fi
   # 2. ~/.icons/default/index.theme
   if [ -z "$t" ] && [ -f "$DEFAULT_DIR/index.theme" ]; then
@@ -59,9 +86,18 @@ if [ "${1:-}" = "--uninstall" ]; then
     echo "Nothing to uninstall ($THEME_DIR does not exist)."
     exit 0
   fi
-  rm -rf "$THEME_DIR"
-  echo "Removed $THEME_DIR"
-  echo "The desktop cursor theme is managed by the kiosk launcher — run it once to restore."
+  PREV="$(detect_current_theme)"
+  if command -v gsettings &>/dev/null; then
+    for schema in "${SCHEMAS[@]}"; do
+      gsettings set "$schema" cursor-theme "$PREV" 2>/dev/null || true
+    done
+  fi
+  if [ -f "$DEFAULT_DIR/index.theme" ] && grep -q '^Inherits=spoon' "$DEFAULT_DIR/index.theme"; then
+    sed -i "s/^Inherits=spoon\$/Inherits=$PREV/" "$DEFAULT_DIR/index.theme"
+  fi
+  rm -rf "$THEME_DIR" "$PREV_FILE"
+  echo "Removed $THEME_DIR and restored cursor theme: $PREV"
+  echo "Log out and back in for every app to pick it up."
   exit 0
 fi
 
@@ -248,16 +284,32 @@ mkdir -p "$CURSORS_DIR"
 # Place the single cursor binary
 cp "$CURSOR_BIN" "$CURSORS_DIR/spoon.cursor"
 
-# ---- Named cursor symlinks (these names map to the spoon) --------------------
-# Excluded (inherited from parent theme): xterm, ibeam, text, grab, grabbing,
-# fleur, col-resize, row-resize, ew-resize, ns-resize, nwse-resize, nesw-resize,
-# all-scroll, zoom-in, zoom-out, copy, and other resize/grip cursors.
+# ---- Named cursor symlinks (every name maps to the spoon) ---------------------
+# The exhibit wants the spoon for every interaction, so links, text, drags,
+# resizes and window-manager moves all map here too.  To keep the text I-beam
+# instead, delete xterm/ibeam/text/vertical-text from this list.
 SPOON_NAMES=(
-  left_ptr default arrow top_left_arrow
-  circle not-allowed no-drop crossed_circle
-  dnd-none dnd-move dnd-copy dnd-link dnd-ask dnd-no-drop
-  X_cursor
+  # arrows / default
+  left_ptr default arrow top_left_arrow right_ptr center_ptr context-menu
+  # links
+  pointer hand hand1 hand2 pointing_hand
+  # text
+  xterm ibeam text vertical-text
+  # drag / move
+  grab grabbing openhand closedhand fleur move all-scroll size_all dnd-move
+  dnd-none dnd-copy dnd-link dnd-ask dnd-no-drop copy alias
+  # resize
+  col-resize row-resize ew-resize ns-resize nwse-resize nesw-resize
+  e-resize w-resize n-resize s-resize ne-resize nw-resize se-resize sw-resize
+  size_hor size_ver size_bdiag size_fdiag split_h split_v
+  sb_h_double_arrow sb_v_double_arrow h_double_arrow v_double_arrow
+  left_side right_side top_side bottom_side
+  top_left_corner top_right_corner bottom_left_corner bottom_right_corner
+  # busy / misc
   wait watch progress left_ptr_watch half-busy
+  circle not-allowed no-drop crossed_circle forbidden X_cursor
+  help question_arrow whats_this crosshair cross tcross cell plus
+  zoom-in zoom-out pencil
 )
 
 for name in "${SPOON_NAMES[@]}"; do
@@ -294,6 +346,17 @@ declare -A HASH_MAP=(
   # dnd-none
   ["e29285e634086352946a0e7090d73106"]="dnd-none"
   ["4498f0e0c1937ffe01fd06f973665830"]="dnd-none"
+  # hand2 / pointer
+  ["9d800788f1b08800ae810202380a0822"]="hand2"
+  # copy / alias
+  ["1081e37283d90000800003c07f3ef6bf"]="copy"
+  ["640fb0e74195791501fd1ed57b41487f"]="alias"
+  # resize
+  ["fcf1c3c7cd4491d801f1e1c78f100000"]="sb_h_double_arrow"
+  ["00008160000006810000408080010102"]="sb_v_double_arrow"
+  ["c7088f0f3e6c8088236ef8e1e3e70000"]="nwse-resize"
+  ["14fef782d02440884392942c11205230"]="col-resize"
+  ["2870a09082c103050810ffdffffe0204"]="row-resize"
 )
 
 for hash in "${!HASH_MAP[@]}"; do
@@ -312,9 +375,33 @@ Inherits=$INHERIT_THEME
 EOF
 echo "  wrote index.theme (Inherits=$INHERIT_THEME)"
 
+# ---- Make spoon this user's cursor theme (permanent) ---------------------------
+# Remember the theme we're replacing so --uninstall can put it back.
+[ -f "$PREV_FILE" ] || echo "$INHERIT_THEME" > "$PREV_FILE"
+
+if command -v gsettings &>/dev/null; then
+  for schema in "${SCHEMAS[@]}"; do
+    gsettings set "$schema" cursor-theme "$THEME_NAME" 2>/dev/null || true
+  done
+  echo "  gsettings cursor-theme → $THEME_NAME (Cinnamon + GNOME schemas)"
+fi
+
+# ~/.icons/default is what the X root window and plain X apps read; with this,
+# the desktop, gaps between kiosk windows and window-manager drags show the
+# spoon too.
+mkdir -p "$DEFAULT_DIR"
+cat > "$DEFAULT_DIR/index.theme" << EOF
+[Icon Theme]
+Inherits=$THEME_NAME
+EOF
+echo "  wrote $DEFAULT_DIR/index.theme (Inherits=$THEME_NAME)"
+
 echo ""
-echo "Cursor theme 'spoon' installed to ~/.icons/spoon/"
-echo "The launcher scripts (native-launch.sh / xwinwrap-launch.sh) switch the"
-echo "desktop cursor theme to spoon on start and restore it on exit."
+echo "Cursor theme 'spoon' installed to ~/.icons/spoon/ and set as this user's cursor."
+echo "Log out and back in so every app (and the desktop) picks it up, then relaunch"
+echo "the kiosk: its log should say '[kiosk-cursor] using system spoon theme'."
+echo ""
+echo "Check the size: Xcursor uses the image nearest to Cinnamon's cursor size"
+echo "(Settings > Mouse > Pointer size); this theme has ${OUTER_W} and ${OUTER_W2} px images."
 echo ""
 echo "To uninstall: bash $0 --uninstall"

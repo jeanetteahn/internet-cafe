@@ -29,4 +29,9 @@ contextBridge.exposeInMainWorld('kioskHandle', {
   onHardware: (fn) => {
     ipcRenderer.on('panel-hardware', (_event, config) => fn(config));
   },
+
+  // Hand the computed hinge placements (window coordinates) to the main
+  // process, which forwards them to the panel page so the part of each
+  // hinge that overlaps the page can be drawn above it.
+  reportHinges: (hinges) => ipcRenderer.send('panel-hinges', hinges),
 });

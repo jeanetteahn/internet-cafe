@@ -44,14 +44,12 @@ fi
 
 mkdir -p "$AUTOSTART_DIR"
 
-# Replace Exec= and append XCURSOR env so the spoon cursor is active from
-# the first frame even when launched from a bare XDG autostart entry.
+# Replace Exec=.  (The spoon cursor is not set here: Environment= is not a
+# valid desktop-entry key and was silently ignored.  The theme is set for the
+# whole account by linux/install-spoon-cursor.sh instead.)
 sed "s|Exec=.*|Exec=$EXEC_LINE|" \
   "$PROJECT_DIR/linux/weather-wallpaper.desktop" \
   | grep -v '^Environment=' > "$DEST"
-
-# Append after Terminal=false so the file stays well-formed.
-sed -i "s|^Terminal=false|Terminal=false\nEnvironment=XCURSOR_THEME=spoon|" "$DEST"
 
 echo "Installed autostart entry: $DEST"
 echo "Launch method: $EXEC_LINE"

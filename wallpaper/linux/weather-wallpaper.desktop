@@ -6,4 +6,3 @@ Exec=/path/to/weather-wallpaper/node_modules/.bin/electron /path/to/weather-wall
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
 Terminal=false
-Environment=XCURSOR_THEME=spoon
