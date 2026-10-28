@@ -33,11 +33,7 @@
     /* Drag strip — positioned absolutely inside the top margin */
     #strip {
       position: absolute;
-      /* Not fully transparent on purpose: Windows passes the mouse through
-         alpha-0 pixels of a transparent window, so the pointer showed the
-         desktop arrow over an idle strip and the strip couldn't be grabbed.
-         1 % black is invisible but still counts as part of the window. */
-      background: rgba(0, 0, 0, 0.01);
+      background: #ffffff;
       display: flex;
       align-items: center;
       padding: 0 8px 0 6px;
@@ -45,8 +41,7 @@
     }
 
     #strip.active {
-      background: #1d2535;
-      box-shadow: inset 3px 0 0 #4a90d9;
+      /* reserved for future active-state styling */
     }
 
     .grip {
@@ -62,51 +57,7 @@
       width: 3px;
       height: 3px;
       border-radius: 50%;
-      border: 1px dotted #aaa;
-    }
-
-    .title {
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: #999;
-      font-size: 11px;
-      letter-spacing: 0.01em;
-    }
-
-    .btn {
-      flex-shrink: 0;
-      padding: 2px 6px;
-      background: transparent;
-      border: 1px solid #444;
-      border-radius: 3px;
-      color: #888;
-      font-family: inherit;
-      font-size: 11px;
-      line-height: 1.4;
-      cursor: pointer;
-      transition: border-color 0.12s, color 0.12s, opacity 0.12s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .btn svg { display: block; }
-
-    .btn:hover { border-color: #777; }
-    .btn:hover svg { opacity: 0.9; }
-
-    .btn:focus-visible {
-      outline: 2px solid #5a8fd8;
-      outline-offset: 2px;
-    }
-
-    .btn:active { background: #2a2a2a; }
-
-    .btn:disabled {
-      opacity: 0.3;
-      pointer-events: none;
+      border: 1px solid #999;
     }
 
     /* Orange 1 px border around the browser area */
@@ -136,8 +87,6 @@
       <div class="grip-dot"></div>
       <div class="grip-dot"></div>
     </div>
-    <span class="title" id="title">Loading...</span>
-    <button class="btn" id="resetBtn" title="Restore panel to its default position and size">Reset</button>
   </div>
   <div id="border"></div>
   <div id="hinges"></div>
@@ -415,9 +364,7 @@
     window.addEventListener('resize', render);
 
     if (window.kioskHandle) {
-      window.kioskHandle.onTitle(function (title) {
-        document.getElementById('title').textContent = title || '';
-      });
+      window.kioskHandle.onTitle(function () {});
       window.kioskHandle.onMode(function (mode) {
         document.getElementById('strip').classList.toggle('active', mode === 'active');
       });
@@ -425,9 +372,6 @@
         currentKey    = cfg.key;
         currentMargin = cfg.margin;
         render();
-      });
-      document.getElementById('resetBtn').addEventListener('click', function () {
-        window.kioskHandle.resetPosition();
       });
     }
 
