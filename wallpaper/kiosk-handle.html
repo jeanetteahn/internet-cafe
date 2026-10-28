@@ -44,22 +44,6 @@
       /* reserved for future active-state styling */
     }
 
-    .grip {
-      flex-shrink: 0;
-      display: grid;
-      grid-template-columns: repeat(2, 5px);
-      grid-template-rows: repeat(3, 5px);
-      gap: 2px;
-      opacity: 0.55;
-    }
-
-    .grip-dot {
-      width: 3px;
-      height: 3px;
-      border-radius: 50%;
-      border: 1px solid #999;
-    }
-
     /* Orange 1 px border around the browser area */
     #border {
       position: absolute;
@@ -78,16 +62,7 @@
   </style>
 </head>
 <body>
-  <div id="strip">
-    <div class="grip" aria-hidden="true">
-      <div class="grip-dot"></div>
-      <div class="grip-dot"></div>
-      <div class="grip-dot"></div>
-      <div class="grip-dot"></div>
-      <div class="grip-dot"></div>
-      <div class="grip-dot"></div>
-    </div>
-  </div>
+  <div id="strip"></div>
   <div id="border"></div>
   <div id="hinges"></div>
 
