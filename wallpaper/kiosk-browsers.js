@@ -89,11 +89,15 @@ const ALLOWED_DOMAINS = [
 ];
 
 // AD_TRACKER_DOMAINS: every request to these hosts (and their subdomains) is
-// cancelled in all modes.  Result pages embed dozens of ad/sync iframes, and
-// Chromium gives each cross-site iframe its own renderer process — a single
-// National Geographic page took the kiosk from ~27 to ~79 processes, which
-// the NucBox can't sustain all day.  Blocking them also keeps ads off a kids'
-// exhibit.  This does not touch site isolation or any other security setting.
+// cancelled in all modes when AD_BLOCKING_ENABLED is true.  Result pages embed
+// dozens of ad/sync iframes, and Chromium gives each cross-site iframe its own
+// renderer process — a single National Geographic page took the kiosk from ~27
+// to ~79 processes, which the NucBox can't sustain all day.  Blocking them also
+// keeps ads off a kids' exhibit.  This does not touch site isolation or any
+// other security setting.
+// Flip AD_BLOCKING_ENABLED to true to re-enable the blocker if the process
+// count becomes a problem again.
+const AD_BLOCKING_ENABLED = false; // turns the ad/tracker request blocker on or off for all kiosk panels
 const AD_TRACKER_DOMAINS = [
   'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
   'googletagservices.com', 'adservice.google.com', 'amazon-adsystem.com',
@@ -2487,7 +2491,11 @@ function createCarbonWindow(workArea) {
 function createKioskWindow() {
   _t0 = Date.now();
   session.defaultSession.preconnect({ url: 'https://html.duckduckgo.com' });
-  installAdTrackerBlock();
+  if (AD_BLOCKING_ENABLED) {
+    installAdTrackerBlock();
+  } else {
+    kioskLog('ad/tracker blocking disabled (AD_BLOCKING_ENABLED = false)');
+  }
 
   const allDisplays  = screen.getAllDisplays();
   const envIndex     = parseInt(process.env.KIOSK_DISPLAY, 10);
