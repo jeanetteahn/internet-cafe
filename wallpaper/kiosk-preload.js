@@ -40,7 +40,8 @@ ipcRenderer.invoke('get-cursor-css').then(function(css) {
 function createOverlayScrollbar() {
   var host = document.createElement('div');
   host.id = '__kiosk_sb';
-  host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;overflow:visible;';
+  // z-index one below the hinge layer (2147483647) so brackets always draw over the scroll track.
+  host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483646;overflow:visible;';
 
   var shadow;
   try {
@@ -354,6 +355,7 @@ function createHingeLayer() {
 
   var host = document.createElement('div');
   host.id = '__kiosk_hinges';
+  // z-index at the absolute max so brackets always draw over the scroll bar host (2147483646).
   host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;overflow:hidden;';
   var shadow;
   try { shadow = host.attachShadow({ mode: 'closed' }); } catch (e) { return; }
