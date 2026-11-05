@@ -34,6 +34,28 @@ ipcRenderer.invoke('get-cursor-css').then(function(css) {
   }, { once: true });
 }).catch(function() {});
 
+// ---- Cookie consent auto-acceptance -----------------------------------------
+// Only injected in top-level frames (window.top === window guard is inside the
+// script itself).  webFrame.executeJavaScript runs in the main world so the
+// script can reach real page DOM without sandboxing restrictions.
+(function () {
+  if (window.top !== window) return;
+  var script = '';
+  try { script = ipcRenderer.sendSync('get-cookie-consent-script-sync'); } catch (_) {}
+  if (!script) return;
+  webFrame.executeJavaScript(script).catch(function () {});
+  // Re-run on each soft navigation (SPA route change).
+  window.addEventListener('popstate', function () {
+    webFrame.executeJavaScript(script).catch(function () {});
+  });
+  // Forward banner-accepted messages from the main world to the main process.
+  window.addEventListener('message', function (ev) {
+    if (ev.source !== window) return;
+    if (!ev.data || !ev.data.__kioskCookieAccepted) return;
+    try { ipcRenderer.send('cookie-consent-accepted', ev.data.cmp || 'generic'); } catch (_) {}
+  });
+})();
+
 // ---- Custom overlay scrollbar -----------------------------------------------
 // Shadow host must be a div — attachShadow throws NotSupportedError on <html>.
 // Main-doc bars always visible when content overflows; inner bars show on hover.

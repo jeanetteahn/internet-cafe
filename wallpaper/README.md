@@ -470,6 +470,17 @@ Other things worth knowing:
     automatically if `package.json` is newer than `node_modules`, so the
     `@tgwf/co2` dependency is picked up without a manual step. If you install
     manually, run `npm install` in the `wallpaper/` directory.
+- **Cookie consent auto-acceptance** — `kiosk-cookie-consent.js` is an ES5
+  IIFE injected into every panel page via `webFrame.executeJavaScript`.  It
+  covers the most common CMP SDKs (OneTrust, Cookiebot, TrustArc, Didomi,
+  Sourcepoint, Usercentrics, CookieYes, Borlabs, Complianz, Iubenda, Quantcast,
+  and several generic bars) with a shadow-DOM–aware deep-query, and falls back
+  to button-text matching for anything else.  A MutationObserver watches for
+  late-mounting banners for 30 s after page load.  SPA route changes re-inject
+  the script on `popstate`.  When a banner is dismissed the script posts a
+  message to the preload, which forwards it to the main process via IPC; the
+  main process logs a 5-minute tally.  Toggle with `COOKIE_AUTO_ACCEPT_ENABLED`
+  in `kiosk-browsers.js`.
 
 ## Recommended workflow
 

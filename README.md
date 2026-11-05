@@ -130,6 +130,7 @@ internet-cafe/
     kiosk-main.js                  — kiosk cluster process entry point
     kiosk-browsers.js              — kiosk window + panel logic
     kiosk-preload.js               — detects trusted input events inside a panel; sends panel-activity IPC
+    kiosk-cookie-consent.js        — ES5 IIFE injected into every panel page to auto-dismiss cookie banners
     kiosk-handle.html              — 28 px drag strip (page title + Reset button) rendered into each panel
     kiosk-handle-preload.js        — exposes title updates and reset-position IPC to the handle
     kiosk-resize-grip.html         — 18 x 18 px corner resize handle rendered as a BrowserView overlay

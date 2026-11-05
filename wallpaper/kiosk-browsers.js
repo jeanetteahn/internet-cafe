@@ -98,6 +98,7 @@ const ALLOWED_DOMAINS = [
 // Flip AD_BLOCKING_ENABLED to true to re-enable the blocker if the process
 // count becomes a problem again.
 const AD_BLOCKING_ENABLED = false; // turns the ad/tracker request blocker on or off for all kiosk panels
+const COOKIE_AUTO_ACCEPT_ENABLED = true; // auto-dismiss cookie consent banners in every panel
 const AD_TRACKER_DOMAINS = [
   'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
   'googletagservices.com', 'adservice.google.com', 'amazon-adsystem.com',
@@ -811,6 +812,20 @@ function installAdTrackerBlock() {
     adBlockCount = 0;
   }, 5 * 60 * 1000);
 }
+
+let _cookieConsentScript = null;
+function getCookieConsentScript() {
+  if (_cookieConsentScript !== null) return _cookieConsentScript;
+  try {
+    _cookieConsentScript = fs.readFileSync(path.join(__dirname, 'kiosk-cookie-consent.js'), 'utf8');
+  } catch (e) {
+    kioskLog('cookie consent script missing:', e.message);
+    _cookieConsentScript = '';
+  }
+  return _cookieConsentScript;
+}
+
+let cookieConsentCount = 0;
 
 function buildErrorPageUrl(message, failedUrl) {
   const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -2860,6 +2875,24 @@ function attachActivityHandling() {
     const key = webContentsIdToKey.get(event.sender.id);
     event.returnValue = key ? hingePayload(key) : null;
   });
+
+  // Cookie consent: preload requests the script once per document via sendSync.
+  ipcMain.on('get-cookie-consent-script-sync', (event) => {
+    event.returnValue = COOKIE_AUTO_ACCEPT_ENABLED ? getCookieConsentScript() : '';
+  });
+  // Preload notifies us when it successfully clicked a banner.
+  ipcMain.on('cookie-consent-accepted', (_event, cmpName) => {
+    cookieConsentCount += 1;
+    kioskLog(`cookie banner accepted (${cmpName || 'generic'})`);
+  });
+  if (COOKIE_AUTO_ACCEPT_ENABLED) {
+    setInterval(() => {
+      if (cookieConsentCount > 0) {
+        kioskLog(`cookie banners auto-accepted in last 5 min: ${cookieConsentCount}`);
+        cookieConsentCount = 0;
+      }
+    }, 5 * 60 * 1000);
+  }
 
   // Shield window sends shield-move-tick on every pointermove.
   // Resets the 2 s safety timer and drives the active drag/resize.
