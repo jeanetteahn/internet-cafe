@@ -210,7 +210,8 @@
               // T-junction at (M,M). dir 'down': stem vertical, arm extends left.
               if (h.dir === 'down') place(el, dims, M - 20, M - 27);
             } else {
-              place(el, dims, M - dims.w, M - dims.h, 'scale(-1,-1)');
+              // Outer corner O px outside (M,M); border line runs through arm midpoints.
+              place(el, dims, M - O, M - O);
             }
             break;
 
@@ -219,7 +220,9 @@
               // T-junction at (W-M,M). dir 'up': scaleX(-1) flips arm rightward, stem vertical.
               if (h.dir === 'up') place(el, dims, W - M - 14, M - 27, 'scaleX(-1)');
             } else {
-              place(el, dims, W - M, M - dims.h, 'scaleY(-1)');
+              // scaleX(-1) mirrors the L so its corner points top-right.
+              // Outer corner O px outside (W-M,M); border line runs through arm midpoints.
+              place(el, dims, W - M + O - dims.w, M - O, 'scaleX(-1)');
             }
             break;
 
@@ -231,7 +234,9 @@
               if (h.dir === 'left') place(el, dims, M - 17.5, Wh - M - 24.5, 'rotate(90deg) scaleY(-1)');
               if (h.dir === 'down') place(el, dims, M - 20,   Wh - M - 27);
             } else {
-              place(el, dims, M - dims.w, Wh - M, 'scaleX(-1)');
+              // scaleY(-1) mirrors the L so its corner points bottom-left.
+              // Outer corner O px outside (M,Wh-M); border line runs through arm midpoints.
+              place(el, dims, M - O, Wh - M + O - dims.h, 'scaleY(-1)');
             }
             break;
 
@@ -240,7 +245,10 @@
               // T-junction at (W-M,Wh-M). dir 'down': scaleX(-1) flips arm rightward, stem vertical.
               if (h.dir === 'down') place(el, dims, W - M - 14, Wh - M - 27, 'scaleX(-1)');
             } else {
-              place(el, dims, W - M, Wh - M);
+              // scale(-1,-1) mirrors the L so its corner points bottom-right.
+              // Outer corner O px outside (W-M,Wh-M); border line runs through arm midpoints.
+              // Note: corner-br overlaps the resize grip — avoid using it on panels with grips.
+              place(el, dims, W - M + O - dims.w, Wh - M + O - dims.h, 'scale(-1,-1)');
             }
             break;
 
