@@ -409,16 +409,39 @@ function createHingeLayer() {
     if (document.documentElement && !host.isConnected) document.documentElement.appendChild(host);
   }
 
-  function mount() {
-    ensureHost();
-    new MutationObserver(ensureHost).observe(document.documentElement, { childList: true });
-    ipcRenderer.invoke('get-panel-hinges').then(render).catch(function () {});
-    ipcRenderer.on('panel-hinges', function (_e, cfg) { render(cfg); });
+  // Synchronous fetch — render into the shadow immediately so the layer is
+  // visible as soon as the host is appended, without an async round-trip.
+  var syncCfg = null;
+  try { syncCfg = ipcRenderer.sendSync('get-panel-hinges-sync'); } catch (_) {}
+  if (syncCfg) render(syncCfg);
+
+  // Track the per-documentElement observer so it can be reconnected if the
+  // documentElement is replaced (e.g. document.open()).
+  var elementObserver = new MutationObserver(ensureHost);
+  function attachElementObserver() {
+    if (document.documentElement) elementObserver.observe(document.documentElement, { childList: true });
   }
 
-  // Mount as early as possible so the overlap doesn't flicker on navigation.
-  if (document.documentElement) mount();
-  else window.addEventListener('DOMContentLoaded', mount, { once: true });
+  // Watch document.childList: handles documentElement not yet existing and
+  // handles documentElement replacement.
+  new MutationObserver(function () {
+    ensureHost();
+    elementObserver.disconnect();
+    attachElementObserver();
+  }).observe(document, { childList: true });
+
+  if (document.documentElement) {
+    ensureHost();
+    attachElementObserver();
+  }
+
+  // Async fallback when the sync call returned null (no config stored yet).
+  if (!syncCfg) {
+    ipcRenderer.invoke('get-panel-hinges').then(render).catch(function () {});
+  }
+
+  // Live updates: resize tweaks and navigation backstop pushes from main process.
+  ipcRenderer.on('panel-hinges', function (_e, cfg) { render(cfg); });
 }
 createHingeLayer();
 

@@ -1597,6 +1597,20 @@ function setupViewEventHandlers(key, win, view) {
     view.webContents.insertCSS(PANEL_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
   });
 
+  // Backstop: re-push hinge config on each new document so the overlap layer
+  // renders immediately without waiting for the preload's async fetch.
+  function sendHinges() {
+    if (panelViews[key] !== view) return;
+    if (view.webContents.isDestroyed()) return;
+    const payload = hingePayload(key);
+    if (payload) view.webContents.send('panel-hinges', payload);
+  }
+  view.webContents.on('did-navigate', (_e, _url, _code, _status, isMainFrame) => {
+    if (isMainFrame) sendHinges();
+  });
+  view.webContents.on('dom-ready', sendHinges);
+  view.webContents.on('did-finish-load', sendHinges);
+
   // Inject cursor CSS into cross-origin subframes (iframes) via executeJavaScript.
   // Author-origin with !important; belt-and-suspenders alongside the preload's
   // user-origin injection that runs when nodeIntegrationInSubFrames is true.
@@ -2753,6 +2767,10 @@ function attachActivityHandling() {
   ipcMain.handle('get-panel-hinges', (event) => {
     const key = webContentsIdToKey.get(event.sender.id);
     return key ? hingePayload(key) : null;
+  });
+  ipcMain.on('get-panel-hinges-sync', (event) => {
+    const key = webContentsIdToKey.get(event.sender.id);
+    event.returnValue = key ? hingePayload(key) : null;
   });
 
   // Shield window sends shield-move-tick on every pointermove.
