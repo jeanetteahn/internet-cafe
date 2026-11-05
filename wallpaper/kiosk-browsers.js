@@ -368,9 +368,10 @@ const ACTIVE_ANIM_MS      = 220;  // tween duration in ms (both enlarge and shri
 const TWEEN_INTERVAL_MS   = 16;   // step interval ms (~60 fps)
 const FIRST_CLICK_GRACE_MS = 1500; // grace window for first-click IPC race (see will-navigate comment)
 
-// "Loading…" placeholder shown immediately.  White background matches the
-// panel view's setBackgroundColor('#ffffff') so a slow panel looks like a
-// blank page rather than a broken black rectangle.
+// "Loading…" placeholder shown immediately.  Its own white body background
+// keeps the page area solid during the brief moment before the target page
+// paints (the panel view is transparent; #pagefill in kiosk-handle.html
+// provides the white behind it).
 const PLACEHOLDER_URL = 'data:text/html,' + encodeURIComponent(
   '<body style="margin:0;background:#fff;color:#888;' +
   'font:14px/1 sans-serif;display:flex;align-items:center;' +
@@ -665,10 +666,11 @@ function makePanelView() {
       nodeIntegrationInSubFrames: true,
     },
   });
-  // Electron 30+ BrowserView defaults to transparent; without this, pages
-  // that don't paint their own background (including DDG's /l/ redirect)
-  // show the panel window's dark #1a1a1a backdrop instead of white.
-  view.setBackgroundColor('#ffffff');
+  // Transparent so the full brackets and orange border lines remain visible
+  // while a new page is loading.  kiosk-handle.html's #pagefill div covers
+  // exactly the page area with white, so the panel looks solid during loads
+  // even though the view itself is see-through.
+  view.setBackgroundColor('#00000000');
   return view;
 }
 

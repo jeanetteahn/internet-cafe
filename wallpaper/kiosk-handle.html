@@ -59,9 +59,19 @@
       pointer-events: none;
       overflow: visible;
     }
+
+    /* White fill behind the page view — covers the page area so the panel
+       looks solid white during loads even though the view is transparent.
+       Painted below #strip, #border, and #hinges so brackets stay on top. */
+    #pagefill {
+      position: absolute;
+      background: #ffffff;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
+  <div id="pagefill"></div>
   <div id="strip"></div>
   <div id="border"></div>
   <div id="hinges"></div>
@@ -328,6 +338,12 @@
       var Wh     = window.innerHeight;
       var panelW = W  - 2 * M;
       var panelH = Wh - 2 * M - H;
+
+      var pagefill = document.getElementById('pagefill');
+      pagefill.style.left   = M + 'px';
+      pagefill.style.top    = (M + H) + 'px';
+      pagefill.style.width  = panelW + 'px';
+      pagefill.style.height = panelH + 'px';
 
       var strip = document.getElementById('strip');
       strip.style.left   = M + 'px';
