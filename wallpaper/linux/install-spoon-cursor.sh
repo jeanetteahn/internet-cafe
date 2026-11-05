@@ -230,7 +230,33 @@ const svg = [
   `</svg>`,
 ].join('');
 
-process.stdout.write(JSON.stringify({ artW, artH, outerW, outerH, hotX, hotY, svg }));
+// Busy cursor: square art canvas so the spoon can rotate without clipping.
+// The diagonal of artW×artH is the minimum side length needed; add 4 px breathing room.
+const artDiag     = Math.sqrt(artW * artW + artH * artH);
+const busySize    = Math.ceil(artDiag) + 4;
+const busyOuterW  = busySize + PAD_L + PAD_R;
+const busyOuterH  = busySize + PAD_T + PAD_B;
+// Hotspot at the visual center of the spinner (center of the outer frame).
+const busyHotX    = Math.round(busyOuterW / 2);
+const busyHotY    = Math.round(busyOuterH / 2);
+const busyOuterW2 = busyOuterW * 2;
+const busyOuterH2 = busyOuterH * 2;
+const busyHotX2   = busyHotX * 2;
+const busyHotY2   = busyHotY * 2;
+// Filter region percentages relative to the busy inner SVG (busySize × busySize).
+const busyFRegX = (-Math.ceil(PAD_L / busySize * 100)) + '%';
+const busyFRegY = (-Math.ceil(PAD_T / busySize * 100)) + '%';
+const busyFRegW = (Math.ceil(busyOuterW / busySize * 100) + 1) + '%';
+const busyFRegH = (Math.ceil(busyOuterH / busySize * 100) + 1) + '%';
+
+process.stdout.write(JSON.stringify({
+  artW, artH, outerW, outerH, hotX, hotY, svg,
+  body, spoonVbW, spoonVbH,
+  busySize, busyPadL: PAD_L, busyPadT: PAD_T,
+  busyOuterW, busyOuterH, busyHotX, busyHotY,
+  busyOuterW2, busyOuterH2, busyHotX2, busyHotY2,
+  busyFRegX, busyFRegY, busyFRegW, busyFRegH,
+}));
 NODEJS_EOF
 
 JSON=$(node "$NODE_SCRIPT" "$FK_SVG" "$SPOON_SVG")
@@ -273,6 +299,77 @@ CURSOR_BIN="$TMP_DIR/spoon.cursor"
 xcursorgen "$CFG" "$CURSOR_BIN"
 echo "  xcursorgen: built $CURSOR_BIN"
 
+# ---- Build animated busy cursor (spoon-busy.cursor) ---------------------------
+# 24 frames × 15° clockwise × 42 ms/frame ≈ 1 revolution per second.
+# The spoon art is rotated first; the drop shadow is then applied to each
+# rotated frame so the shadow always falls straight down and does not spin.
+echo "Building animated busy cursor (24 frames @ 42 ms each)..."
+
+BUSY_SIZE=$(get_field busySize)
+BUSY_OUTER_W=$(get_field busyOuterW)
+BUSY_OUTER_H=$(get_field busyOuterH)
+BUSY_HOT_X=$(get_field busyHotX)
+BUSY_HOT_Y=$(get_field busyHotY)
+BUSY_OUTER_W2=$(get_field busyOuterW2)
+BUSY_OUTER_H2=$(get_field busyOuterH2)
+BUSY_HOT_X2=$(get_field busyHotX2)
+BUSY_HOT_Y2=$(get_field busyHotY2)
+echo "  busySize=${BUSY_SIZE}  busyOuter=${BUSY_OUTER_W}x${BUSY_OUTER_H}  busyHot=(${BUSY_HOT_X},${BUSY_HOT_Y})"
+
+# Node script: writes busy_frame_NN.svg for each of the 24 rotation steps.
+# Each SVG: spoon art centered and rotated inside a busySize×busySize inner
+# SVG, the drop-shadow filter applied to that inner SVG (so shadow stays down).
+BUSY_GEN_SCRIPT="$TMP_DIR/busy-gen.js"
+cat > "$BUSY_GEN_SCRIPT" << 'BUSYGEN_EOF'
+const fs   = require('fs');
+const json = JSON.parse(process.argv[1]);
+const dir  = process.argv[2];
+for (let i = 0; i < 24; i++) {
+  const angle = i * 15;          // degrees clockwise
+  const half  = json.busySize / 2;
+  const svg = [
+    `<svg width="${json.busyOuterW}" height="${json.busyOuterH}" xmlns="http://www.w3.org/2000/svg">`,
+    `<defs><filter id="s" x="${json.busyFRegX}" y="${json.busyFRegY}" width="${json.busyFRegW}" height="${json.busyFRegH}" color-interpolation-filters="sRGB">`,
+    `<feDropShadow dx="0" dy="4" stdDeviation="9" flood-color="#000" flood-opacity="0.42"/>`,
+    `</filter></defs>`,
+    `<svg x="${json.busyPadL}" y="${json.busyPadT}" width="${json.busySize}" height="${json.busySize}" viewBox="0 0 ${json.busySize} ${json.busySize}" filter="url(#s)">`,
+    `<g transform="translate(${half},${half}) rotate(${angle}) translate(${-json.artW / 2},${-json.artH / 2})">`,
+    `<svg width="${json.artW}" height="${json.artH}" viewBox="0 0 ${json.spoonVbW} ${json.spoonVbH}">${json.body}</svg>`,
+    `</g>`,
+    `</svg>`,
+    `</svg>`,
+  ].join('');
+  fs.writeFileSync(`${dir}/busy_frame_${String(i).padStart(2, '0')}.svg`, svg);
+}
+BUSYGEN_EOF
+
+node "$BUSY_GEN_SCRIPT" "$JSON" "$TMP_DIR"
+echo "  generated 24 frame SVGs"
+
+BUSY_CFG="$TMP_DIR/spoon-busy.cfg"
+> "$BUSY_CFG"
+# Render all frames at both sizes; list 1x frames first, then 2x, so each
+# size group is contiguous in the .cfg file (xcursorgen groups by size).
+echo "  rendering frames..."
+for i in $(seq 0 23); do
+  FRAME_NUM=$(printf '%02d' "$i")
+  FRAME_SVG="$TMP_DIR/busy_frame_${FRAME_NUM}.svg"
+  FRAME_PNG_1X="$TMP_DIR/busy_frame_${FRAME_NUM}_1x.png"
+  FRAME_PNG_2X="$TMP_DIR/busy_frame_${FRAME_NUM}_2x.png"
+  rsvg-convert -w "$BUSY_OUTER_W"  -h "$BUSY_OUTER_H"  "$FRAME_SVG" -o "$FRAME_PNG_1X"
+  rsvg-convert -w "$BUSY_OUTER_W2" -h "$BUSY_OUTER_H2" "$FRAME_SVG" -o "$FRAME_PNG_2X"
+  printf '%d %d %d %s %d\n' "$BUSY_OUTER_W"  "$BUSY_HOT_X"  "$BUSY_HOT_Y"  "$FRAME_PNG_1X" 42 >> "$BUSY_CFG"
+done
+for i in $(seq 0 23); do
+  FRAME_NUM=$(printf '%02d' "$i")
+  FRAME_PNG_2X="$TMP_DIR/busy_frame_${FRAME_NUM}_2x.png"
+  printf '%d %d %d %s %d\n' "$BUSY_OUTER_W2" "$BUSY_HOT_X2" "$BUSY_HOT_Y2" "$FRAME_PNG_2X" 42 >> "$BUSY_CFG"
+done
+
+BUSY_CURSOR_BIN="$TMP_DIR/spoon-busy.cursor"
+xcursorgen "$BUSY_CFG" "$BUSY_CURSOR_BIN"
+echo "  xcursorgen: built $BUSY_CURSOR_BIN"
+
 # ---- Detect current theme for Inherits= fallback in the spoon index.theme ----
 INHERIT_THEME="$(detect_current_theme)"
 echo "Cursor fallback (Inherits) theme: $INHERIT_THEME"
@@ -281,13 +378,12 @@ echo "Cursor fallback (Inherits) theme: $INHERIT_THEME"
 echo "Installing theme to $CURSORS_DIR..."
 mkdir -p "$CURSORS_DIR"
 
-# Place the single cursor binary
-cp "$CURSOR_BIN" "$CURSORS_DIR/spoon.cursor"
+# Place both cursor binaries
+cp "$CURSOR_BIN"      "$CURSORS_DIR/spoon.cursor"
+cp "$BUSY_CURSOR_BIN" "$CURSORS_DIR/spoon-busy.cursor"
 
-# ---- Named cursor symlinks (every name maps to the spoon) ---------------------
-# The exhibit wants the spoon for every interaction, so links, text, drags,
-# resizes and window-manager moves all map here too.  To keep the text I-beam
-# instead, delete xterm/ibeam/text/vertical-text from this list.
+# ---- Named cursor symlinks ----------------------------------------------------
+# Static spoon for every interaction except the busy/loading cursors.
 SPOON_NAMES=(
   # arrows / default
   left_ptr default arrow top_left_arrow right_ptr center_ptr context-menu
@@ -305,8 +401,7 @@ SPOON_NAMES=(
   sb_h_double_arrow sb_v_double_arrow h_double_arrow v_double_arrow
   left_side right_side top_side bottom_side
   top_left_corner top_right_corner bottom_left_corner bottom_right_corner
-  # busy / misc
-  wait watch progress left_ptr_watch half-busy
+  # misc
   circle not-allowed no-drop crossed_circle forbidden X_cursor
   help question_arrow whats_this crosshair cross tcross cell plus
   zoom-in zoom-out pencil
@@ -314,6 +409,15 @@ SPOON_NAMES=(
 
 for name in "${SPOON_NAMES[@]}"; do
   ln -sf spoon.cursor "$CURSORS_DIR/$name"
+done
+
+# Animated busy spoon for all wait/loading cursor names.
+BUSY_NAMES=(
+  wait watch progress left_ptr_watch half-busy
+)
+
+for name in "${BUSY_NAMES[@]}"; do
+  ln -sf spoon-busy.cursor "$CURSORS_DIR/$name"
 done
 
 # ---- Hash-named aliases -------------------------------------------------------
@@ -329,14 +433,6 @@ declare -A HASH_MAP=(
   ["a2a266d0498c3104214a47bd64ab0fc8"]="top_left_arrow"
   # X_cursor
   ["00000000000000020006000e7e9ffc3f"]="X_cursor"
-  # wait
-  ["0426c94ea35c87780ff01dc239897213"]="wait"
-  # watch
-  ["3ecb610c1bf2410f44200f48c40d3599"]="watch"
-  ["9116a3ea924ed2162ecab71ba103b17f"]="watch"
-  # left_ptr_watch / progress
-  ["08e8e1c95fe2fc01f976f1e063a24ccd"]="left_ptr_watch"
-  ["3c6c4f67d6e35484e9e2bad6eb09f7ca"]="left_ptr_watch"
   # circle / not-allowed
   ["0ea85b24192d2383acde9b34bd8d740f"]="circle"
   ["fcf21c00b30f7e3f83fe0dfd12e71cff"]="crossed_circle"
@@ -362,7 +458,23 @@ declare -A HASH_MAP=(
 for hash in "${!HASH_MAP[@]}"; do
   ln -sf spoon.cursor "$CURSORS_DIR/$hash"
 done
-echo "  created ${#SPOON_NAMES[@]} named cursors + ${#HASH_MAP[@]} hash aliases"
+
+# Busy-cursor hash aliases → spoon-busy.cursor.
+declare -A BUSY_HASH_MAP=(
+  # wait
+  ["0426c94ea35c87780ff01dc239897213"]="wait"
+  # watch
+  ["3ecb610c1bf2410f44200f48c40d3599"]="watch"
+  ["9116a3ea924ed2162ecab71ba103b17f"]="watch"
+  # left_ptr_watch / progress
+  ["08e8e1c95fe2fc01f976f1e063a24ccd"]="left_ptr_watch"
+  ["3c6c4f67d6e35484e9e2bad6eb09f7ca"]="left_ptr_watch"
+)
+
+for hash in "${!BUSY_HASH_MAP[@]}"; do
+  ln -sf spoon-busy.cursor "$CURSORS_DIR/$hash"
+done
+echo "  created ${#SPOON_NAMES[@]} static + ${#BUSY_NAMES[@]} busy named cursors + ${#HASH_MAP[@]} + ${#BUSY_HASH_MAP[@]} hash aliases"
 
 # ---- index.theme --------------------------------------------------------------
 # Inherits= points at the old theme so xterm, resize, and grab cursors fall

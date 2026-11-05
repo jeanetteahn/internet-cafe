@@ -324,6 +324,14 @@ const GRIP_CURSOR_CSS       = _spoonRule;
 const FORKKNIFE_CURSOR_CSS  = _spoonRule;
 const ADDRESSBAR_CURSOR_CSS = _spoonRule;
 
+// Busy cursor for active panels that are slow to load (> 1500 ms).
+// On Linux with the system spoon theme: `progress` maps to spoon-busy.cursor
+// (animated 24-frame spinner).  On dev machines (CSS cursor): CSS cannot
+// animate, so we keep the static spoon and just log the state changes.
+const PANEL_BUSY_CSS = SYSTEM_SPOON_CURSOR
+  ? '*{cursor:progress!important}'
+  : PANEL_CURSOR_CSS;
+
 // ---- Clock window ------------------------------------------------------------
 // SVG viewBox is 87.2×87.2; the window is square.
 // CLOCK_SIZE is declared at the top of the file.
@@ -419,6 +427,13 @@ const webContentsIdToKey = new Map();
 // key -> latest hinge placements reported by that panel's kiosk-handle.html.
 const panelHinges = new Map();
 const HINGE_BORDER_COLOR = '#e74e25'; // must match #border in kiosk-handle.html
+
+// ---- Busy-cursor state -------------------------------------------------------
+// Active only for panels in 'active' mode that are slow to load (> 1500 ms).
+const panelBusyOnsetTimers = new Map(); // key -> timer id — fires after 1500 ms still-loading
+const panelBusyCapTimers   = new Map(); // key -> timer id — 20 s safety cap
+const panelBusyActive      = new Map(); // key -> bool     — busy cursor currently shown
+const panelCursorCssKeys   = new Map(); // key -> string   — insertCSS key for current rule
 
 function hingePayload(key) {
   const hinges = panelHinges.get(key);
@@ -1230,6 +1245,7 @@ function notePanelActivity(key, eventType) {
     }
     if (enlargedKey === key) enlargedKey = null;
     ps.mode        = 'auto';
+    clearBusyCursor(key, 'panel went auto');
     ps.manualLayout = false;
     if (Array.from(panelStates.values()).every(s => s.mode === 'auto')) {
       panelOrder = [...DEFAULT_PANEL_ORDER]; // nobody at the kiosk: hub back on top
@@ -1286,6 +1302,34 @@ function notePanelActivity(key, eventType) {
     }
   }
   if (isDeliberate) retargetAddressBar(key);
+}
+
+// ---- Busy-cursor helpers -----------------------------------------------------
+
+// Cancel the onset and cap timers without touching the CSS on the current page.
+// Use before replacing a view so we don't try to modify a document being torn down.
+function cancelBusyTimers(key) {
+  clearTimeout(panelBusyOnsetTimers.get(key));
+  panelBusyOnsetTimers.set(key, null);
+  clearTimeout(panelBusyCapTimers.get(key));
+  panelBusyCapTimers.set(key, null);
+}
+
+// Cancel timers, reset the busy flag, and swap the cursor CSS back to normal.
+// Called when loading ends, the panel goes auto, or the safety cap fires.
+function clearBusyCursor(key, reason) {
+  cancelBusyTimers(key);
+  if (!panelBusyActive.get(key)) return;
+  panelBusyActive.set(key, false);
+  kioskLog(`panel ${key} busy cursor off (${reason})`);
+  if (!SYSTEM_SPOON_CURSOR) return; // non-Linux: CSS cursor is static; nothing to swap
+  const view = panelViews[key];
+  if (!view || view.webContents.isDestroyed()) return;
+  const oldKey = panelCursorCssKeys.get(key);
+  if (oldKey) view.webContents.removeInsertedCSS(oldKey).catch(() => {});
+  view.webContents.insertCSS(PANEL_CURSOR_CSS, { cssOrigin: 'user' })
+    .then(k => { panelCursorCssKeys.set(key, k); })
+    .catch(() => {});
 }
 
 // ---- View event handler setup -----------------------------------------------
@@ -1424,6 +1468,7 @@ function setupViewEventHandlers(key, win, view) {
     // Clear watchdog — the load definitely ended.
     clearTimeout(ps.loadTimer);
     ps.loadTimer = null;
+    clearBusyCursor(key, 'did-fail-load');
 
     if (ps.mode === 'active') {
       console.log(`[kiosk-active] ${key} load failed (${errorCode}): ${failedUrl}`);
@@ -1594,9 +1639,50 @@ function setupViewEventHandlers(key, win, view) {
     return { action: 'deny' };
   });
 
+  // Switch to the busy spinner after 1500 ms of continued loading.  Only for
+  // active-mode panels; auto-mode panels reload constantly and must never spin.
+  view.webContents.on('did-start-loading', () => {
+    if (panelViews[key] !== view) return;
+    // Clear any pending onset timer so rapid navigations don't stack up.
+    clearTimeout(panelBusyOnsetTimers.get(key));
+    panelBusyOnsetTimers.set(key, setTimeout(() => {
+      panelBusyOnsetTimers.set(key, null);
+      if (panelViews[key] !== view) return;
+      if (view.webContents.isDestroyed()) return;
+      const ps = panelStates.get(key);
+      if (!ps || ps.mode !== 'active') return;
+      if (!view.webContents.isLoading()) return; // already finished before timer fired
+      panelBusyActive.set(key, true);
+      kioskLog(`panel ${key} busy cursor on (loading > 1500 ms)`);
+      if (SYSTEM_SPOON_CURSOR) {
+        const oldKey = panelCursorCssKeys.get(key);
+        if (oldKey) view.webContents.removeInsertedCSS(oldKey).catch(() => {});
+        view.webContents.insertCSS(PANEL_BUSY_CSS, { cssOrigin: 'user' })
+          .then(k => { panelCursorCssKeys.set(key, k); })
+          .catch(() => {});
+      }
+      // Safety cap: revert to the normal spoon after 20 s so it never spins forever.
+      clearTimeout(panelBusyCapTimers.get(key));
+      panelBusyCapTimers.set(key, setTimeout(() => {
+        panelBusyCapTimers.set(key, null);
+        clearBusyCursor(key, '20 s safety cap');
+      }, 20000));
+    }, 1500));
+  });
+
+  view.webContents.on('did-stop-loading', () => {
+    if (panelViews[key] !== view) return;
+    clearBusyCursor(key, 'did-stop-loading');
+  });
+
+  // Inject the correct cursor rule into each new document.  dom-ready fires for
+  // fresh documents, so the rule matches whatever state the panel is in right now.
   view.webContents.on('dom-ready', () => {
     if (panelViews[key] !== view) return;
-    view.webContents.insertCSS(PANEL_CURSOR_CSS, { cssOrigin: 'user' }).catch(() => {});
+    const rule = panelBusyActive.get(key) ? PANEL_BUSY_CSS : PANEL_CURSOR_CSS;
+    view.webContents.insertCSS(rule, { cssOrigin: 'user' })
+      .then(k => { panelCursorCssKeys.set(key, k); })
+      .catch(() => {});
   });
 
   // Backstop: re-push hinge config on each new document so the overlap layer
@@ -3316,6 +3402,8 @@ function recyclePanelView(key) {
   view.setBounds({ x: M, y: HANDLE_HEIGHT + M, width: panelW, height: panelH });
   view.setAutoResize({ width: true, height: true });
 
+  cancelBusyTimers(key);
+  panelBusyActive.set(key, false);
   panelViews[key] = view;
   webContentsIdToKey.set(view.webContents.id, key);
   setupViewEventHandlers(key, win, view);
