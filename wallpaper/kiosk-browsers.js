@@ -876,10 +876,10 @@ function positionGrip(key) {
 // pieces register rather than falling through to the wallpaper.
 const PANEL_CORNER_PIECES = {
   hub:         [],
-  topLeft:     [],
+  topLeft:     ['corner-tr'],
   topRight:    [],
   bottomLeft:  [],
-  bottomRight: [],
+  bottomRight: ['corner-tr'],
 };
 
 function updateWindowShape(key) {
