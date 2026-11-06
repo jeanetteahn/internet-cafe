@@ -470,17 +470,28 @@ Other things worth knowing:
     automatically if `package.json` is newer than `node_modules`, so the
     `@tgwf/co2` dependency is picked up without a manual step. If you install
     manually, run `npm install` in the `wallpaper/` directory.
-- **Cookie consent auto-acceptance** — `kiosk-cookie-consent.js` is an ES5
-  IIFE injected into every panel page via `webFrame.executeJavaScript`.  It
-  covers the most common CMP SDKs (OneTrust, Cookiebot, TrustArc, Didomi,
-  Sourcepoint, Usercentrics, CookieYes, Borlabs, Complianz, Iubenda, Quantcast,
-  and several generic bars) with a shadow-DOM–aware deep-query, and falls back
-  to button-text matching for anything else.  A MutationObserver watches for
-  late-mounting banners for 30 s after page load.  SPA route changes re-inject
-  the script on `popstate`.  When a banner is dismissed the script posts a
-  message to the preload, which forwards it to the main process via IPC; the
-  main process logs a 5-minute tally.  Toggle with `COOKIE_AUTO_ACCEPT_ENABLED`
-  in `kiosk-browsers.js`.
+- **Cookie consent auto-acceptance** — `kiosk-cookie-consent.js` runs in
+  **every frame** (not just the top frame), so consent popups that live inside
+  cross-origin iframes (Sourcepoint, TrustArc, Google Funding Choices, YouTube)
+  are handled automatically.  Frames that look like ads or videos are ignored;
+  only frames whose URL, title, or DOM signal a consent dialog are acted on.
+  The script knows 25 consent platforms by name (OneTrust, Cookiebot, Didomi,
+  Quantcast, Sourcepoint, Usercentrics, TrustArc, Google, Osano, CookieYes,
+  Complianz, Iubenda, HubSpot, Axeptio, Civic, Klaro, Termly, Shopify, Amazon,
+  BBC, Meta, Borlabs, Moove, Ezoic, and a cookie-notice variant) and clicks
+  their documented "Accept all" button.  When the banner is visible but its
+  button isn't reachable in the DOM, it falls back to calling the platform's JS
+  API (e.g. `OneTrust.AllowAll()`, `Didomi.setUserAgreeToAll()`).  The generic
+  fallback clicks "accept"-style buttons only when they sit inside a container
+  that looks like a cookie banner, so ordinary page buttons are never triggered,
+  and it never clicks `<a>` links that would navigate away.  Clicks are
+  untrusted (`event.isTrusted === false`), so they never flip a panel from auto
+  to active mode.  Each page is watched for 30 s, with debounced DOM-mutation
+  rescans, capped at 40 scans and 4 clicks per document.  Every accepted banner
+  prints `[kiosk-consent] <panel> accepted on <host> via <how>` to the console;
+  `/tmp/internet-cafe-wallpaper/kiosk-electron.log` gets a 5-minute tally line.
+  Toggle with `COOKIE_AUTO_ACCEPT_ENABLED` in `kiosk-browsers.js`.  To add a
+  missed site, append an entry to the `CMPS` array in `kiosk-cookie-consent.js`.
 
 ## Recommended workflow
 

@@ -3163,10 +3163,12 @@ function attachActivityHandling() {
   ipcMain.on('get-cookie-consent-script-sync', (event) => {
     event.returnValue = COOKIE_AUTO_ACCEPT_ENABLED ? getCookieConsentScript() : '';
   });
-  // Preload notifies us when it successfully clicked a banner.
-  ipcMain.on('cookie-consent-accepted', (_event, cmpName) => {
+  // Preload forwards banner-accepted reports from the main world.
+  ipcMain.on('cookie-consent-accepted', (event, info) => {
+    const key = webContentsIdToKey.get(event.sender.id) || '?';
+    const i = (info && typeof info === 'object') ? info : { how: String(info || 'generic') };
     cookieConsentCount += 1;
-    kioskLog(`cookie banner accepted (${cmpName || 'generic'})`);
+    console.log(`[kiosk-consent] ${key} accepted on ${i.host || '?'}${i.top === false ? ' (iframe)' : ''} via ${i.how} "${i.detail || ''}"`);
   });
   if (COOKIE_AUTO_ACCEPT_ENABLED) {
     setInterval(() => {

@@ -35,24 +35,27 @@ ipcRenderer.invoke('get-cursor-css').then(function(css) {
 }).catch(function() {});
 
 // ---- Cookie consent auto-acceptance -----------------------------------------
-// Only injected in top-level frames (window.top === window guard is inside the
-// script itself).  webFrame.executeJavaScript runs in the main world so the
-// script can reach real page DOM without sandboxing restrictions.
+// Runs in EVERY frame (nodeIntegrationInSubFrames is true), so consent popups
+// inside iframes (Sourcepoint, TrustArc, Google/YouTube) are handled too.
+// kiosk-cookie-consent.js decides for itself which iframes look like consent
+// dialogs and ignores the rest (ads, videos).  It runs in the page's main world
+// so it can call consent-platform APIs and is never blocked by page CSP, and it
+// guards against running twice in the same document.
 (function () {
-  if (window.top !== window) return;
   var script = '';
   try { script = ipcRenderer.sendSync('get-cookie-consent-script-sync'); } catch (_) {}
   if (!script) return;
-  webFrame.executeJavaScript(script).catch(function () {});
-  // Re-run on each soft navigation (SPA route change).
-  window.addEventListener('popstate', function () {
-    webFrame.executeJavaScript(script).catch(function () {});
-  });
-  // Forward banner-accepted messages from the main world to the main process.
+  try { webFrame.executeJavaScript(script).catch(function () {}); } catch (_) {}
+  // Forward banner-accepted reports from the main world to the main process.
   window.addEventListener('message', function (ev) {
-    if (ev.source !== window) return;
-    if (!ev.data || !ev.data.__kioskCookieAccepted) return;
-    try { ipcRenderer.send('cookie-consent-accepted', ev.data.cmp || 'generic'); } catch (_) {}
+    var d = ev.data;
+    if (ev.source !== window || !d || d.__kioskConsent !== true) return;
+    try {
+      ipcRenderer.send('cookie-consent-accepted', {
+        how: String(d.how || ''), detail: String(d.detail || ''),
+        host: String(d.host || ''), top: !!d.top,
+      });
+    } catch (_) {}
   });
 })();
 
