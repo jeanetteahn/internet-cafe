@@ -118,19 +118,23 @@ const AD_TRACKER_DOMAINS = [
 // At the page bottom the panel jumps to the top and immediately moves to the
 // next search term.  MIN_SEARCH_INTERVAL_MS is a floor that adds a short extra
 // wait only when the page was very short (guards against DDG rate-limiting
-// across 5 panels).  SEARCH_INTERVAL_MS is a safety-net ceiling for pages
-// that never trigger bottom detection.
-const SEARCH_INTERVAL_MS     = 45 * 1000; // max time on a results page (safety net)
+// across 5 panels).  SEARCH_INTERVAL_MIN/MAX_MS is a randomised safety-net
+// ceiling for pages that never trigger bottom detection.
+const SEARCH_INTERVAL_MIN_MS = 35 * 1000; // random safety-net cap on a search page — minimum
+const SEARCH_INTERVAL_MAX_MS = 60 * 1000; // random safety-net cap on a search page — maximum
 const MIN_SEARCH_INTERVAL_MS =  5 * 1000; // min time between searches per panel — floor for very short pages
 const BOTTOM_HOLD_MS         = 300;       // brief pause after jumping to top before loading next search
-const SCROLL_STEP_PX         = 80;        // px scrolled per tick
-const SCROLL_STEP_MS         = 250;       // ms between scroll ticks (bottom checks); speed = STEP_PX / STEP_MS
+const SCROLL_STEP_PX         = 80;        // px scrolled per tick (tick rate; speed is now random per page)
+const SCROLL_STEP_MS         = 250;       // ms between scroll ticks (bottom checks)
+const SCROLL_SPEED_MIN_PX_S  = 200;       // slowest random auto-scroll speed (px/s)
+const SCROLL_SPEED_MAX_PX_S  = 450;       // fastest random auto-scroll speed (px/s)
 const AUTO_SCROLL_FRAME_MS   = 33;        // in-page auto-scroll frame interval (~30 fps); 16 = 60 fps if the GPU can afford it
 const INACTIVITY_TIMEOUT_MS  = 120 * 1000; // idle grace period before auto mode resumes
 const LOAD_TIMEOUT_MS        = 15 * 1000; // per-panel watchdog: abort and retry if a DDG load takes longer
 const GLOBAL_SEARCH_GAP_MS   =  2 * 1000; // minimum gap between any two panels starting a DDG search
 const FOLLOW_RESULT_PROBABILITY = 1.0;        // chance of clicking a result after a search scroll; < 1 mixes in plain searches
-const RESULT_DWELL_MS           = 25 * 1000;  // max time on a result page before returning to search
+const RESULT_DWELL_MIN_MS       = 15 * 1000;  // random dwell on a result page before returning to search — minimum
+const RESULT_DWELL_MAX_MS       = 35 * 1000;  // random dwell on a result page before returning to search — maximum
 const RESULT_LOAD_TIMEOUT_MS    = 12 * 1000;  // watchdog: abort a stalled result page load, move to next search
 const RESULT_HIGHLIGHT_MS       = 600;         // visual highlight duration (ms) on the chosen anchor before navigating
 const AUTO_LINK_POLICY          = 'allowlist-preferred'; // 'allowlist-preferred' = prefer ALLOWED_DOMAINS, fall back to isPassesPolicy;
@@ -1888,8 +1892,8 @@ function setupViewEventHandlers(key, win, view) {
 // Auto mode alternates between DuckDuckGo results pages and individual result
 // pages.  The per-panel flow is:
 //
-//   doSearch → DDG page loads → onSearchPageReady → startScrolling
-//              (or cached file)                   → SEARCH_INTERVAL_MS dwell cap
+//   doSearch → DDG page loads → onSearchPageReady → startScrolling (picks random speed)
+//              (or cached file)                   → random search cap (SEARCH_INTERVAL_MIN/MAX_MS)
 //              scroll tick detects bottom ─────────>|
 //                                             scrollTo(0,0)
 //                                             stopScrolling
@@ -1900,8 +1904,8 @@ function setupViewEventHandlers(key, win, view) {
 //                                               │  highlight anchor (RESULT_HIGHLIGHT_MS)
 //                                               │  ps.autoPhase = 'result'
 //                                               │  loadURL(target)
-//                                               │  → onResultPageReady → startScrolling
-//                                               │                       → RESULT_DWELL_MS cap
+//                                               │  → onResultPageReady → startScrolling (picks random speed)
+//                                               │                       → random dwell (RESULT_DWELL_MIN/MAX_MS)
 //                                               │  scroll detects bottom → doSearch(next) …
 //                                               └─ (no eligible result or probability skip)
 //                                                  → doSearch(next term) …
@@ -1916,10 +1920,15 @@ function setupViewEventHandlers(key, win, view) {
 //   • When a DDG search is in-flight (ps.loadTimer set), the search-phase
 //     scroll bottom does not advance — onSearchPageReady takes over on landing.
 
+function randBetween(min, max) {
+  return min + Math.random() * (max - min);
+}
+
 function startScrolling(key) {
   const ps = panelStates.get(key);
   if (!ps) return;
   stopScrolling(key);
+  ps.scrollPxS = randBetween(SCROLL_SPEED_MIN_PX_S, SCROLL_SPEED_MAX_PX_S);
   ps.scrollTimer = setInterval(async () => {
     if (ps.mode !== 'auto') { stopScrolling(key); return; }
     const view = panelViews[key];
@@ -1952,7 +1961,7 @@ function startScrolling(key) {
               if (now > a.until) { a.raf = 0; a.acc = 0; return; }
               var dt = now - a.last;
               if (dt >= ${AUTO_SCROLL_FRAME_MS}) {
-                a.acc += dt * ${SCROLL_STEP_PX / SCROLL_STEP_MS};
+                a.acc += dt * ${ps.scrollPxS / 1000};
                 a.last = now;
                 var px = Math.floor(a.acc);
                 if (px >= 1) { window.scrollBy({ top: px, behavior: 'instant' }); a.acc -= px; }
@@ -2043,7 +2052,10 @@ function onSearchPageReady(key) {
   const url = panelViews[key]?.webContents.getURL() || '';
   console.log(`[kiosk-auto] ${key} search page ready: ${url}`);
 
-  startScrolling(key);
+  startScrolling(key); // sets ps.scrollPxS
+
+  const searchCapMs = randBetween(SEARCH_INTERVAL_MIN_MS, SEARCH_INTERVAL_MAX_MS);
+  kioskLog(`[kiosk-auto] ${key} speed=${Math.round(ps.scrollPxS)}px/s cap=${Math.round(searchCapMs / 1000)}s`);
 
   clearTimeout(ps.dwellTimer);
   ps.dwellTimer = setTimeout(() => {
@@ -2051,7 +2063,7 @@ function onSearchPageReady(key) {
     if (ps.mode !== 'auto') return;
     stopScrolling(key);
     onSearchBottom(key); // respect FOLLOW_RESULT_PROBABILITY even on the dwell cap
-  }, SEARCH_INTERVAL_MS);
+  }, searchCapMs);
 }
 
 // Schedules the next doSearch call with per-panel exponential backoff
@@ -2284,8 +2296,7 @@ function onResultRejected(key, url, reason, markBad) {
   doSearch(key);
 }
 
-// Called when a search page hits the bottom (or the SEARCH_INTERVAL_MS dwell
-// cap fires).  Respects FOLLOW_RESULT_PROBABILITY; when following, picks a
+// Called when a search page hits the bottom (or the random search-cap timer fires).  Respects FOLLOW_RESULT_PROBABILITY; when following, picks a
 // random eligible result, highlights it briefly, then loads it in the panel.
 async function onSearchBottom(key) {
   const ps = panelStates.get(key);
@@ -2355,20 +2366,22 @@ async function onSearchBottom(key) {
   }, RESULT_HIGHLIGHT_MS);
 }
 
-// Starts scrolling a result page and arms RESULT_DWELL_MS as a safety net in
+// Starts scrolling a result page and arms a random dwell cap as a safety net in
 // case bottom detection never fires.  Called by onResultPageReady after the
 // soft-error check passes.
 function beginResultDwell(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
-  startScrolling(key);
+  startScrolling(key); // sets ps.scrollPxS
+  const resultDwellMs = randBetween(RESULT_DWELL_MIN_MS, RESULT_DWELL_MAX_MS);
+  kioskLog(`[kiosk-auto] ${key} speed=${Math.round(ps.scrollPxS)}px/s dwell=${Math.round(resultDwellMs / 1000)}s`);
   clearTimeout(ps.resultDwellTimer);
   ps.resultDwellTimer = setTimeout(() => {
     ps.resultDwellTimer = null;
     if (ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
     stopScrolling(key);
     doSearch(key);
-  }, RESULT_DWELL_MS);
+  }, resultDwellMs);
 }
 
 // Checks the loaded result page for Cloudflare challenges, bare status codes
@@ -2533,7 +2546,7 @@ function stopBrowsingLoop(key) {
   clearTimeout(ps.rotationStartTimer);
   clearTimeout(ps.loadTimer);
   clearTimeout(ps.highlightTimer);    // RESULT_HIGHLIGHT_MS pause before navigating to a result
-  clearTimeout(ps.resultDwellTimer);  // RESULT_DWELL_MS cap on result pages
+  clearTimeout(ps.resultDwellTimer);  // random dwell cap on result pages
   ps.dwellTimer         = null;
   ps.scrollTimer        = null;
   ps.rotationStartTimer = null;
@@ -3513,6 +3526,7 @@ function startAllIdleRotation() {
       manualLayout:       false, // true once customer drags/resizes while active; suppresses auto-size animations
       dwellTimer:         null,  // next-search setTimeout
       scrollTimer:        null,  // scroll setInterval
+      scrollPxS:          0,     // current page's random scroll speed (px/s), set by startScrolling
       rotationStartTimer: null,  // startup stagger setTimeout
       lastTrustedInputAt: 0,     // Date.now() of last panel-activity IPC; used to rescue first-click race
       loadTimer:          null,  // LOAD_TIMEOUT_MS watchdog set in doSearch, cleared on load end
@@ -3525,7 +3539,7 @@ function startAllIdleRotation() {
       pendingResults:     [],       // backup results from the same SERP; tried before the next doSearch
       resultAttempt:      0,        // incremented on each loadResult; guards against double-handling
       highlightTimer:     null,     // RESULT_HIGHLIGHT_MS timeout before navigating to a chosen result
-      resultDwellTimer:   null,     // RESULT_DWELL_MS cap on result pages before returning to search
+      resultDwellTimer:   null,     // random dwell cap on result pages before returning to search
       carbonBytes:        0,        // running total of CDP encodedDataLength for current page load
       carbonGrams:        0,        // CO2 grams from last completed page load
       carbonLoading:      false,    // true while a main-frame navigation is in progress
