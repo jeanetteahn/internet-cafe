@@ -136,6 +136,66 @@ const RESULT_HIGHLIGHT_MS       = 600;         // visual highlight duration (ms)
 const AUTO_LINK_POLICY          = 'allowlist-preferred'; // 'allowlist-preferred' = prefer ALLOWED_DOMAINS, fall back to isPassesPolicy;
                                                           // 'allowlist' = only ALLOWED_DOMAINS; 'browsing' = use isPassesPolicy
 
+// ---- Auto-mode error-page blocking ------------------------------------------
+// Set AUTO_ERROR_BLOCK_ENABLED = false for a quick rollback: edit on Mac,
+// push, then git pull + relaunch on Linux.  All blocking is skipped.
+const AUTO_ERROR_BLOCK_ENABLED  = true;
+const BAD_DOMAIN_TTL_MS         = 3 * 60 * 60 * 1000; // 3 hours in-memory; cleared on relaunch
+const SAME_SERP_RETRIES         = 2;    // extra results kept from each SERP as backup before next search
+const SOFT_ERROR_MAX_TEXT       = 1500; // body-phrase check only runs when page text is under this length
+
+// Body phrases that indicate an error or gate page; checked only on short pages
+// (real articles can mention "404" or "forbidden" in passing).
+const SOFT_ERROR_BODY_PHRASES = [
+  'access denied',
+  "you don't have permission to access",
+  '403 forbidden',
+  'forbidden',
+  '404 not found',
+  'page not found',
+  'domain is for sale',
+  'buy this domain',
+  'domain may be for sale',
+  'this domain has expired',
+  'checking your browser',
+  'verify you are human',
+  'are you a robot',
+  'enable javascript and cookies to continue',
+  'request blocked',
+  'has been blocked',
+  'error 1020',
+  'something went wrong',
+  'internal server error',
+  'service unavailable',
+  'bad gateway',
+  'temporarily unavailable',
+  'too many requests',
+];
+
+// Title phrases — kept narrow to avoid false-positives on real sites.
+const SOFT_ERROR_TITLE_PHRASES = [
+  'access denied',
+  'page not found',
+  '404 not found',
+  '403 forbidden',
+  'just a moment',
+  'attention required',
+  'are you a robot',
+  'domain for sale',
+  'service unavailable',
+  'internal server error',
+  'bad gateway',
+  'site not found',
+  'request blocked',
+];
+
+// Titles that are just a bare status code, e.g. "404", "Error 503",
+// "500 - Error", "404 | Page Not Found".  The code must stand alone or be
+// immediately followed by a separator/error word so "404 Media" and "500px"
+// are NOT matched.
+const SOFT_ERROR_TITLE_STATUS_RE =
+  /^\s*(error\s*)?[45]\d\d\s*($|[-–—|:.,!]|error|not found|forbidden|unavailable)/i;
+
 // ---- Window / layout tunables -----------------------------------------------
 const HANDLE_HEIGHT         = 28;
 const RETURN_HOME_WHEN_IDLE = true;
@@ -435,6 +495,39 @@ const panelBusyOnsetTimers = new Map(); // key -> timer id — fires after 1500 
 const panelBusyCapTimers   = new Map(); // key -> timer id — 20 s safety cap
 const panelBusyActive      = new Map(); // key -> bool     — busy cursor currently shown
 const panelCursorCssKeys   = new Map(); // key -> string   — insertCSS key for current rule
+
+// ---- Bad-domain memory (auto-mode error blocking) ---------------------------
+// hostname -> expiry timestamp.  In-memory only; a relaunch on Linux clears it.
+const badDomains = new Map();
+
+function hostnameOf(url) {
+  try { return new URL(url).hostname; } catch { return ''; }
+}
+
+// Mark a domain bad for BAD_DOMAIN_TTL_MS.  Only logs the first time a host is
+// added so the log stays readable when the same domain is refreshed.
+function markBadDomain(url, reason) {
+  if (!AUTO_ERROR_BLOCK_ENABLED) return;
+  const host = hostnameOf(url);
+  if (!host || isDdgHost(url)) return;
+  const expiry = Date.now() + BAD_DOMAIN_TTL_MS;
+  if (!badDomains.has(host)) {
+    console.log(`[kiosk-auto] bad domain marked: ${host} (${reason})`);
+  }
+  badDomains.set(host, expiry);
+}
+
+// Returns true if the hostname is currently in the bad-domain list.
+// Deletes expired entries on lookup.
+function isBadDomain(url) {
+  if (!AUTO_ERROR_BLOCK_ENABLED) return false;
+  const host = hostnameOf(url);
+  if (!host) return false;
+  const expiry = badDomains.get(host);
+  if (expiry === undefined) return false;
+  if (Date.now() > expiry) { badDomains.delete(host); return false; }
+  return true;
+}
 
 function hingePayload(key) {
   const hinges = panelHinges.get(key);
@@ -826,6 +919,37 @@ function getCookieConsentScript() {
 }
 
 let cookieConsentCount = 0;
+
+// Blocks 4xx/5xx responses for auto-mode result-phase loads at the network
+// layer, before any page content is transferred.  Cancelling the request makes
+// Chromium fire did-fail-load with ERR_ABORTED (-3), which we filter out in the
+// normal did-fail-load handler.  Instead we schedule onResultRejected directly
+// via setTimeout so backups are tried without waiting for the full page.
+//
+// Only one onHeadersReceived listener is allowed per session; installAdTrackerBlock
+// uses onBeforeRequest (not onHeadersReceived), so there is no conflict.
+function installAutoErrorBlock() {
+  if (!AUTO_ERROR_BLOCK_ENABLED) return;
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    try {
+      if (details.resourceType === 'mainFrame' && details.statusCode >= 400) {
+        const key = webContentsIdToKey.get(details.webContentsId);
+        const ps  = key ? panelStates.get(key) : null;
+        if (ps && ps.mode === 'auto' && ps.autoPhase === 'result') {
+          const reason = `http-${details.statusCode}`;
+          console.log(`[kiosk-auto] ${key} HTTP ${details.statusCode} blocked on result: ${details.url}`);
+          markBadDomain(details.url, reason);
+          // did-fail-load fires with ERR_ABORTED (-3) which we filter out, so
+          // trigger the rejection here instead.
+          setTimeout(() => onResultRejected(key, details.url, reason, false), 0);
+          callback({ cancel: true });
+          return;
+        }
+      }
+    } catch (_) {}
+    callback({});
+  });
+}
 
 function buildErrorPageUrl(message, failedUrl) {
   const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -1497,9 +1621,9 @@ function setupViewEventHandlers(key, win, view) {
     ps.carbonLoading = false;
     pushCarbonState(key);
     if (ps.autoPhase === 'result') {
-      // A broken third-party page should not slow down DDG searches — skip backoff.
-      console.log(`[kiosk-auto] ${key} result failed, skipping`);
-      doSearch(key);
+      // Connection errors are not the site's fault; don't mark the domain bad.
+      const isConnectionError = errorCode === -106 || errorCode === -21;
+      onResultRejected(key, failedUrl, `fail-${errorCode}`, !isConnectionError);
     } else {
       scheduleRetry(key, `error-${errorCode}`);
     }
@@ -2011,7 +2135,8 @@ async function pickRandomResult(key) {
   const ps = panelStates.get(key);
   const recentUrls = ps ? ps.recentResultUrls : [];
   const total = domHrefs.length;
-  let afterPolicy = 0;
+  let afterPolicy   = 0;
+  let badDomainSkips = 0;
 
   // 'allowlist-preferred': two tiers — prefer ALLOWED_DOMAINS, fall back to isPassesPolicy.
   const allowlistCandidates = [];
@@ -2032,6 +2157,9 @@ async function pickRandomResult(key) {
 
     // Skip recently visited pages.
     if (recentUrls.includes(target)) continue;
+
+    // Skip domains currently in the bad-domain list.
+    if (isBadDomain(target)) { badDomainSkips += 1; continue; }
 
     if (AUTO_LINK_POLICY === 'allowlist') {
       if (!isDomainAllowed(target)) continue;
@@ -2054,11 +2182,106 @@ async function pickRandomResult(key) {
   }
 
   const pool = allowlistCandidates.length > 0 ? allowlistCandidates : fallbackCandidates;
+  if (badDomainSkips > 0) {
+    console.log(`[kiosk-auto] ${key} skipped ${badDomainSkips} result(s) for bad domain(s)`);
+  }
   if (pool.length === 0) {
     console.log(`[kiosk-auto] ${key} no eligible results (${total} found, ${afterPolicy} after policy), next search`);
     return null;
   }
-  return pool[Math.floor(Math.random() * pool.length)];
+
+  // Shuffle pool so we don't always pick the top DDG result, then put
+  // different-hostname candidates first in the backup list so one broken site
+  // can't consume all SAME_SERP_RETRIES slots.
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  const pick    = pool[0];
+  const pickHost = hostnameOf(pick.target);
+  const others  = pool.slice(1);
+  others.sort((a, b) => {
+    const aMatch = hostnameOf(a.target) === pickHost ? 1 : 0;
+    const bMatch = hostnameOf(b.target) === pickHost ? 1 : 0;
+    return aMatch - bMatch; // different-hostname backups come first
+  });
+  if (ps) ps.pendingResults = others.slice(0, SAME_SERP_RETRIES);
+
+  return pick;
+}
+
+// Arms the result load watchdog and calls loadURL.  Extracted from the
+// highlightTimer callback in onSearchBottom so the same path is reused when
+// trying backup results from ps.pendingResults.
+function loadResult(key, result) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
+  const v = panelViews[key];
+  if (!v || v.webContents.isDestroyed()) { doSearch(key); return; }
+
+  ps.autoPhase = 'result';
+  ps.recentResultUrls.push(result.target);
+  if (ps.recentResultUrls.length > 20) ps.recentResultUrls.shift();
+
+  // Increment attempt token before arming the watchdog; onResultRejected also
+  // increments it so stale callbacks can detect they are superseded.
+  ps.resultAttempt = (ps.resultAttempt || 0) + 1;
+  const attempt = ps.resultAttempt;
+
+  clearTimeout(ps.loadTimer);
+  ps.loadTimer = setTimeout(() => {
+    ps.loadTimer = null;
+    if (ps.mode !== 'auto' || ps.resultAttempt !== attempt) return;
+    console.log(`[kiosk-auto] ${key} result load timed out: ${result.target}`);
+    v.webContents.stop();
+    onResultRejected(key, result.target, 'timeout', true);
+  }, RESULT_LOAD_TIMEOUT_MS);
+
+  v.webContents.loadURL(result.target).catch(err => {
+    // ERR_ABORTED: cancelled by our own stop() call or by onHeadersReceived.
+    if (err.message === 'ERR_ABORTED') return;
+    // Superseded: another loadResult call has already taken over.
+    if (ps.resultAttempt !== attempt) return;
+    clearTimeout(ps.loadTimer);
+    ps.loadTimer = null;
+    if (ps.mode !== 'auto') return;
+    console.log(`[kiosk-auto] ${key} result load rejected: ${err.message}`);
+    onResultRejected(key, result.target, 'load-rejected', false);
+  });
+}
+
+// Called when a result-page load fails or is blocked.  Tries the next backup
+// result from ps.pendingResults (same SERP) before triggering a new search.
+function onResultRejected(key, url, reason, markBad) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
+
+  // Increment token so any pending callbacks from the previous load bail out.
+  ps.resultAttempt = (ps.resultAttempt || 0) + 1;
+
+  clearTimeout(ps.loadTimer);
+  ps.loadTimer = null;
+  clearTimeout(ps.resultDwellTimer);
+  ps.resultDwellTimer = null;
+  stopScrolling(key);
+
+  if (markBad) markBadDomain(url, reason);
+
+  // Try the next backup before triggering a fresh search.
+  const backups = ps.pendingResults || [];
+  while (backups.length > 0) {
+    const next = backups.shift();
+    if (isBadDomain(next.target)) {
+      console.log(`[kiosk-auto] ${key} backup skipped (bad domain): ${hostnameOf(next.target)}`);
+      continue;
+    }
+    console.log(`[kiosk-auto] ${key} trying backup result (${reason}): ${next.target}`);
+    loadResult(key, next);
+    return;
+  }
+
+  console.log(`[kiosk-auto] ${key} result rejected (${reason}), no backups — next search`);
+  doSearch(key);
 }
 
 // Called when a search page hits the bottom (or the SEARCH_INTERVAL_MS dwell
@@ -2128,43 +2351,17 @@ async function onSearchBottom(key) {
   ps.highlightTimer = setTimeout(() => {
     ps.highlightTimer = null;
     if (ps.mode !== 'auto') return;
-    const v = panelViews[key];
-    if (!v || v.webContents.isDestroyed()) { doSearch(key); return; }
-
-    ps.autoPhase = 'result';
-    ps.recentResultUrls.push(result.target);
-    if (ps.recentResultUrls.length > 20) ps.recentResultUrls.shift();
-
-    // Arm result load watchdog — fires if did-finish-load/did-fail-load never arrive.
-    clearTimeout(ps.loadTimer);
-    ps.loadTimer = setTimeout(() => {
-      ps.loadTimer = null;
-      if (ps.mode !== 'auto') return;
-      console.log(`[kiosk-auto] ${key} result load timed out, skipping`);
-      doSearch(key);
-    }, RESULT_LOAD_TIMEOUT_MS);
-
-    v.webContents.loadURL(result.target).catch(err => {
-      clearTimeout(ps.loadTimer);
-      ps.loadTimer = null;
-      if (ps.mode !== 'auto') return;
-      console.log(`[kiosk-auto] ${key} result load rejected: ${err.message}, skipping`);
-      doSearch(key);
-    });
+    loadResult(key, result);
   }, RESULT_HIGHLIGHT_MS);
 }
 
-// Called after a result page finishes loading.  Starts the scroll loop and
-// arms RESULT_DWELL_MS as a safety net in case bottom detection never fires.
-function onResultPageReady(key) {
+// Starts scrolling a result page and arms RESULT_DWELL_MS as a safety net in
+// case bottom detection never fires.  Called by onResultPageReady after the
+// soft-error check passes.
+function beginResultDwell(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
-
-  const url = panelViews[key]?.webContents.getURL() || '';
-  console.log(`[kiosk-auto] ${key} result page ready: ${url}`);
-
   startScrolling(key);
-
   clearTimeout(ps.resultDwellTimer);
   ps.resultDwellTimer = setTimeout(() => {
     ps.resultDwellTimer = null;
@@ -2174,10 +2371,95 @@ function onResultPageReady(key) {
   }, RESULT_DWELL_MS);
 }
 
+// Checks the loaded result page for Cloudflare challenges, bare status codes
+// in the title, known error/gate title phrases, and (on short pages only)
+// known error phrases in the body text.  Returns a reason string when a soft
+// error is detected, null for normal pages.
+async function detectSoftErrorPage(view) {
+  try {
+    const info = await view.webContents.executeJavaScript(`
+      (function () {
+        var title = (document.title || '').trim().toLowerCase()
+          .replace(/[\\u2018\\u2019]/g, "'").replace(/[\\u201c\\u201d]/g, '"');
+        var body = '';
+        var fullLen = 0;
+        try {
+          var raw = document.body ? (document.body.innerText || '') : '';
+          fullLen = raw.length;
+          body = raw.split(/\\s+/).join(' ').slice(0, 4000).toLowerCase()
+            .replace(/[\\u2018\\u2019]/g, "'").replace(/[\\u201c\\u201d]/g, '"');
+        } catch (_) {}
+        var cfMarker = !!(
+          document.getElementById('challenge-form') ||
+          document.getElementById('challenge-running') ||
+          document.getElementById('cf-challenge-running') ||
+          document.querySelector('.cf-browser-verification') ||
+          document.querySelector('[id^="cf-chl"]') ||
+          document.querySelector('script[src*="/cdn-cgi/challenge-platform/"]')
+        );
+        return { title: title, body: body, fullLen: fullLen, cfMarker: cfMarker };
+      })()
+    `, false);
+    if (!info) return null;
+    if (info.cfMarker) return 'cloudflare-challenge';
+    if (SOFT_ERROR_TITLE_STATUS_RE.test(info.title)) return 'title-status-code';
+    for (const phrase of SOFT_ERROR_TITLE_PHRASES) {
+      if (info.title.includes(phrase)) return 'title:' + phrase;
+    }
+    // Body check only on short pages — real articles can mention error terms in passing.
+    if (info.fullLen < SOFT_ERROR_MAX_TEXT) {
+      for (const phrase of SOFT_ERROR_BODY_PHRASES) {
+        if (info.body.includes(phrase)) return 'body:' + phrase;
+      }
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Called after a result page finishes loading.  Runs a soft-error check
+// (Cloudflare challenges, bare status-code titles, error phrases) before
+// starting the scroll/dwell loop.  Skips the check when AUTO_ERROR_BLOCK_ENABLED
+// is false to fully restore the old behaviour.
+async function onResultPageReady(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
+
+  const view = panelViews[key];
+  const url  = view ? view.webContents.getURL() : '';
+  console.log(`[kiosk-auto] ${key} result page ready: ${url}`);
+
+  if (!AUTO_ERROR_BLOCK_ENABLED) {
+    beginResultDwell(key);
+    return;
+  }
+
+  if (!view || view.webContents.isDestroyed()) { doSearch(key); return; }
+
+  const reason = await detectSoftErrorPage(view);
+
+  // Re-check state after the async detectSoftErrorPage call.
+  const ps2 = panelStates.get(key);
+  if (!ps2 || ps2.mode !== 'auto' || ps2.autoPhase !== 'result') return;
+  const viewNow = panelViews[key];
+  if (!viewNow || viewNow.webContents.isDestroyed()) { doSearch(key); return; }
+  if (viewNow.webContents.getURL() !== url) return; // navigated away during the check
+
+  if (reason) {
+    console.log(`[kiosk-auto] ${key} soft error detected (${reason}): ${url}`);
+    onResultRejected(key, url, 'soft-error:' + reason, true);
+    return;
+  }
+
+  beginResultDwell(key);
+}
+
 function doSearch(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
-  ps.autoPhase = 'search';
+  ps.autoPhase    = 'search';
+  ps.pendingResults = []; // discard any leftovers from the previous SERP
 
   // Global search gate: space out DDG hits across all panels.
   // Skipped for each panel's very first search so windows fill immediately.
@@ -2613,6 +2895,7 @@ function createKioskWindow() {
   } else {
     kioskLog('ad/tracker blocking disabled (AD_BLOCKING_ENABLED = false)');
   }
+  installAutoErrorBlock(); // no-op when AUTO_ERROR_BLOCK_ENABLED = false
 
   const allDisplays  = screen.getAllDisplays();
   const envIndex     = parseInt(process.env.KIOSK_DISPLAY, 10);
@@ -3237,6 +3520,8 @@ function startAllIdleRotation() {
       lastNavStatus:      0,     // HTTP response code from did-navigate; carried into did-finish-load log
       autoPhase:          'search', // 'search' | 'result' — current phase of the auto loop
       recentResultUrls:   [],       // recently visited result URLs (max ~20); prevents re-visiting the same page
+      pendingResults:     [],       // backup results from the same SERP; tried before the next doSearch
+      resultAttempt:      0,        // incremented on each loadResult; guards against double-handling
       highlightTimer:     null,     // RESULT_HIGHLIGHT_MS timeout before navigating to a chosen result
       resultDwellTimer:   null,     // RESULT_DWELL_MS cap on result pages before returning to search
       carbonBytes:        0,        // running total of CDP encodedDataLength for current page load
