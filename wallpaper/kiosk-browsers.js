@@ -8,6 +8,9 @@ const { useSystemSpoonCursor } = require('./spoon-theme');
 // DDG result cache — one HTML file per panel, loaded as the startup placeholder.
 const cacheDir = path.join(app.getPath('userData'), 'ddg-cache');
 try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) {}
+// Per-term SERP HTML files live in a 'serp/' subdirectory.
+const serpDir = path.join(cacheDir, 'serp');
+try { fs.mkdirSync(serpDir, { recursive: true }); } catch (_) {}
 
 // ---- Clock / cursor size -----------------------------------------------------
 // Used for clock/carbon window sizes, FK_GRAPHIC_W, and spoon cursor scaling.
@@ -35,67 +38,124 @@ try {
 // ---- Search topics ----------------------------------------------------------
 // Kid-safe ONLY: no news/current events, no words that commonly pull adult or
 // violent content.  All terms must be safe for under-18 viewers.
-const SEARCH_TERMS = [
-  // Space
-  'space pictures', 'planets solar system', 'mars rover photos',
-  'international space station', 'galaxy telescope images', 'moon phases',
-  'constellations for beginners', 'northern lights', 'how stars form',
-  'comets and asteroids', 'saturn rings', 'jupiter facts',
-  'james webb telescope images', 'astronaut training', 'solar eclipse facts',
-  // Animals
-  'animal facts', 'ocean animals', 'coral reef animals', 'rainforest animals',
-  'desert animals', 'arctic animals', 'penguin facts', 'whales and dolphins',
-  'honey bee facts', 'butterfly life cycle', 'bird migration',
-  'deep sea creatures', 'zoo animals', 'aquarium fish',
-  'endangered animals conservation', 'octopus facts', 'sea turtles',
-  'elephant facts', 'giraffe facts', 'owl facts', 'frog life cycle',
-  'koala facts', 'panda bears', 'hummingbirds', 'baby animals',
-  // Earth and nature
-  'weather today', 'nature photography', 'national parks',
-  'how volcanoes form', 'how rainbows form', 'types of clouds', 'water cycle',
-  'ocean tides', 'rocks and minerals', 'mountains of the world',
-  'waterfalls of the world', 'how caves form', 'glaciers and icebergs',
-  'seasons explained', 'rainforest plants', 'desert plants',
-  'tallest trees in the world', 'wildflowers', 'how rivers form',
-  'dinosaur fossils',
-  // Science and technology
-  'science for kids', 'simple science experiments', 'how magnets work',
-  'how plants grow', 'how electricity works', 'states of matter',
-  'how light works', 'how sound works', 'chemistry experiments for kids',
-  'robots for kids', 'coding for beginners', 'how computers work',
-  'renewable energy', 'solar power', 'how batteries work',
-  // Inventions and history
-  'inventions history', 'famous inventors', 'history of flight',
-  'how airplanes fly', 'ancient egypt pyramids', 'ancient greece facts',
-  'ancient rome architecture', 'history of the telephone',
-  'history of trains', 'castles of the world', 'great wall of china',
-  'maya civilization', 'history of the bicycle', 'famous scientists',
-  'space exploration history',
-  // Geography and culture
-  'world landmarks', 'world geography', 'famous bridges',
-  'countries of the world', 'world flags', 'seven wonders of the world',
-  'famous lighthouses', 'islands of the world', 'famous museums',
-  'world capitals', 'maps for kids', 'festivals around the world',
-  'world languages', 'famous skyscrapers', 'longest rivers in the world',
-  // Arts and hobbies
-  'musical instruments', 'origami for beginners', 'how to draw animals',
-  'gardening for beginners', 'easy paper crafts',
-  'watercolor painting for beginners', 'how to build a birdhouse',
-  'lego building ideas', 'knitting for beginners',
-  'photography tips for beginners', 'learn to play ukulele',
-  'chess for beginners', 'easy magic tricks', 'kite making',
-  'pottery for beginners',
-  // Food
-  'healthy snack ideas', 'easy baking recipes for kids',
-  'fruits around the world', 'how bread is made', 'how chocolate is made',
-  'how cheese is made', 'history of pizza', 'vegetable garden',
-  'smoothie recipes', 'easy cookie recipes',
-  // Sports and outdoors
-  'how to ride a bike', 'soccer skills for beginners',
-  'basketball drills for kids', 'swimming tips for beginners',
-  'olympic sports history', 'skateboarding basics', 'yoga for kids',
-  'hiking trails',
+//
+// Each group carries a list of ALLOWED_DOMAINS that are relevant for its terms.
+// doSearch picks 2-3 group domains + 1 general domain and appends site: filters
+// to the DDG query so results land on approved pages.
+const SEARCH_TERM_GROUPS = [
+  {
+    label: 'Space',
+    domains: ['nasa.gov', 'space.com', 'si.edu', 'earthobservatory.nasa.gov'],
+    terms: [
+      'space pictures', 'planets solar system', 'mars rover photos',
+      'international space station', 'galaxy telescope images', 'moon phases',
+      'constellations for beginners', 'northern lights', 'how stars form',
+      'comets and asteroids', 'saturn rings', 'jupiter facts',
+      'james webb telescope images', 'astronaut training', 'solar eclipse facts',
+    ],
+  },
+  {
+    label: 'Animals',
+    domains: ['nationalgeographic.com', 'worldwildlife.org', 'allaboutbirds.org', 'montereybayaquarium.org', 'sdzwildlifeexplorers.org'],
+    terms: [
+      'animal facts', 'ocean animals', 'coral reef animals', 'rainforest animals',
+      'desert animals', 'arctic animals', 'penguin facts', 'whales and dolphins',
+      'honey bee facts', 'butterfly life cycle', 'bird migration',
+      'deep sea creatures', 'zoo animals', 'aquarium fish',
+      'endangered animals conservation', 'octopus facts', 'sea turtles',
+      'elephant facts', 'giraffe facts', 'owl facts', 'frog life cycle',
+      'koala facts', 'panda bears', 'hummingbirds', 'baby animals',
+    ],
+  },
+  {
+    label: 'Earth and nature',
+    domains: ['noaa.gov', 'usgs.gov', 'nps.gov', 'britannica.com'],
+    terms: [
+      'weather today', 'nature photography', 'national parks',
+      'how volcanoes form', 'how rainbows form', 'types of clouds', 'water cycle',
+      'ocean tides', 'rocks and minerals', 'mountains of the world',
+      'waterfalls of the world', 'how caves form', 'glaciers and icebergs',
+      'seasons explained', 'rainforest plants', 'desert plants',
+      'tallest trees in the world', 'wildflowers', 'how rivers form',
+      'dinosaur fossils',
+    ],
+  },
+  {
+    label: 'Science and technology',
+    domains: ['britannica.com', 'phet.colorado.edu', 'khanacademy.org', 'sciencenewsexplores.org'],
+    terms: [
+      'science for kids', 'simple science experiments', 'how magnets work',
+      'how plants grow', 'how electricity works', 'states of matter',
+      'how light works', 'how sound works', 'chemistry experiments for kids',
+      'robots for kids', 'coding for beginners', 'how computers work',
+      'renewable energy', 'solar power', 'how batteries work',
+    ],
+  },
+  {
+    label: 'Inventions and history',
+    domains: ['britannica.com', 'smithsonianmag.com', 'si.edu', 'loc.gov'],
+    terms: [
+      'inventions history', 'famous inventors', 'history of flight',
+      'how airplanes fly', 'ancient egypt pyramids', 'ancient greece facts',
+      'ancient rome architecture', 'history of the telephone',
+      'history of trains', 'castles of the world', 'great wall of china',
+      'maya civilization', 'history of the bicycle', 'famous scientists',
+      'space exploration history',
+    ],
+  },
+  {
+    label: 'Geography and culture',
+    domains: ['nationalgeographic.com', 'britannica.com', 'natgeokids.com'],
+    terms: [
+      'world landmarks', 'world geography', 'famous bridges',
+      'countries of the world', 'world flags', 'seven wonders of the world',
+      'famous lighthouses', 'islands of the world', 'famous museums',
+      'world capitals', 'maps for kids', 'festivals around the world',
+      'world languages', 'famous skyscrapers', 'longest rivers in the world',
+    ],
+  },
+  {
+    label: 'Arts and hobbies',
+    domains: ['pbs.org', 'britannica.com', 'smithsonianmag.com'],
+    terms: [
+      'musical instruments', 'origami for beginners', 'how to draw animals',
+      'gardening for beginners', 'easy paper crafts',
+      'watercolor painting for beginners', 'how to build a birdhouse',
+      'lego building ideas', 'knitting for beginners',
+      'photography tips for beginners', 'learn to play ukulele',
+      'chess for beginners', 'easy magic tricks', 'kite making',
+      'pottery for beginners',
+    ],
+  },
+  {
+    label: 'Food',
+    domains: ['britannica.com', 'pbs.org', 'easyscienceforkids.com'],
+    terms: [
+      'healthy snack ideas', 'easy baking recipes for kids',
+      'fruits around the world', 'how bread is made', 'how chocolate is made',
+      'how cheese is made', 'history of pizza', 'vegetable garden',
+      'smoothie recipes', 'easy cookie recipes',
+    ],
+  },
+  {
+    label: 'Sports and outdoors',
+    domains: ['nps.gov', 'britannica.com', 'pbs.org'],
+    terms: [
+      'how to ride a bike', 'soccer skills for beginners',
+      'basketball drills for kids', 'swimming tips for beginners',
+      'olympic sports history', 'skateboarding basics', 'yoga for kids',
+      'hiking trails',
+    ],
+  },
 ];
+
+// Flat term list for the shuffle-bag deck — derived from groups above.
+const SEARCH_TERMS = SEARCH_TERM_GROUPS.flatMap(g => g.terms);
+
+// Map from every term to its group's approved domain list (built once at startup).
+const TERM_GROUP_DOMAINS = new Map(
+  SEARCH_TERM_GROUPS.flatMap(g => g.terms.map(t => [t, g.domains]))
+);
 
 // ---- Content-safety lists ---------------------------------------------------
 // BROWSING_POLICY controls what customers can navigate to while a panel is in
@@ -156,7 +216,29 @@ const ALLOWED_DOMAINS = [
   'earthobservatory.nasa.gov',
   // Public media
   'pbs.org',
+  'pbskids.org',
+  // Science education / interactive
+  'phet.colorado.edu',
+  'khanacademy.org',
+  'libretexts.org',
+  'ck12.org',
+  'easyscienceforkids.com',
+  // Kids reference / general
+  'coolkidfacts.com',
+  // Wildlife
+  'sdzwildlifeexplorers.org',
+  // Notes: kids.britannica.com is covered by britannica.com above.
+  //        nationalzoo.si.edu is covered by si.edu above.
 ];
+
+// Startup check: every domain in SEARCH_TERM_GROUPS must be in ALLOWED_DOMAINS.
+for (const _g of SEARCH_TERM_GROUPS) {
+  for (const _d of _g.domains) {
+    if (!ALLOWED_DOMAINS.includes(_d)) {
+      console.warn(`[kiosk] WARNING: group domain "${_d}" in group "${_g.label}" is not in ALLOWED_DOMAINS`);
+    }
+  }
+}
 
 // AD_TRACKER_DOMAINS: every request to these hosts (and their subdomains) is
 // cancelled in all modes when AD_BLOCKING_ENABLED is true.  Result pages embed
@@ -236,6 +318,9 @@ const PAUSE_START_URLS = [
   'https://www.nasa.gov/',
   'https://sciencenewsexplores.org/',
 ];
+// General-purpose approved domains added as one extra site: filter per search
+// (after 2-3 group-specific domains are picked).
+const GENERAL_DOMAINS = ['britannica.com', 'ducksters.com', 'kiddle.co', 'sciencekids.co.nz'];
 const SOFT_ERROR_MAX_TEXT       = 1500; // body-phrase check only runs when page text is under this length
 
 // Body phrases that indicate an error or gate page; checked only on short pages
@@ -561,10 +646,22 @@ const serpCache         = new Map(); // term -> { urls: [...], fetchedAt: timest
 const serpCacheUseCount = new Map(); // term -> consecutive cached uses since last real SERP fetch
 
 // ---- DDG rate stats (10-min rolling window) ---------------------------------
-let ddgStats = { searches: 0, cacheHits: 0, resultsVisited: 0, botChecks: 0, windowStart: 0 };
+let ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, windowStart: 0 };
 let ddgSummaryTimer = null; // module-level so V8 keeps it alive
 let ddgLastStrikeAt = 0;   // Date.now() of the last counted bot-check strike (60 s guard)
 let parkUrlIndex    = 0;   // round-robin index into PAUSE_START_URLS
+
+// Delete per-term SERP HTML files older than the in-memory TTL at startup.
+try {
+  const _cutoff = Date.now() - SERP_CACHE_TTL_MS;
+  for (const _f of fs.readdirSync(serpDir)) {
+    if (!_f.endsWith('.html')) continue;
+    try {
+      const _fp = path.join(serpDir, _f);
+      if (fs.statSync(_fp).mtimeMs < _cutoff) fs.unlinkSync(_fp);
+    } catch (_) {}
+  }
+} catch (_) {}
 
 const timingMs = () => Date.now() - _t0;
 const firstLoadLogged = new Set();
@@ -956,9 +1053,20 @@ function goForward(wc) {
 
 // ---- Content safety ---------------------------------------------------------
 
-function buildSearchUrl(term) {
+// Converts a search term to a safe filename slug for serpDir.
+function termToSlug(term) {
+  return term.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function buildSearchUrl(term, sites) {
   // &kp=1 enables DuckDuckGo strict SafeSearch.
-  return `https://html.duckduckgo.com/html/?q=${encodeURIComponent(term)}&kp=1`;
+  // sites is an optional array of domain strings; if provided, appends
+  // "site:d1 OR site:d2 ..." so results land on approved pages.
+  let q = term;
+  if (sites && sites.length > 0) {
+    q += ' ' + sites.map(d => 'site:' + d).join(' OR ');
+  }
+  return `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kp=1`;
 }
 
 function isDomainAllowed(url) {
@@ -1689,15 +1797,16 @@ function setupViewEventHandlers(key, win, view) {
           // Parked page (DDG pause): scroll like a result page, no SERP logic.
           onParkedPageReady(key);
         } else {
-          // 'search' phase: only treat the page as a SERP if it's actually on a
-          // DDG URL.  Any other URL here (e.g. a neutral page whose phase wasn't
-          // updated before loadURL) gets parked rather than triggering SERP logic.
-          const isDdgUrl = url.startsWith('https://html.duckduckgo.com/') ||
-                           url.startsWith('https://duckduckgo.com/');
-          if (isDdgUrl) {
-            // Successful DDG search load — reset backoff and log timing.
+          // 'search' phase: treat the page as a SERP if it's on a DDG URL or if
+          // we explicitly loaded a saved SERP file (ps.loadingSerp).  Any other
+          // URL here gets parked rather than triggering SERP logic.
+          const isDdgUrl   = url.startsWith('https://html.duckduckgo.com/') ||
+                             url.startsWith('https://duckduckgo.com/');
+          const isSerpFile = !!ps.loadingSerp;
+          ps.loadingSerp = false;
+          if (isDdgUrl || isSerpFile) {
             ps.retryCount = 0;
-            if (ps.searchLoadStartedAt) {
+            if (isDdgUrl && ps.searchLoadStartedAt) {
               const elapsed = Date.now() - ps.searchLoadStartedAt;
               const status  = ps.lastNavStatus || 200;
               console.log(`[kiosk-timing] ${key} search #${ps.searchCount || 0} took ${elapsed} ms (status ${status})`);
@@ -1706,21 +1815,33 @@ function setupViewEventHandlers(key, win, view) {
             }
             onSearchPageReady(key);
 
-            // Persist this DDG page so the next startup can show it immediately.
+            // For real DDG pages: persist both the per-panel startup cache and
+            // the per-term SERP file used by the cache-hit path.
             // Skip write if there are no result links (bot-check / empty SERP).
-            if (url.startsWith('https://html.duckduckgo.com/')) {
+            if (isDdgUrl && url.startsWith('https://html.duckduckgo.com/')) {
+              const termAtSave = ps.currentTerm;
               view.webContents.executeJavaScript(
                 'document.querySelector("a.result__a") ? document.documentElement.outerHTML : null'
               )
                 .then(html => {
                   if (!html) return;
                   const withBase = html.replace('<head>', '<head><base href="https://html.duckduckgo.com/">');
+                  // Per-panel startup placeholder (unchanged).
                   fs.writeFile(path.join(cacheDir, `${key}.html`), withBase, () => {});
+                  // Per-term SERP file — lets cache hits show the search step.
+                  if (termAtSave) {
+                    const filePath = path.join(serpDir, termToSlug(termAtSave) + '.html');
+                    fs.writeFile(filePath, withBase, err => {
+                      if (err) return;
+                      const entry = serpCache.get(termAtSave);
+                      if (entry) entry.filePath = filePath;
+                    });
+                  }
                 })
                 .catch(() => {});
             }
           } else {
-            // Non-DDG URL while in search phase — park it.
+            // Non-DDG, non-SERP-file URL while in search phase — park it.
             kioskLog(`[ddg] ${key} non-DDG URL in search phase (${url}) — parking`);
             ps.autoPhase = 'parked';
             onParkedPageReady(key);
@@ -2167,13 +2288,13 @@ function startScrolling(key) {
         else nextAutoStep(key);
       }, holdMs);
     } else {
-      // Search phase: don't advance if a DDG load is still in-flight — let
-      // onSearchPageReady take over when the real page lands.
+      // Search phase: don't advance if a DDG load is still in-flight.
       if (ps.loadTimer) return;
+      // Don't interrupt a pending next-search gap timer (e.g. the no-result
+      // slow-scroll wait set by onSearchBottom).  Let the timer fire doSearch.
+      if (ps.dwellTimer) return;
 
       stopScrolling(key);
-      clearTimeout(ps.dwellTimer);
-      ps.dwellTimer = null;
       console.log(`[kiosk-auto] ${key} search bottom — picking result`);
       onSearchBottom(key); // async chain; manages its own timers from here
     }
@@ -2428,7 +2549,14 @@ async function pickRandomResult(key) {
   // cross-panel rules at use time.
   if (ps && ps.currentTerm) {
     const cachedUrls = pool.map(c => c.target);
-    serpCache.set(ps.currentTerm, { urls: cachedUrls, fetchedAt: Date.now() });
+    const prevEntry  = serpCache.get(ps.currentTerm);
+    // Preserve filePath from the previous entry so a saved SERP file isn't lost
+    // when pickRandomResult processes the file:// page on a cache hit.
+    serpCache.set(ps.currentTerm, {
+      urls:      cachedUrls,
+      fetchedAt: Date.now(),
+      filePath:  prevEntry ? prevEntry.filePath : undefined,
+    });
     serpCacheUseCount.set(ps.currentTerm, 0);
     kioskLog(`[ddg] cache: stored "${ps.currentTerm}" ${cachedUrls.length} URLs`);
   }
@@ -2588,12 +2716,39 @@ async function onSearchBottom(key) {
     } else {
       kioskLog(`[kiosk-auto] ${key} no eligible results (no current term)`);
     }
+    ddgStats.noEligibleMisses++;
+
+    // Try to show a cached SERP so the panel doesn't sit on a dead-looking page.
+    for (const [cachedTerm, cEntry] of serpCache) {
+      if (Date.now() - cEntry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
+      if (!cEntry.filePath) continue;
+      try { fs.accessSync(cEntry.filePath); } catch { continue; }
+      const cEligible = filterCachedUrls(key, cEntry.urls);
+      if (cEligible.length === 0) continue;
+      kioskLog(`[ddg] ${key} no eligible results — loading cached SERP for "${cachedTerm}"`);
+      ddgStats.savedSerpShows++;
+      ps.currentTerm = cachedTerm;
+      ps.autoPhase   = 'search';
+      ps.loadingSerp = true;
+      const v2 = panelViews[key];
+      if (!v2 || v2.webContents.isDestroyed()) break;
+      v2.webContents.loadURL('file://' + cEntry.filePath).catch(() => {
+        ps.loadingSerp = false;
+        if (ps.mode === 'auto') doSearch(key);
+      });
+      return;
+    }
+
+    // No suitable cached SERP: schedule next search and restart slow scroll so
+    // the panel looks active while waiting.
     const sinceLastSearch = Date.now() - ps.lastSearchTime;
     const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
     ps.dwellTimer = setTimeout(() => {
       ps.dwellTimer = null;
       if (ps.mode === 'auto') doSearch(key);
     }, holdMs);
+    startScrolling(key);
+    ps.scrollPxS = SCROLL_SPEED_MIN_PX_S; // slow scroll during the gap
     return;
   }
 
@@ -2996,8 +3151,8 @@ function startDdgSummaryTimer() {
     const now     = Date.now();
     const minutes = (now - ddgStats.windowStart) / 60000;
     const rate    = minutes > 0 ? (ddgStats.searches / minutes).toFixed(2) : '0';
-    kioskLog(`[ddg] 10-min summary: searches=${ddgStats.searches} cache=${ddgStats.cacheHits} results=${ddgStats.resultsVisited} bot-checks=${ddgStats.botChecks} rate=${rate}/min`);
-    ddgStats = { searches: 0, cacheHits: 0, resultsVisited: 0, botChecks: 0, windowStart: now };
+    kioskLog(`[ddg] 10-min summary: searches=${ddgStats.searches} cache=${ddgStats.cacheHits} saved-serp=${ddgStats.savedSerpShows} results=${ddgStats.resultsVisited} bot-checks=${ddgStats.botChecks} no-eligible=${ddgStats.noEligibleMisses} rate=${rate}/min`);
+    ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, windowStart: now };
   }, 10 * 60 * 1000);
 }
 
@@ -3019,10 +3174,33 @@ function doSearch(key) {
       if (Date.now() - entry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
       const eligible = filterCachedUrls(key, entry.urls);
       if (eligible.length === 0) continue;
-      kioskLog(`[ddg] ${key} search="${cachedTerm}" type=cache (DDG paused ${Math.round(pauseMs / 1000)}s)`);
+      kioskLog(`[ddg] ${key} search="${cachedTerm}" type=saved-serp (DDG paused ${Math.round(pauseMs / 1000)}s)`);
       ddgStats.cacheHits++;
-      ps.currentTerm   = cachedTerm;
+      ps.currentTerm     = cachedTerm;
       ps.firstSearchDone = true;
+      // If a saved SERP file exists, show it so the panel displays the search step.
+      if (entry.filePath) {
+        let fileOk = false;
+        try { fs.accessSync(entry.filePath); fileOk = true; } catch {}
+        if (fileOk) {
+          ddgStats.savedSerpShows++;
+          ps.autoPhase   = 'search';
+          ps.loadingSerp = true;
+          clearTimeout(ps.pauseResumeTimer);
+          ps.pauseResumeTimer = setTimeout(() => {
+            ps.pauseResumeTimer = null;
+            if (ps.mode === 'auto' && (ps.autoPhase === 'parked' || ps.autoPhase === 'result' || ps.autoPhase === 'search')) doSearch(key);
+          }, pauseMs + 1000);
+          const v = panelViews[key];
+          if (!v || v.webContents.isDestroyed()) return;
+          v.webContents.loadURL('file://' + entry.filePath).catch(() => {
+            ps.loadingSerp = false;
+            parkNextPage(key);
+          });
+          return;
+        }
+      }
+      // No file — fall back to jumping straight to a result page.
       ps.queuedResults = eligible.slice(1).map(u => ({ target: u, domHref: u, tier: 'cache' }));
       ps.resultsGoal   = Math.floor(randBetween(RESULTS_PER_SEARCH_MIN, RESULTS_PER_SEARCH_MAX + 1));
       loadResult(key, { target: eligible[0], domHref: eligible[0], tier: 'cache' });
@@ -3075,8 +3253,26 @@ function doSearch(key) {
       let useCt = (serpCacheUseCount.get(term) || 0) + 1;
       serpCacheUseCount.set(term, useCt);
       if (useCt % SHOW_SERP_EVERY_N !== 0) {
-        kioskLog(`[ddg] ${key} search="${term}" type=cache use=${useCt}`);
+        kioskLog(`[ddg] ${key} search="${term}" type=saved-serp use=${useCt}`);
         ddgStats.cacheHits++;
+        // Show the saved SERP file so the panel displays the search step.
+        if (serpEntry.filePath) {
+          let fileOk = false;
+          try { fs.accessSync(serpEntry.filePath); fileOk = true; } catch {}
+          if (fileOk) {
+            ddgStats.savedSerpShows++;
+            ps.loadingSerp = true;
+            const v = panelViews[key];
+            if (!v || v.webContents.isDestroyed()) return;
+            v.webContents.loadURL('file://' + serpEntry.filePath).catch(() => {
+              ps.loadingSerp = false;
+              serpCache.delete(term); // force fresh fetch on retry
+              doSearch(key);
+            });
+            return;
+          }
+        }
+        // No file yet — fall back to jumping directly to a result page.
         ps.queuedResults = eligible.slice(1).map(u => ({ target: u, domHref: u, tier: 'cache' }));
         ps.resultsGoal   = Math.floor(randBetween(RESULTS_PER_SEARCH_MIN, RESULTS_PER_SEARCH_MAX + 1));
         loadResult(key, { target: eligible[0], domHref: eligible[0], tier: 'cache' });
@@ -3095,7 +3291,29 @@ function doSearch(key) {
   lastSearchStartedAt    = now;
   ps.searchLoadStartedAt = now;
 
-  const url = buildSearchUrl(term);
+  // Build site: filter list: 2-3 group-specific domains + 1 general domain.
+  // Skip domains that are bad or already on-screen in another panel.
+  const groupDomains = TERM_GROUP_DOMAINS.get(term) || [];
+  const onScreenDomains = new Set();
+  for (const [, _u] of sharedOnScreenUrls) {
+    if (_u) { try { onScreenDomains.add(new URL(_u).hostname); } catch {} }
+  }
+  const domainIsOnScreen = _d => [...onScreenDomains].some(_h => _h === _d || _h.endsWith('.' + _d));
+  const eligibleGroupDomains = groupDomains.filter(_d =>
+    !isBadDomain('https://' + _d + '/') && !domainIsOnScreen(_d)
+  );
+  for (let _i = eligibleGroupDomains.length - 1; _i > 0; _i--) {
+    const _j = Math.floor(Math.random() * (_i + 1));
+    [eligibleGroupDomains[_i], eligibleGroupDomains[_j]] = [eligibleGroupDomains[_j], eligibleGroupDomains[_i]];
+  }
+  const sites = eligibleGroupDomains.slice(0, Math.floor(randBetween(2, 4)));
+  const general = GENERAL_DOMAINS.find(_d =>
+    !sites.includes(_d) && !isBadDomain('https://' + _d + '/') && !domainIsOnScreen(_d)
+  );
+  if (general) sites.push(general);
+  kioskLog(`[ddg] ${key} search="${term}" sites=${sites.length > 0 ? sites.join(',') : 'none'} type=real`);
+
+  const url = buildSearchUrl(term, sites.length > 0 ? sites : null);
   console.log(`[kiosk-auto] ${key} search #${ps.searchCount}: "${term}"`);
 
   const view = panelViews[key];
@@ -4134,7 +4352,8 @@ function startAllIdleRotation() {
       firstSearchDone:    false, // set true after first search; skips global gap on first load
       searchLoadStartedAt: 0,    // Date.now() when doSearch called loadURL; used for timing log
       lastNavStatus:      0,     // HTTP response code from did-navigate; carried into did-finish-load log
-      autoPhase:          'search', // 'search' | 'result' — current phase of the auto loop
+      autoPhase:          'search', // 'search' | 'result' | 'parked' — current phase of the auto loop
+      loadingSerp:        false,    // true while a saved SERP file:// URL is loading (did-finish-load guard)
       recentResultUrls:   [],       // recently visited result URLs (max ~20); prevents re-visiting the same page
       queuedResults:      [],       // remaining result pages to visit from the current SERP
       resultsGoal:        0,        // how many results to visit from the current SERP (randomised per SERP)
