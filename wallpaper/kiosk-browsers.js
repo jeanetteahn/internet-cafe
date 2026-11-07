@@ -33,19 +33,68 @@ try {
 }
 
 // ---- Search topics ----------------------------------------------------------
-// Kid-friendly only.  Panels cycle through the list in order, staggered so
-// all five show different topics at launch.
+// Kid-safe ONLY: no news/current events, no words that commonly pull adult or
+// violent content.  All terms must be safe for under-18 viewers.
 const SEARCH_TERMS = [
-  'space pictures',
-  'animal facts',
-  'weather today',
-  'science for kids',
-  'ocean animals',
-  'dinosaur discoveries',
-  'planets solar system',
-  'nature photography',
-  'inventions history',
-  'national parks',
+  // Space
+  'space pictures', 'planets solar system', 'mars rover photos',
+  'international space station', 'galaxy telescope images', 'moon phases',
+  'constellations for beginners', 'northern lights', 'how stars form',
+  'comets and asteroids', 'saturn rings', 'jupiter facts',
+  'james webb telescope images', 'astronaut training', 'solar eclipse facts',
+  // Animals
+  'animal facts', 'ocean animals', 'coral reef animals', 'rainforest animals',
+  'desert animals', 'arctic animals', 'penguin facts', 'whales and dolphins',
+  'honey bee facts', 'butterfly life cycle', 'bird migration',
+  'deep sea creatures', 'zoo animals', 'aquarium fish',
+  'endangered animals conservation', 'octopus facts', 'sea turtles',
+  'elephant facts', 'giraffe facts', 'owl facts', 'frog life cycle',
+  'koala facts', 'panda bears', 'hummingbirds', 'baby animals',
+  // Earth and nature
+  'weather today', 'nature photography', 'national parks',
+  'how volcanoes form', 'how rainbows form', 'types of clouds', 'water cycle',
+  'ocean tides', 'rocks and minerals', 'mountains of the world',
+  'waterfalls of the world', 'how caves form', 'glaciers and icebergs',
+  'seasons explained', 'rainforest plants', 'desert plants',
+  'tallest trees in the world', 'wildflowers', 'how rivers form',
+  'dinosaur fossils',
+  // Science and technology
+  'science for kids', 'simple science experiments', 'how magnets work',
+  'how plants grow', 'how electricity works', 'states of matter',
+  'how light works', 'how sound works', 'chemistry experiments for kids',
+  'robots for kids', 'coding for beginners', 'how computers work',
+  'renewable energy', 'solar power', 'how batteries work',
+  // Inventions and history
+  'inventions history', 'famous inventors', 'history of flight',
+  'how airplanes fly', 'ancient egypt pyramids', 'ancient greece facts',
+  'ancient rome architecture', 'history of the telephone',
+  'history of trains', 'castles of the world', 'great wall of china',
+  'maya civilization', 'history of the bicycle', 'famous scientists',
+  'space exploration history',
+  // Geography and culture
+  'world landmarks', 'world geography', 'famous bridges',
+  'countries of the world', 'world flags', 'seven wonders of the world',
+  'famous lighthouses', 'islands of the world', 'famous museums',
+  'world capitals', 'maps for kids', 'festivals around the world',
+  'world languages', 'famous skyscrapers', 'longest rivers in the world',
+  // Arts and hobbies
+  'musical instruments', 'origami for beginners', 'how to draw animals',
+  'gardening for beginners', 'easy paper crafts',
+  'watercolor painting for beginners', 'how to build a birdhouse',
+  'lego building ideas', 'knitting for beginners',
+  'photography tips for beginners', 'learn to play ukulele',
+  'chess for beginners', 'easy magic tricks', 'kite making',
+  'pottery for beginners',
+  // Food
+  'healthy snack ideas', 'easy baking recipes for kids',
+  'fruits around the world', 'how bread is made', 'how chocolate is made',
+  'how cheese is made', 'history of pizza', 'vegetable garden',
+  'smoothie recipes', 'easy cookie recipes',
+  // Sports and outdoors
+  'how to ride a bike', 'soccer skills for beginners',
+  'basketball drills for kids', 'swimming tips for beginners',
+  'olympic sports history', 'skateboarding basics', 'yoga for kids',
+  'hiking trails',
 ];
 
 // ---- Content-safety lists ---------------------------------------------------
@@ -69,23 +118,44 @@ const BLOCKED_DOMAINS = [
   'onlyfans.com',
 ];
 
-// ALLOWED_DOMAINS is used when BROWSING_POLICY is 'allowlist'.
+// ALLOWED_DOMAINS is used in two places: (1) AUTO_LINK_POLICY='allowlist' controls
+// which result links auto mode is allowed to follow; (2) BROWSING_POLICY='allowlist'
+// controls what customers can navigate to in active mode (currently BROWSING_POLICY
+// is 'open', so this list does not restrict customer browsing right now).
+// Matching is exact hostname or any subdomain (see isDomainAllowed).
 const ALLOWED_DOMAINS = [
+  // US government / science
   'nasa.gov',
   'noaa.gov',
   'weather.gov',
-  'nationalgeographic.com',
-  'smithsonianmag.com',
+  'nps.gov',
+  'usgs.gov',
+  'loc.gov',
+  // Natural history & science museums
   'si.edu',
-  'pbs.org',
-  'npr.org',
-  'bbc.com',
-  'bbc.co.uk',
-  'britannica.com',
+  'amnh.org',
+  'nhm.ac.uk',
+  'exploratorium.edu',
+  'montereybayaquarium.org',
+  // Nature / wildlife
+  'nationalgeographic.com',
   'kids.nationalgeographic.com',
+  'natgeokids.com',
+  'worldwildlife.org',
+  'allaboutbirds.org',
+  'audubon.org',
+  // Educational publishers / encyclopedias
+  'britannica.com',
+  'smithsonianmag.com',
   'sciencenewsexplores.org',
+  'ducksters.com',
+  'kiddle.co',
+  'sciencekids.co.nz',
+  // Space / astronomy
   'space.com',
   'earthobservatory.nasa.gov',
+  // Public media
+  'pbs.org',
 ];
 
 // AD_TRACKER_DOMAINS: every request to these hosts (and their subdomains) is
@@ -137,8 +207,11 @@ const RESULT_DWELL_MIN_MS       = 15 * 1000;  // random dwell on a result page b
 const RESULT_DWELL_MAX_MS       = 35 * 1000;  // random dwell on a result page before returning to search — maximum
 const RESULT_LOAD_TIMEOUT_MS    = 12 * 1000;  // watchdog: abort a stalled result page load, move to next search
 const RESULT_HIGHLIGHT_MS       = 600;         // visual highlight duration (ms) on the chosen anchor before navigating
-const AUTO_LINK_POLICY          = 'allowlist-preferred'; // 'allowlist-preferred' = prefer ALLOWED_DOMAINS, fall back to isPassesPolicy;
-                                                          // 'allowlist' = only ALLOWED_DOMAINS; 'browsing' = use isPassesPolicy
+const AUTO_LINK_POLICY          = 'allowlist'; // 'allowlist' = only ALLOWED_DOMAINS (strict, kid-safe);
+                                               // 'allowlist-preferred' = prefer ALLOWED_DOMAINS, fall back to isPassesPolicy;
+                                               // 'browsing' = use isPassesPolicy (BROWSING_POLICY rules)
+const SHARED_RECENT_URLS_MAX    = 300;         // how many cross-panel recent result URLs to remember
+const TERM_MISS_LIMIT           = 3;           // consecutive "no eligible results" before auto-skipping a term
 
 // ---- Auto-mode error-page blocking ------------------------------------------
 // Set AUTO_ERROR_BLOCK_ENABLED = false for a quick rollback: edit on Mac,
@@ -470,11 +543,11 @@ const panelWindows    = new Map(); // key -> BrowserWindow
 const homeBounds      = new Map(); // key -> { x, y, width, height }
 const panelViews      = {};        // key -> BrowserView (visible panel content)
 const gripViews       = {};        // key -> BrowserView (resize grip overlay)
-const panelStates     = new Map(); // key -> { mode, inactivityTimer, searchIndex,
+const panelStates     = new Map(); // key -> { mode, inactivityTimer, currentTerm,
                                    //          lastSearchTime, manualLayout,
                                    //          dwellTimer, scrollTimer, rotationStartTimer,
                                    //          autoPhase, recentResultUrls,
-                                   //          highlightTimer, resultDwellTimer }
+                                   //          highlightTimer, resultDwellTimer, searchCount }
 const ignoreNextMoves  = new Map(); // key -> timeout-id | null
 const resizeState      = new Map(); // key -> { startBounds, cornerDx, cornerDy } | null
 const panelDragOffsets = new Map(); // key -> { dx, dy } | null
@@ -504,8 +577,30 @@ const panelCursorCssKeys   = new Map(); // key -> string   — insertCSS key for
 // hostname -> expiry timestamp.  In-memory only; a relaunch on Linux clears it.
 const badDomains = new Map();
 
+// ---- Shared auto-browse coordination ----------------------------------------
+// Module-level (not in panelStates) so all five panels read the same data.
+// Never let skippedTerms shrink the deck below 20 terms (TERM_MISS_LIMIT guard).
+const sharedOnScreenUrls = new Map(); // key -> result URL currently displayed in that panel
+const sharedRecentUrls   = [];        // last SHARED_RECENT_URLS_MAX result URLs, any panel
+const termMissCounts     = new Map(); // term -> consecutive-miss count; reset on first success
+const skippedTerms       = new Set(); // terms auto-dropped this session (miss limit reached)
+let   searchDeck         = [];        // shuffle-bag deck: terms not yet drawn this round
+
 function hostnameOf(url) {
   try { return new URL(url).hostname; } catch { return ''; }
+}
+
+// Returns the registrable base domain so sub-domain variants of the same site
+// compare equal (kids.nationalgeographic.com === nationalgeographic.com, etc.).
+function baseDomain(hostname) {
+  if (!hostname) return '';
+  const parts = hostname.split('.');
+  if (parts.length <= 2) return hostname;
+  const tld = parts[parts.length - 1];
+  const sld = parts[parts.length - 2];
+  // Country-code TLD + 2nd-level word (co.uk, co.nz, com.au, gov.uk, ac.uk …)
+  if (tld.length === 2 && sld.length <= 4) return parts.slice(-3).join('.');
+  return parts.slice(-2).join('.');
 }
 
 // Mark a domain bad for BAD_DOMAIN_TTL_MS.  Only logs the first time a host is
@@ -1363,6 +1458,8 @@ function notePanelActivity(key, eventType) {
     console.log(`[kiosk-auto] ${key} -> active (reason: ${eventType})`);
     stopBrowsingLoop(key);
     ps.mode = 'active';
+    sharedOnScreenUrls.delete(key);
+    ps.currentTerm = null;
     const _v = panelViews[key];
     if (_v && !_v.webContents.isDestroyed()) _v.webContents.setAudioMuted(false);
     pushForkKnifeNavState();
@@ -1558,7 +1655,7 @@ function setupViewEventHandlers(key, win, view) {
           if (ps.searchLoadStartedAt) {
             const elapsed = Date.now() - ps.searchLoadStartedAt;
             const status  = ps.lastNavStatus || 200;
-            console.log(`[kiosk-timing] ${key} search #${ps.searchIndex} took ${elapsed} ms (status ${status})`);
+            console.log(`[kiosk-timing] ${key} search #${ps.searchCount || 0} took ${elapsed} ms (status ${status})`);
             ps.searchLoadStartedAt = 0;
             ps.lastNavStatus       = 0;
           }
@@ -2198,26 +2295,87 @@ async function pickRandomResult(key) {
     console.log(`[kiosk-auto] ${key} skipped ${badDomainSkips} result(s) for bad domain(s)`);
   }
   if (pool.length === 0) {
-    console.log(`[kiosk-auto] ${key} no eligible results (${total} found, ${afterPolicy} after policy), next search`);
+    console.log(`[kiosk-auto] ${key} no eligible results (${total} found, ${afterPolicy} after policy)`);
     return null;
   }
 
-  // Shuffle pool so we don't always pick the top DDG result, then put
-  // different-hostname candidates first in the backup list so one broken site
-  // can't consume all SAME_SERP_RETRIES slots.
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j], pool[i]];
+  // ---- Shared cross-panel filtering with progressive fallback -----------------
+  // Collect what other panels are showing right now and their base domains.
+  const otherOnScreenUrls    = new Set();
+  const otherOnScreenDomains = new Set();
+  for (const [k, url] of sharedOnScreenUrls) {
+    if (k !== key && url) {
+      otherOnScreenUrls.add(url);
+      const bd = baseDomain(hostnameOf(url));
+      if (bd) otherOnScreenDomains.add(bd);
+    }
   }
-  const pick    = pool[0];
+  const sharedRecentSet = new Set(sharedRecentUrls);
+
+  // Count items blocked by each rule (for the log) using the strictest applicable rule.
+  let sameUrlCount = 0, sameSiteCount = 0, sharedRecentCount = 0;
+  for (const c of pool) {
+    const url = c.target;
+    if (otherOnScreenUrls.has(url))                              sameUrlCount++;
+    else if (otherOnScreenDomains.has(baseDomain(hostnameOf(url)))) sameSiteCount++;
+    else if (sharedRecentSet.has(url))                           sharedRecentCount++;
+  }
+
+  // Level 0 (strict): exclude same-URL, same-site, and shared-recent.
+  let candidates = pool.filter(c => {
+    const url = c.target;
+    if (otherOnScreenUrls.has(url))                              return false;
+    if (otherOnScreenDomains.has(baseDomain(hostnameOf(url))))   return false;
+    if (sharedRecentSet.has(url))                                return false;
+    return true;
+  });
+  let fallbackUsed = 'none';
+
+  if (candidates.length === 0) {
+    // Fallback 1: allow same site, still exclude same-URL and shared-recent.
+    candidates = pool.filter(c => {
+      if (otherOnScreenUrls.has(c.target)) return false;
+      if (sharedRecentSet.has(c.target))   return false;
+      return true;
+    });
+    if (candidates.length > 0) {
+      fallbackUsed = 'same-site-ok';
+      kioskLog(`[kiosk-auto] ${key} fallback relaxed: allowing same site as another panel`);
+    }
+  }
+
+  if (candidates.length === 0) {
+    // Fallback 2: allow shared-recent, still never on-screen in another panel right now.
+    candidates = pool.filter(c => !otherOnScreenUrls.has(c.target));
+    if (candidates.length > 0) {
+      fallbackUsed = 'shared-recent-ok';
+      kioskLog(`[kiosk-auto] ${key} fallback relaxed: allowing shared-recent URLs`);
+    }
+  }
+
+  if (candidates.length === 0) {
+    // No candidates at all after all fallbacks — keep existing "next search" behavior.
+    console.log(`[kiosk-auto] ${key} no eligible results after all shared filters (pool=${pool.length})`);
+    return null;
+  }
+
+  // Shuffle candidates, then sort backups so different-hostname entries come
+  // first (a single broken site can't consume all SAME_SERP_RETRIES slots).
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  const pick     = candidates[0];
   const pickHost = hostnameOf(pick.target);
-  const others  = pool.slice(1);
+  const others   = candidates.slice(1);
   others.sort((a, b) => {
     const aMatch = hostnameOf(a.target) === pickHost ? 1 : 0;
     const bMatch = hostnameOf(b.target) === pickHost ? 1 : 0;
     return aMatch - bMatch; // different-hostname backups come first
   });
   if (ps) ps.pendingResults = others.slice(0, SAME_SERP_RETRIES);
+
+  kioskLog(`[kiosk-auto] ${key} result host=${hostnameOf(pick.target)} (filtered: ${sameUrlCount} same-url, ${sameSiteCount} same-site, ${sharedRecentCount} shared-recent, fallback=${fallbackUsed})`);
 
   return pick;
 }
@@ -2234,6 +2392,9 @@ function loadResult(key, result) {
   ps.autoPhase = 'result';
   ps.recentResultUrls.push(result.target);
   if (ps.recentResultUrls.length > 20) ps.recentResultUrls.shift();
+  sharedOnScreenUrls.set(key, result.target);
+  sharedRecentUrls.push(result.target);
+  if (sharedRecentUrls.length > SHARED_RECENT_URLS_MAX) sharedRecentUrls.shift();
 
   // Increment attempt token before arming the watchdog; onResultRejected also
   // increments it so stale callbacks can detect they are superseded.
@@ -2329,6 +2490,26 @@ async function onSearchBottom(key) {
   }
 
   if (!result) {
+    // Track consecutive misses for this term and auto-skip if the limit is hit.
+    const term = ps.currentTerm;
+    if (term) {
+      const count = (termMissCounts.get(term) || 0) + 1;
+      termMissCounts.set(term, count);
+      kioskLog(`[kiosk-auto] ${key} no eligible results for "${term}" (miss ${count}/${TERM_MISS_LIMIT})`);
+      if (count >= TERM_MISS_LIMIT && !skippedTerms.has(term)) {
+        const eligibleCount = SEARCH_TERMS.filter(t => !skippedTerms.has(t)).length;
+        if (eligibleCount - 1 >= 20) {
+          skippedTerms.add(term);
+          const idx = searchDeck.indexOf(term);
+          if (idx !== -1) searchDeck.splice(idx, 1);
+          kioskLog(`[kiosk-deck] auto-skipped term "${term}" (${count} consecutive misses). Skipped: ${[...skippedTerms].join(', ')}`);
+        } else {
+          kioskLog(`[kiosk-deck] term "${term}" hit miss limit but skipping would drop deck below 20 (${eligibleCount} eligible)`);
+        }
+      }
+    } else {
+      kioskLog(`[kiosk-auto] ${key} no eligible results (no current term)`);
+    }
     const sinceLastSearch = Date.now() - ps.lastSearchTime;
     const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
     ps.dwellTimer = setTimeout(() => {
@@ -2337,6 +2518,9 @@ async function onSearchBottom(key) {
     }, holdMs);
     return;
   }
+
+  // Successful result pick — reset the miss counter for this term.
+  if (ps.currentTerm) termMissCounts.set(ps.currentTerm, 0);
 
   console.log(`[kiosk-auto] ${key} following result (${result.tier}): ${result.target}`);
 
@@ -2468,6 +2652,52 @@ async function onResultPageReady(key) {
   beginResultDwell(key);
 }
 
+// ---- Search deck (shuffle-bag) -----------------------------------------------
+
+// Fisher-Yates shuffle of all non-skipped terms, with currently-active terms
+// pushed to the end so a reshuffle doesn't immediately repeat on-screen topics.
+function reshuffleDeck(activeTerms) {
+  const eligible = SEARCH_TERMS.filter(t => !skippedTerms.has(t));
+  for (let i = eligible.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [eligible[i], eligible[j]] = [eligible[j], eligible[i]];
+  }
+  const front = eligible.filter(t => !activeTerms.has(t));
+  const back  = eligible.filter(t =>  activeTerms.has(t));
+  searchDeck  = [...front, ...back];
+  kioskLog(`[kiosk-deck] reshuffled: ${searchDeck.length} terms (${skippedTerms.size} skipped${skippedTerms.size ? ': ' + [...skippedTerms].join(', ') : ''})`);
+}
+
+// Draws the next term from the deck for panel `key`, skipping terms that other
+// panels are currently searching or browsing.  Reshuffles automatically when
+// the deck runs dry.
+function drawNextTerm(key) {
+  const otherTerms = new Set();
+  for (const [k, ops] of panelStates) {
+    if (k !== key && ops.currentTerm) otherTerms.add(ops.currentTerm);
+  }
+
+  // Scan the deck for the first term that isn't currently active on another panel.
+  for (let i = 0; i < searchDeck.length; i++) {
+    if (!otherTerms.has(searchDeck[i])) {
+      const [term] = searchDeck.splice(i, 1);
+      return term;
+    }
+  }
+
+  // Deck empty or all remaining terms are in use — reshuffle and try again.
+  reshuffleDeck(otherTerms);
+  for (let i = 0; i < searchDeck.length; i++) {
+    if (!otherTerms.has(searchDeck[i])) {
+      const [term] = searchDeck.splice(i, 1);
+      return term;
+    }
+  }
+
+  // Edge case: more panels searching than terms (shouldn't happen with 138 terms).
+  return searchDeck.length > 0 ? searchDeck.shift() : SEARCH_TERMS[0];
+}
+
 function doSearch(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
@@ -2495,11 +2725,23 @@ function doSearch(key) {
   ps.lastSearchTime      = now;
   ps.searchLoadStartedAt = now;
 
-  const term = SEARCH_TERMS[ps.searchIndex % SEARCH_TERMS.length];
-  ps.searchIndex += 1;
+  // Panel is leaving any result page — clear its on-screen entry.
+  sharedOnScreenUrls.delete(key);
+
+  const term = drawNextTerm(key);
+  ps.currentTerm = term;
+  ps.searchCount = (ps.searchCount || 0) + 1;
+
+  // Log term draw with deck state so the log shows how the shuffle-bag is progressing.
+  const otherTermStrs = [];
+  for (const [k, ops] of panelStates) {
+    if (k !== key && ops.currentTerm) otherTermStrs.push(`${k}='${ops.currentTerm}'`);
+  }
+  const totalEligible = SEARCH_TERMS.length - skippedTerms.size;
+  kioskLog(`[kiosk-deck] ${key} term='${term}' deck=${searchDeck.length}/${totalEligible}${otherTermStrs.length ? ` (others: ${otherTermStrs.join(', ')})` : ''}`);
 
   const url = buildSearchUrl(term);
-  console.log(`[kiosk-auto] ${key} search [${ps.searchIndex}]: "${term}"`);
+  console.log(`[kiosk-auto] ${key} search #${ps.searchCount}: "${term}"`);
 
   const view = panelViews[key];
   if (!view || view.webContents.isDestroyed()) return;
@@ -3521,7 +3763,8 @@ function startAllIdleRotation() {
     panelStates.set(key, {
       mode:               'auto',
       inactivityTimer:    null,
-      searchIndex:        i,     // stagger topics: each panel starts on a different term
+      currentTerm:        null,  // term currently being searched or displayed (draw from shuffle-bag)
+      searchCount:        0,     // total searches on this panel (for timing logs)
       lastSearchTime:     0,     // Date.now() of last doSearch call; 0 = never searched
       manualLayout:       false, // true once customer drags/resizes while active; suppresses auto-size animations
       dwellTimer:         null,  // next-search setTimeout
@@ -3702,6 +3945,7 @@ function recyclePanelView(key) {
   kioskLog(`recycle ${key}: start processes=${beforeMetrics.length}`);
 
   stopBrowsingLoop(key);
+  sharedOnScreenUrls.delete(key);
 
   const oldView = panelViews[key];
   if (oldView) {
