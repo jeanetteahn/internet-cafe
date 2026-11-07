@@ -201,7 +201,8 @@ const SCROLL_SPEED_MAX_PX_S  = 450;       // fastest random auto-scroll speed (p
 const AUTO_SCROLL_FRAME_MS   = 33;        // in-page auto-scroll frame interval (~30 fps); 16 = 60 fps if the GPU can afford it
 const INACTIVITY_TIMEOUT_MS  = 120 * 1000; // idle grace period before auto mode resumes
 const LOAD_TIMEOUT_MS        = 15 * 1000; // per-panel watchdog: abort and retry if a DDG load takes longer
-const GLOBAL_SEARCH_GAP_MS   =  2 * 1000; // minimum gap between any two panels starting a DDG search
+const GLOBAL_SEARCH_GAP_MS   = 10 * 1000; // minimum gap between any two panels starting a DDG search
+const FIRST_SEARCH_GAP_MS    =  3 * 1000; // shorter gap for each panel's very first search (lets windows fill faster)
 const FOLLOW_RESULT_PROBABILITY = 1.0;        // chance of clicking a result after a search scroll; < 1 mixes in plain searches
 const RESULT_DWELL_MIN_MS       = 15 * 1000;  // random dwell on a result page before returning to search — minimum
 const RESULT_DWELL_MAX_MS       = 35 * 1000;  // random dwell on a result page before returning to search — maximum
@@ -218,7 +219,13 @@ const TERM_MISS_LIMIT           = 3;           // consecutive "no eligible resul
 // push, then git pull + relaunch on Linux.  All blocking is skipped.
 const AUTO_ERROR_BLOCK_ENABLED  = true;
 const BAD_DOMAIN_TTL_MS         = 3 * 60 * 60 * 1000; // 3 hours in-memory; cleared on relaunch
-const SAME_SERP_RETRIES         = 2;    // extra results kept from each SERP as backup before next search
+const RESULTS_PER_SEARCH_MIN    = 2;             // minimum result pages to visit per SERP before returning to search
+const RESULTS_PER_SEARCH_MAX    = 3;             // maximum result pages to visit per SERP
+const SERP_CACHE_TTL_MS         = 60 * 60 * 1000; // cache SERP result URLs per term for 1 hour
+const SHOW_SERP_EVERY_N         = 3;             // show a real DDG SERP every Nth cached use; others skip DDG entirely
+const DDG_PAUSE_BASE_MS         =  2 * 60 * 1000; // first bot-check all-panel pause: 2 min, doubles each strike
+const DDG_PAUSE_MAX_MS          = 15 * 60 * 1000; // pause ceiling regardless of strike count
+const DDG_STRIKE_RESET_MS       = 30 * 60 * 1000; // reset strike count after 30 min with no bot-checks
 const SOFT_ERROR_MAX_TEXT       = 1500; // body-phrase check only runs when page text is under this length
 
 // Body phrases that indicate an error or gate page; checked only on short pages
@@ -530,6 +537,23 @@ let windowsCreatedAt = 0; // set when createKioskWindow finishes; move events wi
 // Timestamp of the last doSearch loadURL call across ALL panels.  Enforces
 // GLOBAL_SEARCH_GAP_MS so no two panels hit DDG within that window.
 let lastSearchStartedAt = 0;
+
+// ---- DDG shared backoff state -----------------------------------------------
+// All panels share these; a single bot-check pauses DDG for everyone.
+let ddgPausedUntil    = 0;    // timestamp: skip DDG until Date.now() > this
+let ddgBotStrikes     = 0;    // consecutive bot-check count for exponential pause length
+let ddgStrikeResetTimer = null; // setTimeout: resets ddgBotStrikes after DDG_STRIKE_RESET_MS clean
+
+// ---- SERP cache (per-term) --------------------------------------------------
+// After each real DDG search, we cache the policy-approved result URLs for
+// that term so future draws of the same term can skip the DDG page entirely.
+const serpCache         = new Map(); // term -> { urls: [...], fetchedAt: timestamp }
+const serpCacheUseCount = new Map(); // term -> consecutive cached uses since last real SERP fetch
+
+// ---- DDG rate stats (10-min rolling window) ---------------------------------
+let ddgStats = { searches: 0, cacheHits: 0, resultsVisited: 0, botChecks: 0, windowStart: 0 };
+let ddgSummaryTimer = null; // module-level so V8 keeps it alive
+
 const timingMs = () => Date.now() - _t0;
 const firstLoadLogged = new Set();
 
@@ -2098,16 +2122,16 @@ function startScrolling(key) {
     if (ps.mode !== 'auto' || ps.scrollTimer === null) return;
 
     if (ps.autoPhase === 'result') {
-      // Result page bottom: wait the normal hold floor then fetch the next search.
+      // Result page bottom: wait the normal hold floor then move to next step.
       const sinceLastSearch = Date.now() - ps.lastSearchTime;
       const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
       stopScrolling(key);
       clearTimeout(ps.resultDwellTimer);
       ps.resultDwellTimer = null;
-      console.log(`[kiosk-auto] ${key} result bottom — next search in ${holdMs} ms`);
+      console.log(`[kiosk-auto] ${key} result bottom — next step in ${holdMs} ms`);
       ps.dwellTimer = setTimeout(() => {
         ps.dwellTimer = null;
-        if (ps.mode === 'auto') doSearch(key);
+        if (ps.mode === 'auto') nextAutoStep(key);
       }, holdMs);
     } else {
       // Search phase: don't advance if a DDG load is still in-flight — let
@@ -2359,8 +2383,18 @@ async function pickRandomResult(key) {
     return null;
   }
 
-  // Shuffle candidates, then sort backups so different-hostname entries come
-  // first (a single broken site can't consume all SAME_SERP_RETRIES slots).
+  // Cache the full policy-approved pool for this term before shared filtering
+  // so future draws can skip the DDG page; filterCachedUrls() re-applies
+  // cross-panel rules at use time.
+  if (ps && ps.currentTerm) {
+    const cachedUrls = pool.map(c => c.target);
+    serpCache.set(ps.currentTerm, { urls: cachedUrls, fetchedAt: Date.now() });
+    serpCacheUseCount.set(ps.currentTerm, 0);
+    kioskLog(`[ddg] cache: stored "${ps.currentTerm}" ${cachedUrls.length} URLs`);
+  }
+
+  // Shuffle candidates, then sort so different-hostname entries come first
+  // (a single broken site can't occupy all queue slots).
   for (let i = candidates.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
@@ -2373,7 +2407,11 @@ async function pickRandomResult(key) {
     const bMatch = hostnameOf(b.target) === pickHost ? 1 : 0;
     return aMatch - bMatch; // different-hostname backups come first
   });
-  if (ps) ps.pendingResults = others.slice(0, SAME_SERP_RETRIES);
+  if (ps) {
+    ps.queuedResults  = others; // all remaining candidates (visit RESULTS_PER_SEARCH_MIN–MAX per SERP)
+    ps.resultsGoal    = Math.floor(randBetween(RESULTS_PER_SEARCH_MIN, RESULTS_PER_SEARCH_MAX + 1));
+    ps.resultsVisited = 0;
+  }
 
   kioskLog(`[kiosk-auto] ${key} result host=${hostnameOf(pick.target)} (filtered: ${sameUrlCount} same-url, ${sameSiteCount} same-site, ${sharedRecentCount} shared-recent, fallback=${fallbackUsed})`);
 
@@ -2382,7 +2420,7 @@ async function pickRandomResult(key) {
 
 // Arms the result load watchdog and calls loadURL.  Extracted from the
 // highlightTimer callback in onSearchBottom so the same path is reused when
-// trying backup results from ps.pendingResults.
+// trying queued results from ps.queuedResults.
 function loadResult(key, result) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
@@ -2423,8 +2461,8 @@ function loadResult(key, result) {
   });
 }
 
-// Called when a result-page load fails or is blocked.  Tries the next backup
-// result from ps.pendingResults (same SERP) before triggering a new search.
+// Called when a result-page load fails or is blocked.  Tries the next entry
+// from ps.queuedResults (same SERP) before triggering a new search.
 function onResultRejected(key, url, reason, markBad) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
@@ -2440,21 +2478,21 @@ function onResultRejected(key, url, reason, markBad) {
 
   if (markBad) markBadDomain(url, reason);
 
-  // Try the next backup before triggering a fresh search.
-  const backups = ps.pendingResults || [];
-  while (backups.length > 0) {
-    const next = backups.shift();
+  // Try the next queued result before giving up and searching again.
+  const queue = ps.queuedResults || [];
+  while (queue.length > 0) {
+    const next = queue.shift();
     if (isBadDomain(next.target)) {
-      console.log(`[kiosk-auto] ${key} backup skipped (bad domain): ${hostnameOf(next.target)}`);
+      console.log(`[kiosk-auto] ${key} queued result skipped (bad domain): ${hostnameOf(next.target)}`);
       continue;
     }
-    console.log(`[kiosk-auto] ${key} trying backup result (${reason}): ${next.target}`);
+    console.log(`[kiosk-auto] ${key} trying queued result (${reason}): ${next.target}`);
     loadResult(key, next);
     return;
   }
 
-  console.log(`[kiosk-auto] ${key} result rejected (${reason}), no backups — next search`);
-  doSearch(key);
+  console.log(`[kiosk-auto] ${key} result rejected (${reason}), queue empty — next auto step`);
+  nextAutoStep(key);
 }
 
 // Called when a search page hits the bottom (or the random search-cap timer fires).  Respects FOLLOW_RESULT_PROBABILITY; when following, picks a
@@ -2484,8 +2522,8 @@ async function onSearchBottom(key) {
   }
 
   if (result && result.botCheck) {
-    console.log(`[kiosk-auto] ${key} onSearchBottom: DDG bot-check, scheduling retry`);
-    scheduleRetry(key, 'ddg-challenge');
+    console.log(`[kiosk-auto] ${key} onSearchBottom: DDG bot-check detected`);
+    noteDdgBotCheck(key);
     return;
   }
 
@@ -2556,6 +2594,8 @@ async function onSearchBottom(key) {
 function beginResultDwell(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
+  ps.resultsVisited = (ps.resultsVisited || 0) + 1;
+  ddgStats.resultsVisited++;
   startScrolling(key); // sets ps.scrollPxS
   const resultDwellMs = randBetween(RESULT_DWELL_MIN_MS, RESULT_DWELL_MAX_MS);
   kioskLog(`[kiosk-auto] ${key} speed=${Math.round(ps.scrollPxS)}px/s dwell=${Math.round(resultDwellMs / 1000)}s`);
@@ -2564,7 +2604,7 @@ function beginResultDwell(key) {
     ps.resultDwellTimer = null;
     if (ps.mode !== 'auto' || ps.autoPhase !== 'result') return;
     stopScrolling(key);
-    doSearch(key);
+    nextAutoStep(key);
   }, resultDwellMs);
 }
 
@@ -2698,32 +2738,174 @@ function drawNextTerm(key) {
   return searchDeck.length > 0 ? searchDeck.shift() : SEARCH_TERMS[0];
 }
 
-function doSearch(key) {
+// Returns cached URLs for `term` that still pass current shared-state filters.
+function filterCachedUrls(key, urls) {
+  const ps = panelStates.get(key);
+  const otherOnScreen    = new Set();
+  const otherOnScreenBDs = new Set();
+  for (const [k, url] of sharedOnScreenUrls) {
+    if (k !== key && url) {
+      otherOnScreen.add(url);
+      const bd = baseDomain(hostnameOf(url));
+      if (bd) otherOnScreenBDs.add(bd);
+    }
+  }
+  const sharedRecentSet = new Set(sharedRecentUrls);
+  const panelRecentSet  = new Set(ps ? ps.recentResultUrls : []);
+  return urls.filter(url => {
+    if (isBadDomain(url))                                   return false;
+    if (!isDomainAllowed(url))                              return false;
+    if (otherOnScreen.has(url))                             return false;
+    if (otherOnScreenBDs.has(baseDomain(hostnameOf(url))))  return false;
+    if (sharedRecentSet.has(url))                           return false;
+    if (panelRecentSet.has(url))                            return false;
+    return true;
+  });
+}
+
+// If the panel has more results to visit from the current SERP, load the next
+// one; otherwise start a fresh search cycle.
+function nextAutoStep(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
-  ps.autoPhase    = 'search';
-  ps.pendingResults = []; // discard any leftovers from the previous SERP
-
-  // Global search gate: space out DDG hits across all panels.
-  // Skipped for each panel's very first search so windows fill immediately.
-  if (ps.firstSearchDone) {
-    const gapRemaining = GLOBAL_SEARCH_GAP_MS - (Date.now() - lastSearchStartedAt);
-    if (gapRemaining > 0) {
-      clearTimeout(ps.dwellTimer);
-      ps.dwellTimer = setTimeout(() => {
-        ps.dwellTimer = null;
-        if (ps.mode === 'auto') doSearch(key);
-      }, gapRemaining);
+  if (ps.resultsVisited < ps.resultsGoal && ps.queuedResults && ps.queuedResults.length > 0) {
+    while (ps.queuedResults.length > 0) {
+      const next = ps.queuedResults.shift();
+      if (isBadDomain(next.target)) {
+        console.log(`[kiosk-auto] ${key} queued result skipped (bad domain): ${hostnameOf(next.target)}`);
+        continue;
+      }
+      // Re-check whether another panel has taken this URL since we queued it.
+      const otherUrls = new Set([...sharedOnScreenUrls.values()].filter(Boolean));
+      if (otherUrls.has(next.target)) {
+        console.log(`[kiosk-auto] ${key} queued result skipped (on another panel): ${next.target}`);
+        continue;
+      }
+      loadResult(key, next);
       return;
     }
   }
-  const isFirst      = !ps.firstSearchDone; // capture before setting — true only on each panel's first search
+  doSearch(key);
+}
+
+// Called when any panel hits a DDG bot-check page.  Sets a shared pause so
+// all panels stop hitting DDG, with exponential back-off per strike.
+// Also navigates the triggering panel away from the challenge page.
+function noteDdgBotCheck(key) {
+  clearTimeout(ddgStrikeResetTimer);
+  ddgStrikeResetTimer = null;
+
+  ddgBotStrikes += 1;
+  const pauseMs   = Math.min(DDG_PAUSE_BASE_MS * Math.pow(2, ddgBotStrikes - 1), DDG_PAUSE_MAX_MS);
+  ddgPausedUntil  = Date.now() + pauseMs;
+  ddgStats.botChecks++;
+  kioskLog(`[ddg] bot-check: strike ${ddgBotStrikes}, pausing all DDG for ${Math.round(pauseMs / 60000)} min`);
+
+  // Schedule strike reset after a clean period with no bot-checks.
+  ddgStrikeResetTimer = setTimeout(() => {
+    ddgStrikeResetTimer = null;
+    ddgBotStrikes = 0;
+    ddgPausedUntil = 0;
+    kioskLog('[ddg] pause ended — strike counter reset');
+  }, DDG_STRIKE_RESET_MS);
+
+  // Navigate the triggering panel off the bot-check page.
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
+  stopBrowsingLoop(key);
+  ps.mode      = 'auto';
+  ps.autoPhase = 'search'; // prevent did-finish-load from calling onResultPageReady
+
+  // Prefer a queued result from the last SERP over the neutral page.
+  const queue = ps.queuedResults || [];
+  while (queue.length > 0) {
+    const next = queue.shift();
+    if (!isBadDomain(next.target)) {
+      loadResult(key, next);
+      return;
+    }
+  }
+
+  // No queued result available — load neutral approved page and wait out the pause.
+  const v = panelViews[key];
+  if (v && !v.webContents.isDestroyed()) {
+    v.webContents.loadURL('https://spaceplace.nasa.gov/').catch(() => {});
+  }
+  sharedOnScreenUrls.delete(key);
+  const remaining = Math.max(ddgPausedUntil - Date.now(), 1000);
+  clearTimeout(ps.dwellTimer);
+  ps.dwellTimer = setTimeout(() => {
+    ps.dwellTimer = null;
+    if (ps.mode === 'auto') doSearch(key);
+  }, remaining);
+}
+
+// Starts the 10-minute rolling [ddg] summary log.
+function startDdgSummaryTimer() {
+  ddgStats.windowStart = Date.now();
+  ddgSummaryTimer = setInterval(() => {
+    const now     = Date.now();
+    const minutes = (now - ddgStats.windowStart) / 60000;
+    const rate    = minutes > 0 ? (ddgStats.searches / minutes).toFixed(2) : '0';
+    kioskLog(`[ddg] 10-min summary: searches=${ddgStats.searches} cache=${ddgStats.cacheHits} results=${ddgStats.resultsVisited} bot-checks=${ddgStats.botChecks} rate=${rate}/min`);
+    ddgStats = { searches: 0, cacheHits: 0, resultsVisited: 0, botChecks: 0, windowStart: now };
+  }, 10 * 60 * 1000);
+}
+
+function doSearch(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
+  ps.autoPhase     = 'search';
+  ps.queuedResults  = []; // discard any leftovers from the previous SERP
+  ps.resultsGoal   = 0;
+  ps.resultsVisited = 0;
+
+  // ---- Part 1: DDG global pause (bot-check backoff) --------------------------
+  // During a pause, try to serve the panel from the SERP cache without hitting
+  // DDG.  If no fresh cached term is available, hold the current page.
+  const pauseMs = ddgPausedUntil - Date.now();
+  if (pauseMs > 0) {
+    sharedOnScreenUrls.delete(key);
+    for (const [cachedTerm, entry] of serpCache) {
+      if (Date.now() - entry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
+      const eligible = filterCachedUrls(key, entry.urls);
+      if (eligible.length === 0) continue;
+      kioskLog(`[ddg] ${key} search="${cachedTerm}" type=cache (DDG paused ${Math.round(pauseMs / 1000)}s)`);
+      ddgStats.cacheHits++;
+      ps.currentTerm   = cachedTerm;
+      ps.firstSearchDone = true;
+      ps.queuedResults = eligible.slice(1).map(u => ({ target: u, domHref: u, tier: 'cache' }));
+      ps.resultsGoal   = Math.floor(randBetween(RESULTS_PER_SEARCH_MIN, RESULTS_PER_SEARCH_MAX + 1));
+      loadResult(key, { target: eligible[0], domHref: eligible[0], tier: 'cache' });
+      return;
+    }
+    // No cache — hold current page until pause expires.
+    kioskLog(`[ddg] ${key} holding: DDG paused ${Math.round(pauseMs / 1000)}s, no fresh cache`);
+    clearTimeout(ps.dwellTimer);
+    ps.dwellTimer = setTimeout(() => {
+      ps.dwellTimer = null;
+      if (ps.mode === 'auto') doSearch(key);
+    }, pauseMs + 1000);
+    return;
+  }
+
+  // ---- Part 4: Global search gap (now covers first search with shorter gap) --
+  const gap          = ps.firstSearchDone ? GLOBAL_SEARCH_GAP_MS : FIRST_SEARCH_GAP_MS;
+  const gapRemaining = gap - (Date.now() - lastSearchStartedAt);
+  if (gapRemaining > 0) {
+    clearTimeout(ps.dwellTimer);
+    ps.dwellTimer = setTimeout(() => {
+      ps.dwellTimer = null;
+      if (ps.mode === 'auto') doSearch(key);
+    }, gapRemaining);
+    return;
+  }
+
+  const isFirst      = !ps.firstSearchDone;
   ps.firstSearchDone = true;
 
   const now = Date.now();
-  lastSearchStartedAt    = now;
-  ps.lastSearchTime      = now;
-  ps.searchLoadStartedAt = now;
+  ps.lastSearchTime = now;
 
   // Panel is leaving any result page — clear its on-screen entry.
   sharedOnScreenUrls.delete(key);
@@ -2732,13 +2914,41 @@ function doSearch(key) {
   ps.currentTerm = term;
   ps.searchCount = (ps.searchCount || 0) + 1;
 
-  // Log term draw with deck state so the log shows how the shuffle-bag is progressing.
+  // Log term draw with deck state.
   const otherTermStrs = [];
   for (const [k, ops] of panelStates) {
     if (k !== key && ops.currentTerm) otherTermStrs.push(`${k}='${ops.currentTerm}'`);
   }
   const totalEligible = SEARCH_TERMS.length - skippedTerms.size;
   kioskLog(`[kiosk-deck] ${key} term='${term}' deck=${searchDeck.length}/${totalEligible}${otherTermStrs.length ? ` (others: ${otherTermStrs.join(', ')})` : ''}`);
+
+  // ---- Part 3: SERP cache check (skip DDG if we have fresh results) ----------
+  const serpEntry = serpCache.get(term);
+  if (serpEntry && Date.now() - serpEntry.fetchedAt < SERP_CACHE_TTL_MS) {
+    const eligible = filterCachedUrls(key, serpEntry.urls);
+    if (eligible.length > 0) {
+      let useCt = (serpCacheUseCount.get(term) || 0) + 1;
+      serpCacheUseCount.set(term, useCt);
+      if (useCt % SHOW_SERP_EVERY_N !== 0) {
+        kioskLog(`[ddg] ${key} search="${term}" type=cache use=${useCt}`);
+        ddgStats.cacheHits++;
+        ps.queuedResults = eligible.slice(1).map(u => ({ target: u, domHref: u, tier: 'cache' }));
+        ps.resultsGoal   = Math.floor(randBetween(RESULTS_PER_SEARCH_MIN, RESULTS_PER_SEARCH_MAX + 1));
+        loadResult(key, { target: eligible[0], domHref: eligible[0], tier: 'cache' });
+        return;
+      }
+      kioskLog(`[ddg] ${key} search="${term}" type=real (SERP refresh, every ${SHOW_SERP_EVERY_N} uses)`);
+    } else {
+      kioskLog(`[ddg] ${key} search="${term}" type=real (cache empty after filters)`);
+    }
+  } else {
+    kioskLog(`[ddg] ${key} search="${term}" type=real (no cache)`);
+  }
+
+  // ---- Real DDG search -------------------------------------------------------
+  ddgStats.searches++;
+  lastSearchStartedAt    = now;
+  ps.searchLoadStartedAt = now;
 
   const url = buildSearchUrl(term);
   console.log(`[kiosk-auto] ${key} search #${ps.searchCount}: "${term}"`);
@@ -3779,7 +3989,9 @@ function startAllIdleRotation() {
       lastNavStatus:      0,     // HTTP response code from did-navigate; carried into did-finish-load log
       autoPhase:          'search', // 'search' | 'result' — current phase of the auto loop
       recentResultUrls:   [],       // recently visited result URLs (max ~20); prevents re-visiting the same page
-      pendingResults:     [],       // backup results from the same SERP; tried before the next doSearch
+      queuedResults:      [],       // remaining result pages to visit from the current SERP
+      resultsGoal:        0,        // how many results to visit from the current SERP (randomised per SERP)
+      resultsVisited:     0,        // how many results visited so far from the current SERP
       resultAttempt:      0,        // incremented on each loadResult; guards against double-handling
       highlightTimer:     null,     // RESULT_HIGHLIGHT_MS timeout before navigating to a chosen result
       resultDwellTimer:   null,     // random dwell cap on result pages before returning to search
@@ -3799,6 +4011,7 @@ function startAllIdleRotation() {
     panelStates.get(key).rotationStartTimer = timer;
   });
   windowsCreatedAt = Date.now();
+  startDdgSummaryTimer();
   console.log(`[kiosk-auto] link-following enabled (policy: ${AUTO_LINK_POLICY}, probability: ${FOLLOW_RESULT_PROBABILITY})`);
 }
 
