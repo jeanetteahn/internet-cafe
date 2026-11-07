@@ -226,6 +226,16 @@ const SHOW_SERP_EVERY_N         = 3;             // show a real DDG SERP every N
 const DDG_PAUSE_BASE_MS         =  2 * 60 * 1000; // first bot-check all-panel pause: 2 min, doubles each strike
 const DDG_PAUSE_MAX_MS          = 15 * 60 * 1000; // pause ceiling regardless of strike count
 const DDG_STRIKE_RESET_MS       = 30 * 60 * 1000; // reset strike count after 30 min with no bot-checks
+const DDG_MIN_STRIKE_GAP_MS     = 60 * 1000;      // ignore a new strike if one was counted within this window
+// Approved pages shown on all panels during a DDG pause; must pass isDomainAllowed.
+// Verified reachable (HTTP 200) via curl from the dev machine.
+const PAUSE_START_URLS = [
+  'https://spaceplace.nasa.gov/',
+  'https://kids.nationalgeographic.com/',
+  'https://www.ducksters.com/',
+  'https://www.nasa.gov/',
+  'https://sciencenewsexplores.org/',
+];
 const SOFT_ERROR_MAX_TEXT       = 1500; // body-phrase check only runs when page text is under this length
 
 // Body phrases that indicate an error or gate page; checked only on short pages
@@ -553,6 +563,8 @@ const serpCacheUseCount = new Map(); // term -> consecutive cached uses since la
 // ---- DDG rate stats (10-min rolling window) ---------------------------------
 let ddgStats = { searches: 0, cacheHits: 0, resultsVisited: 0, botChecks: 0, windowStart: 0 };
 let ddgSummaryTimer = null; // module-level so V8 keeps it alive
+let ddgLastStrikeAt = 0;   // Date.now() of the last counted bot-check strike (60 s guard)
+let parkUrlIndex    = 0;   // round-robin index into PAUSE_START_URLS
 
 const timingMs = () => Date.now() - _t0;
 const firstLoadLogged = new Set();
@@ -1673,30 +1685,45 @@ function setupViewEventHandlers(key, win, view) {
         if (ps.autoPhase === 'result') {
           // Result page loaded — do not touch retryCount or write ddg-cache.
           onResultPageReady(key);
+        } else if (ps.autoPhase === 'parked') {
+          // Parked page (DDG pause): scroll like a result page, no SERP logic.
+          onParkedPageReady(key);
         } else {
-          // Successful DDG search load — reset backoff and log timing.
-          ps.retryCount = 0;
-          if (ps.searchLoadStartedAt) {
-            const elapsed = Date.now() - ps.searchLoadStartedAt;
-            const status  = ps.lastNavStatus || 200;
-            console.log(`[kiosk-timing] ${key} search #${ps.searchCount || 0} took ${elapsed} ms (status ${status})`);
-            ps.searchLoadStartedAt = 0;
-            ps.lastNavStatus       = 0;
-          }
-          onSearchPageReady(key);
+          // 'search' phase: only treat the page as a SERP if it's actually on a
+          // DDG URL.  Any other URL here (e.g. a neutral page whose phase wasn't
+          // updated before loadURL) gets parked rather than triggering SERP logic.
+          const isDdgUrl = url.startsWith('https://html.duckduckgo.com/') ||
+                           url.startsWith('https://duckduckgo.com/');
+          if (isDdgUrl) {
+            // Successful DDG search load — reset backoff and log timing.
+            ps.retryCount = 0;
+            if (ps.searchLoadStartedAt) {
+              const elapsed = Date.now() - ps.searchLoadStartedAt;
+              const status  = ps.lastNavStatus || 200;
+              console.log(`[kiosk-timing] ${key} search #${ps.searchCount || 0} took ${elapsed} ms (status ${status})`);
+              ps.searchLoadStartedAt = 0;
+              ps.lastNavStatus       = 0;
+            }
+            onSearchPageReady(key);
 
-          // Persist this DDG page so the next startup can show it immediately.
-          // Skip write if there are no result links (bot-check / empty SERP).
-          if (url.startsWith('https://html.duckduckgo.com/')) {
-            view.webContents.executeJavaScript(
-              'document.querySelector("a.result__a") ? document.documentElement.outerHTML : null'
-            )
-              .then(html => {
-                if (!html) return;
-                const withBase = html.replace('<head>', '<head><base href="https://html.duckduckgo.com/">');
-                fs.writeFile(path.join(cacheDir, `${key}.html`), withBase, () => {});
-              })
-              .catch(() => {});
+            // Persist this DDG page so the next startup can show it immediately.
+            // Skip write if there are no result links (bot-check / empty SERP).
+            if (url.startsWith('https://html.duckduckgo.com/')) {
+              view.webContents.executeJavaScript(
+                'document.querySelector("a.result__a") ? document.documentElement.outerHTML : null'
+              )
+                .then(html => {
+                  if (!html) return;
+                  const withBase = html.replace('<head>', '<head><base href="https://html.duckduckgo.com/">');
+                  fs.writeFile(path.join(cacheDir, `${key}.html`), withBase, () => {});
+                })
+                .catch(() => {});
+            }
+          } else {
+            // Non-DDG URL while in search phase — park it.
+            kioskLog(`[ddg] ${key} non-DDG URL in search phase (${url}) — parking`);
+            ps.autoPhase = 'parked';
+            onParkedPageReady(key);
           }
         }
       }
@@ -1749,6 +1776,9 @@ function setupViewEventHandlers(key, win, view) {
       // Connection errors are not the site's fault; don't mark the domain bad.
       const isConnectionError = errorCode === -106 || errorCode === -21;
       onResultRejected(key, failedUrl, `fail-${errorCode}`, !isConnectionError);
+    } else if (ps.autoPhase === 'parked') {
+      // Parked start URL failed — try the next one.
+      parkNextPage(key);
     } else {
       scheduleRetry(key, `error-${errorCode}`);
     }
@@ -2121,17 +2151,20 @@ function startScrolling(key) {
     // Re-check state after the second await.
     if (ps.mode !== 'auto' || ps.scrollTimer === null) return;
 
-    if (ps.autoPhase === 'result') {
-      // Result page bottom: wait the normal hold floor then move to next step.
+    if (ps.autoPhase === 'result' || ps.autoPhase === 'parked') {
+      // Result/parked page bottom: wait the normal hold floor then move to next step.
       const sinceLastSearch = Date.now() - ps.lastSearchTime;
       const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+      const phase  = ps.autoPhase;
       stopScrolling(key);
       clearTimeout(ps.resultDwellTimer);
       ps.resultDwellTimer = null;
-      console.log(`[kiosk-auto] ${key} result bottom — next step in ${holdMs} ms`);
+      console.log(`[kiosk-auto] ${key} ${phase} bottom — next step in ${holdMs} ms`);
       ps.dwellTimer = setTimeout(() => {
         ps.dwellTimer = null;
-        if (ps.mode === 'auto') nextAutoStep(key);
+        if (ps.mode !== 'auto') return;
+        if (ps.autoPhase === 'parked') parkNextPage(key);
+        else nextAutoStep(key);
       }, holdMs);
     } else {
       // Search phase: don't advance if a DDG load is still in-flight — let
@@ -2236,14 +2269,18 @@ async function pickRandomResult(key) {
             if (h && !seen.has(h)) { seen.add(h); hrefs.push(h); }
           });
         }
-        // Bot-check: no .result elements, plus a form or bot/challenge text.
+        // Narrow DDG bot-check detection: specific challenge signals only.
+        // Excludes 'bot' (matches 'robot','bottom') and generic 'form' (too broad).
+        // Caller also verifies the URL is on duckduckgo.com before acting.
         var hasResults = document.querySelectorAll('.result').length > 0;
         var bodyText = document.body ? document.body.innerText.toLowerCase() : '';
         var isBotCheck = !hasResults && (
-          document.querySelector('form') !== null ||
-          bodyText.indexOf('bot') !== -1 ||
-          bodyText.indexOf('challenge') !== -1 ||
-          bodyText.indexOf('unusual traffic') !== -1
+          !!document.getElementById('challenge-running') ||
+          !!document.getElementById('challenge-form') ||
+          !!document.querySelector('input[name="vc"]') ||
+          bodyText.indexOf('unusual traffic') !== -1 ||
+          bodyText.indexOf('are you a robot') !== -1 ||
+          bodyText.indexOf('complete the following') !== -1
         );
         return { hrefs: hrefs, isBotCheck: isBotCheck, title: document.title };
       })()
@@ -2258,8 +2295,11 @@ async function pickRandomResult(key) {
 
   if (!Array.isArray(domHrefs) || domHrefs.length === 0) {
     if (isBotCheck) {
-      console.log(`[kiosk-auto] ${key} DDG bot-check page detected`);
-      return { botCheck: true };
+      if (currentUrl.includes('duckduckgo.com')) {
+        console.log(`[kiosk-auto] ${key} DDG bot-check page detected`);
+        return { botCheck: true };
+      }
+      kioskLog(`[ddg] bot-check ignored (non-DDG URL: ${currentUrl})`);
     }
     console.log(`[kiosk-auto] ${key} pickRandomResult: 0 result links on page (${currentUrl}, title: ${title})`);
     return null;
@@ -2788,56 +2828,165 @@ function nextAutoStep(key) {
   doSearch(key);
 }
 
-// Called when any panel hits a DDG bot-check page.  Sets a shared pause so
-// all panels stop hitting DDG, with exponential back-off per strike.
-// Also navigates the triggering panel away from the challenge page.
-function noteDdgBotCheck(key) {
-  clearTimeout(ddgStrikeResetTimer);
-  ddgStrikeResetTimer = null;
+// Round-robins through PAUSE_START_URLS, skipping sites another panel shows.
+function pickParkUrl(key) {
+  const otherBDs = new Set();
+  const otherUrls = new Set();
+  for (const [k, url] of sharedOnScreenUrls) {
+    if (k !== key && url) {
+      otherUrls.add(url);
+      otherBDs.add(baseDomain(hostnameOf(url)));
+    }
+  }
+  for (let i = 0; i < PAUSE_START_URLS.length; i++) {
+    const url = PAUSE_START_URLS[(parkUrlIndex + i) % PAUSE_START_URLS.length];
+    if (!otherUrls.has(url) && !otherBDs.has(baseDomain(hostnameOf(url)))) {
+      parkUrlIndex = (parkUrlIndex + i + 1) % PAUSE_START_URLS.length;
+      return url;
+    }
+  }
+  parkUrlIndex = (parkUrlIndex + 1) % PAUSE_START_URLS.length;
+  return PAUSE_START_URLS[parkUrlIndex] || null;
+}
 
-  ddgBotStrikes += 1;
-  const pauseMs   = Math.min(DDG_PAUSE_BASE_MS * Math.pow(2, ddgBotStrikes - 1), DDG_PAUSE_MAX_MS);
-  ddgPausedUntil  = Date.now() + pauseMs;
-  ddgStats.botChecks++;
-  kioskLog(`[ddg] bot-check: strike ${ddgBotStrikes}, pausing all DDG for ${Math.round(pauseMs / 60000)} min`);
+// Called at the end of a parked-page dwell, on scroll-bottom for 'parked' phase,
+// or when a parked load fails.  Decides what the panel shows next during the pause.
+function parkNextPage(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
 
-  // Schedule strike reset after a clean period with no bot-checks.
-  ddgStrikeResetTimer = setTimeout(() => {
-    ddgStrikeResetTimer = null;
-    ddgBotStrikes = 0;
-    ddgPausedUntil = 0;
-    kioskLog('[ddg] pause ended — strike counter reset');
-  }, DDG_STRIKE_RESET_MS);
+  // Pause has ended — resume normal browsing.
+  if (ddgPausedUntil <= Date.now()) {
+    clearTimeout(ps.pauseResumeTimer);
+    ps.pauseResumeTimer = null;
+    doSearch(key);
+    return;
+  }
 
-  // Navigate the triggering panel off the bot-check page.
+  const remaining = ddgPausedUntil - Date.now();
+
+  // Prefer a cached result — richer content and continues the browsing loop.
+  for (const [cachedTerm, entry] of serpCache) {
+    if (Date.now() - entry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
+    const eligible = filterCachedUrls(key, entry.urls);
+    if (eligible.length === 0) continue;
+    kioskLog(`[ddg] ${key} parked: using cached result "${cachedTerm}" (pause ${Math.round(remaining / 1000)}s left)`);
+    ddgStats.cacheHits++;
+    ps.firstSearchDone = true;
+    ps.currentTerm     = cachedTerm;
+    ps.queuedResults   = eligible.slice(1).map(u => ({ target: u, domHref: u, tier: 'cache' }));
+    ps.resultsGoal     = Math.floor(randBetween(RESULTS_PER_SEARCH_MIN, RESULTS_PER_SEARCH_MAX + 1));
+    ps.resultsVisited  = 0;
+    clearTimeout(ps.pauseResumeTimer);
+    ps.pauseResumeTimer = setTimeout(() => {
+      ps.pauseResumeTimer = null;
+      if (ps.mode === 'auto' && (ps.autoPhase === 'parked' || ps.autoPhase === 'result')) doSearch(key);
+    }, remaining + 1000);
+    loadResult(key, { target: eligible[0], domHref: eligible[0], tier: 'cache' });
+    return;
+  }
+
+  // No cached results — park on an approved start URL.
+  const parkUrl = pickParkUrl(key);
+  const v = panelViews[key];
+  if (!parkUrl || !v || v.webContents.isDestroyed()) {
+    clearTimeout(ps.pauseResumeTimer);
+    ps.pauseResumeTimer = setTimeout(() => {
+      ps.pauseResumeTimer = null;
+      if (ps.mode === 'auto') doSearch(key);
+    }, remaining + 1000);
+    return;
+  }
+
+  kioskLog(`[ddg] ${key} parked: ${parkUrl} (pause ${Math.round(remaining / 1000)}s left)`);
+  ps.autoPhase = 'parked';
+  sharedOnScreenUrls.set(key, parkUrl);
+
+  clearTimeout(ps.pauseResumeTimer);
+  ps.pauseResumeTimer = setTimeout(() => {
+    ps.pauseResumeTimer = null;
+    if (ps.mode === 'auto' && ps.autoPhase === 'parked') doSearch(key);
+  }, remaining + 1000);
+
+  v.webContents.loadURL(parkUrl).catch(() => {});
+}
+
+// Navigates a panel off a bot-check (or any unwanted) page during a DDG pause.
+// Prefers a queued SERP result; falls back to parkNextPage().
+function navigateToParkedPage(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
   stopBrowsingLoop(key);
-  ps.mode      = 'auto';
-  ps.autoPhase = 'search'; // prevent did-finish-load from calling onResultPageReady
+  ps.mode = 'auto';
 
-  // Prefer a queued result from the last SERP over the neutral page.
-  const queue = ps.queuedResults || [];
-  while (queue.length > 0) {
-    const next = queue.shift();
+  while (ps.queuedResults && ps.queuedResults.length > 0) {
+    const next = ps.queuedResults.shift();
     if (!isBadDomain(next.target)) {
       loadResult(key, next);
       return;
     }
   }
 
-  // No queued result available — load neutral approved page and wait out the pause.
-  const v = panelViews[key];
-  if (v && !v.webContents.isDestroyed()) {
-    v.webContents.loadURL('https://spaceplace.nasa.gov/').catch(() => {});
+  parkNextPage(key);
+}
+
+// Scrolls a parked page and arms a random dwell before calling parkNextPage.
+function onParkedPageReady(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto' || ps.autoPhase !== 'parked') return;
+  const url = panelViews[key]?.webContents.getURL() || '';
+  console.log(`[kiosk-auto] ${key} parked page ready: ${url}`);
+  startScrolling(key);
+  const dwellMs = randBetween(RESULT_DWELL_MIN_MS, RESULT_DWELL_MAX_MS);
+  kioskLog(`[kiosk-auto] ${key} speed=${Math.round(ps.scrollPxS)}px/s dwell=${Math.round(dwellMs / 1000)}s (parked)`);
+  clearTimeout(ps.resultDwellTimer);
+  ps.resultDwellTimer = setTimeout(() => {
+    ps.resultDwellTimer = null;
+    if (ps.mode !== 'auto' || ps.autoPhase !== 'parked') return;
+    stopScrolling(key);
+    parkNextPage(key);
+  }, dwellMs);
+}
+
+// Called when any panel hits a DDG bot-check page.  Sets a shared pause so
+// all panels stop hitting DDG, with exponential back-off per strike.
+// Also navigates the triggering panel away from the challenge page.
+function noteDdgBotCheck(key) {
+  const now = Date.now();
+
+  // Guard: cap at one new strike per DDG_MIN_STRIKE_GAP_MS to prevent runaway
+  // escalation if a neutral page falsely triggers the bot-check test.
+  if (ddgLastStrikeAt > 0 && now - ddgLastStrikeAt < DDG_MIN_STRIKE_GAP_MS) {
+    kioskLog(`[ddg] bot-check ignored (last strike ${Math.round((now - ddgLastStrikeAt) / 1000)}s ago) — moving ${key} off page`);
+    navigateToParkedPage(key);
+    return;
   }
-  sharedOnScreenUrls.delete(key);
-  const remaining = Math.max(ddgPausedUntil - Date.now(), 1000);
-  clearTimeout(ps.dwellTimer);
-  ps.dwellTimer = setTimeout(() => {
-    ps.dwellTimer = null;
-    if (ps.mode === 'auto') doSearch(key);
-  }, remaining);
+  ddgLastStrikeAt = now;
+
+  clearTimeout(ddgStrikeResetTimer);
+  ddgStrikeResetTimer = null;
+
+  ddgBotStrikes += 1;
+  const pauseMs  = Math.min(DDG_PAUSE_BASE_MS * Math.pow(2, ddgBotStrikes - 1), DDG_PAUSE_MAX_MS);
+  ddgPausedUntil = Date.now() + pauseMs;
+  ddgStats.botChecks++;
+  kioskLog(`[ddg] bot-check: strike ${ddgBotStrikes}, pausing all DDG for ${Math.round(pauseMs / 60000)} min`);
+
+  // Schedule strike reset after a clean period with no bot-checks.
+  ddgStrikeResetTimer = setTimeout(() => {
+    ddgStrikeResetTimer = null;
+    ddgBotStrikes   = 0;
+    ddgLastStrikeAt = 0;
+    let parkCount = 0;
+    for (const [, pstate] of panelStates) {
+      if (pstate.autoPhase === 'parked') parkCount++;
+    }
+    ddgPausedUntil = 0;
+    kioskLog(`[ddg] pause ended — strike counter reset, ${parkCount} parked panel(s) resuming`);
+  }, DDG_STRIKE_RESET_MS);
+
+  // Navigate the triggering panel off the bot-check page.
+  navigateToParkedPage(key);
 }
 
 // Starts the 10-minute rolling [ddg] summary log.
@@ -2879,13 +3028,9 @@ function doSearch(key) {
       loadResult(key, { target: eligible[0], domHref: eligible[0], tier: 'cache' });
       return;
     }
-    // No cache — hold current page until pause expires.
-    kioskLog(`[ddg] ${key} holding: DDG paused ${Math.round(pauseMs / 1000)}s, no fresh cache`);
-    clearTimeout(ps.dwellTimer);
-    ps.dwellTimer = setTimeout(() => {
-      ps.dwellTimer = null;
-      if (ps.mode === 'auto') doSearch(key);
-    }, pauseMs + 1000);
+    // No cache — park on an approved start URL to keep the panel moving.
+    kioskLog(`[ddg] ${key} holding: DDG paused ${Math.round(pauseMs / 1000)}s, no fresh cache — parking`);
+    parkNextPage(key);
     return;
   }
 
@@ -2999,12 +3144,14 @@ function stopBrowsingLoop(key) {
   clearTimeout(ps.loadTimer);
   clearTimeout(ps.highlightTimer);    // RESULT_HIGHLIGHT_MS pause before navigating to a result
   clearTimeout(ps.resultDwellTimer);  // random dwell cap on result pages
+  clearTimeout(ps.pauseResumeTimer);  // safety-net for DDG pause expiry
   ps.dwellTimer         = null;
   ps.scrollTimer        = null;
   ps.rotationStartTimer = null;
   ps.loadTimer          = null;
   ps.highlightTimer     = null;
   ps.resultDwellTimer   = null;
+  ps.pauseResumeTimer   = null;
 }
 
 // ---- Forkknife window -------------------------------------------------------
@@ -3995,6 +4142,7 @@ function startAllIdleRotation() {
       resultAttempt:      0,        // incremented on each loadResult; guards against double-handling
       highlightTimer:     null,     // RESULT_HIGHLIGHT_MS timeout before navigating to a chosen result
       resultDwellTimer:   null,     // random dwell cap on result pages before returning to search
+      pauseResumeTimer:   null,     // safety-net: resume from DDG pause when it expires
       carbonBytes:        0,        // running total of CDP encodedDataLength for current page load
       carbonGrams:        0,        // CO2 grams from last completed page load
       carbonLoading:      false,    // true while a main-frame navigation is in progress
