@@ -283,7 +283,7 @@ const SCROLL_SPEED_MAX_PX_S  = 450;       // fastest random auto-scroll speed (p
 const AUTO_SCROLL_FRAME_MS   = 33;        // in-page auto-scroll frame interval (~30 fps); 16 = 60 fps if the GPU can afford it
 const INACTIVITY_TIMEOUT_MS  = 120 * 1000; // idle grace period before auto mode resumes
 const LOAD_TIMEOUT_MS        = 15 * 1000; // per-panel watchdog: abort and retry if a DDG load takes longer
-const GLOBAL_SEARCH_GAP_MS   = 10 * 1000; // minimum gap between any two panels starting a DDG search
+const GLOBAL_SEARCH_GAP_MS   = 20 * 1000; // minimum gap between any two panels starting a DDG search
 const FIRST_SEARCH_GAP_MS    =  3 * 1000; // shorter gap for each panel's very first search (lets windows fill faster)
 const FOLLOW_RESULT_PROBABILITY = 1.0;        // chance of clicking a result after a search scroll; < 1 mixes in plain searches
 const RESULT_DWELL_MIN_MS       = 15 * 1000;  // random dwell on a result page before returning to search — minimum
@@ -301,14 +301,14 @@ const TERM_MISS_LIMIT           = 3;           // consecutive "no eligible resul
 // push, then git pull + relaunch on Linux.  All blocking is skipped.
 const AUTO_ERROR_BLOCK_ENABLED  = true;
 const BAD_DOMAIN_TTL_MS         = 3 * 60 * 60 * 1000; // 3 hours in-memory; cleared on relaunch
-const RESULTS_PER_SEARCH_MIN    = 2;             // minimum result pages to visit per SERP before returning to search
-const RESULTS_PER_SEARCH_MAX    = 3;             // maximum result pages to visit per SERP
+const RESULTS_PER_SEARCH_MIN    = 3;             // minimum result pages to visit per SERP before returning to search
+const RESULTS_PER_SEARCH_MAX    = 4;             // maximum result pages to visit per SERP
 const SERP_CACHE_TTL_MS         = 60 * 60 * 1000; // cache SERP result URLs per term for 1 hour
-const SHOW_SERP_EVERY_N         = 3;             // show a real DDG SERP every Nth cached use; others skip DDG entirely
+const SHOW_SERP_EVERY_N         = 5;             // show a real DDG SERP every Nth cached use; others skip DDG entirely
 const DDG_PAUSE_BASE_MS         =  1 * 60 * 1000; // first bot-check all-panel pause: 1 min, doubles each strike
 const DDG_PAUSE_MAX_MS          =  5 * 60 * 1000; // pause ceiling regardless of strike count
 const SERP_RETURN_MAX_MS        = 15 * 1000;       // scroll cap on a return visit to the same results page
-const DDG_STRIKE_RESET_MS       = 30 * 60 * 1000; // reset strike count after 30 min with no bot-checks
+const DDG_STRIKE_RESET_MS       = 15 * 60 * 1000; // reset strike count after 15 min with no bot-checks
 const DDG_MIN_STRIKE_GAP_MS     = 60 * 1000;      // ignore a new strike if one was counted within this window
 // Approved pages shown on all panels during a DDG pause; must pass isDomainAllowed.
 // Verified reachable (HTTP 200) via curl from the dev machine.
@@ -2444,8 +2444,9 @@ async function pickRandomResult(key) {
   let badDomainSkips = 0;
 
   // 'allowlist-preferred': two tiers — prefer ALLOWED_DOMAINS, fall back to isPassesPolicy.
-  const allowlistCandidates = [];
-  const fallbackCandidates  = [];
+  const allowlistCandidates   = [];
+  const fallbackCandidates    = [];
+  const panelRecentCandidates = []; // pause-mode Fallback 3: panel-recent URLs still passing policy
 
   for (let domHref of domHrefs) {
     // Resolve protocol-relative hrefs before unwrapping.
@@ -2460,8 +2461,20 @@ async function pickRandomResult(key) {
     try { proto = new URL(target).protocol; } catch {}
     if (proto !== 'http:' && proto !== 'https:') continue;
 
-    // Skip recently visited pages.
-    if (recentUrls.includes(target)) continue;
+    // Skip recently visited pages (collect for pause-mode Fallback 3).
+    if (recentUrls.includes(target)) {
+      if (!isBadDomain(target)) {
+        if (AUTO_LINK_POLICY === 'allowlist' && isDomainAllowed(target))
+          panelRecentCandidates.push({ domHref, target, tier: 'allowlist' });
+        else if (AUTO_LINK_POLICY === 'browsing' && isPassesPolicy(target))
+          panelRecentCandidates.push({ domHref, target, tier: 'browsing' });
+        else if (AUTO_LINK_POLICY !== 'allowlist' && AUTO_LINK_POLICY !== 'browsing') {
+          if (isDomainAllowed(target))        panelRecentCandidates.push({ domHref, target, tier: 'allowlist' });
+          else if (isPassesPolicy(target))    panelRecentCandidates.push({ domHref, target, tier: 'fallback' });
+        }
+      }
+      continue;
+    }
 
     // Skip domains currently in the bad-domain list.
     if (isBadDomain(target)) { badDomainSkips += 1; continue; }
@@ -2546,6 +2559,16 @@ async function pickRandomResult(key) {
     if (candidates.length > 0) {
       fallbackUsed = 'shared-recent-ok';
       kioskLog(`[kiosk-auto] ${key} fallback relaxed: allowing shared-recent URLs`);
+    }
+  }
+
+  if (candidates.length === 0 && ddgPausedUntil > Date.now()) {
+    // Fallback 3 (pause only): allow this panel's own recently-visited URLs,
+    // still never the same URL as another panel right now.
+    candidates = panelRecentCandidates.filter(c => !otherOnScreenUrls.has(c.target));
+    if (candidates.length > 0) {
+      fallbackUsed = 'panel-recent-ok';
+      kioskLog(`[kiosk-auto] ${key} fallback relaxed: allowing panel-recent URLs (pause mode)`);
     }
   }
 
@@ -3005,7 +3028,7 @@ function drawNextTerm(key) {
 }
 
 // Returns cached URLs for `term` that still pass current shared-state filters.
-function filterCachedUrls(key, urls) {
+function filterCachedUrls(key, urls, opts = {}) {
   const ps = panelStates.get(key);
   const otherOnScreen    = new Set();
   const otherOnScreenBDs = new Set();
@@ -3019,12 +3042,12 @@ function filterCachedUrls(key, urls) {
   const sharedRecentSet = new Set(sharedRecentUrls);
   const panelRecentSet  = new Set(ps ? ps.recentResultUrls : []);
   return urls.filter(url => {
-    if (isBadDomain(url))                                   return false;
-    if (!isDomainAllowed(url))                              return false;
-    if (otherOnScreen.has(url))                             return false;
-    if (otherOnScreenBDs.has(baseDomain(hostnameOf(url))))  return false;
-    if (sharedRecentSet.has(url))                           return false;
-    if (panelRecentSet.has(url))                            return false;
+    if (isBadDomain(url))                                                              return false;
+    if (!isDomainAllowed(url))                                                         return false;
+    if (otherOnScreen.has(url))                                                        return false;
+    if (!opts.duringPause && otherOnScreenBDs.has(baseDomain(hostnameOf(url))))        return false;
+    if (!opts.duringPause && sharedRecentSet.has(url))                                 return false;
+    if (panelRecentSet.has(url))                                                       return false;
     return true;
   });
 }
@@ -3135,8 +3158,10 @@ function showParkUrl(key) {
 }
 
 // During a DDG pause, finds the best saved SERP file to show on a panel.
-// Prefers a term that no other panel is currently browsing.
-// Falls back to showParkUrl when no suitable saved SERP exists.
+// Three-pass rotation: 1) unique to this panel (not current term, not other panels),
+// 2) not on other panels (allow this panel's current term),
+// 3) allow any term. Uses relaxed URL filtering (duringPause).
+// Parks on PAUSE_START_URLS only when no SERP files exist at all.
 function showSavedSerpDuringPause(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
@@ -3148,16 +3173,20 @@ function showSavedSerpDuringPause(key) {
     if (k !== key && ops.currentTerm) otherTerms.add(ops.currentTerm);
   }
 
-  // Two passes: first prefer terms no other panel is currently browsing.
-  for (const preferUnique of [true, false]) {
+  const passFilters = [
+    (term) => term !== ps.currentTerm && !otherTerms.has(term),
+    (term) => !otherTerms.has(term),
+    (term) => true,
+  ];
+  for (const passFilter of passFilters) {
     for (const [cachedTerm, entry] of serpCache) {
       if (Date.now() - entry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
       if (!entry.filePath) continue;
       try { fs.accessSync(entry.filePath); } catch { continue; }
-      if (preferUnique && otherTerms.has(cachedTerm)) continue;
-      const eligible = filterCachedUrls(key, entry.urls);
+      if (!passFilter(cachedTerm)) continue;
+      const eligible = filterCachedUrls(key, entry.urls, { duringPause: true });
       if (eligible.length === 0) continue;
-      kioskLog(`[ddg] ${key} pause: showing saved SERP "${cachedTerm}"`);
+      kioskLog(`[ddg] ${key} pause: showing saved SERP "${cachedTerm}" (relaxed, ${eligible.length} eligible)`);
       ddgStats.cacheHits++;
       ddgStats.savedSerpShows++;
       ps.currentTerm     = cachedTerm;
@@ -3170,6 +3199,24 @@ function showSavedSerpDuringPause(key) {
       });
       return;
     }
+  }
+
+  // Files exist but all have 0 eligible URLs with relaxed rules — show any file
+  // rather than parking; park only when no SERP files exist at all.
+  for (const [anyTerm, entry] of serpCache) {
+    if (!entry.filePath) continue;
+    try { fs.accessSync(entry.filePath); } catch { continue; }
+    kioskLog(`[ddg] ${key} pause: showing saved SERP "${anyTerm}" (relaxed, 0 eligible)`);
+    ddgStats.savedSerpShows++;
+    ps.currentTerm     = anyTerm;
+    ps.firstSearchDone = true;
+    ps.autoPhase       = 'search';
+    ps.loadingSerp     = true;
+    v.webContents.loadURL('file://' + entry.filePath).catch(() => {
+      ps.loadingSerp = false;
+      showParkUrl(key);
+    });
+    return;
   }
 
   showParkUrl(key);
