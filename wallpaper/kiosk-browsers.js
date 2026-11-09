@@ -301,6 +301,15 @@ const TERM_MISS_LIMIT           = 3;           // consecutive "no eligible resul
 // push, then git pull + relaunch on Linux.  All blocking is skipped.
 const AUTO_ERROR_BLOCK_ENABLED  = true;
 const BAD_DOMAIN_TTL_MS         = 3 * 60 * 60 * 1000; // 3 hours in-memory; cleared on relaunch
+// URL path extensions that indicate a downloadable file, not a web page.
+// Matching URLs are skipped in pickRandomResult and filterCachedUrls.
+const NON_PAGE_EXTENSIONS = [
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.odt', '.ods', '.odp', '.rtf', '.csv',
+  '.zip', '.rar', '.7z', '.gz', '.tar',
+  '.exe', '.dmg', '.pkg', '.deb', '.apk', '.iso',
+  '.mp3', '.mp4', '.mov', '.wav', '.epub',
+];
 const RESULTS_PER_SEARCH_MIN    = 3;             // minimum result pages to visit per SERP before returning to search
 const RESULTS_PER_SEARCH_MAX    = 4;             // maximum result pages to visit per SERP
 const SERP_CACHE_TTL_MS         = 60 * 60 * 1000; // cache SERP result URLs per term for 1 hour
@@ -647,10 +656,11 @@ const serpCache         = new Map(); // term -> { urls: [...], fetchedAt: timest
 const serpCacheUseCount = new Map(); // term -> consecutive cached uses since last real SERP fetch
 
 // ---- DDG rate stats (10-min rolling window) ---------------------------------
-let ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, windowStart: 0 };
+let ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, downloadsBlocked: 0, windowStart: 0 };
 let ddgSummaryTimer = null; // module-level so V8 keeps it alive
 let ddgLastStrikeAt = 0;   // Date.now() of the last counted bot-check strike (60 s guard)
 let parkUrlIndex    = 0;   // round-robin index into PAUSE_START_URLS
+const blockedDownloadUrls = new Set(); // URLs that triggered a download this session; never picked again
 
 // Delete per-term SERP HTML files older than the in-memory TTL at startup.
 try {
@@ -1210,6 +1220,44 @@ function buildErrorPageUrl(message, failedUrl) {
     '<p>Use the Back button above to go back.</p>' +
     '</body></html>';
   return 'data:text/html,' + encodeURIComponent(html);
+}
+
+function isNonPageUrl(url) {
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    return NON_PAGE_EXTENSIONS.some(ext => p.endsWith(ext));
+  } catch { return false; }
+}
+
+// Prevents any file download from opening a save dialog on any panel.
+// Auto result phase: cancel, skip the URL, try next queued result.
+// Active mode: cancel, show friendly error page.
+function installDownloadBlock() {
+  session.defaultSession.on('will-download', (event, item, webContents) => {
+    event.preventDefault();
+    item.cancel();
+    const key  = webContents ? webContentsIdToKey.get(webContents.id) : undefined;
+    const ps   = key ? panelStates.get(key) : null;
+    const url      = item.getURL();
+    const filename = item.getFilename();
+    const mode     = ps ? ps.mode : 'unknown';
+    kioskLog(`[kiosk-download] ${key || 'unknown'} blocked download (${mode}): ${url} (${filename})`);
+    ddgStats.downloadsBlocked++;
+    blockedDownloadUrls.add(url);
+    if (!ps) return;
+    if (ps.mode === 'auto' && ps.autoPhase === 'result') {
+      clearTimeout(ps.loadTimer);
+      ps.loadTimer = null;
+      onResultRejected(key, url, 'download', false);
+    } else if (ps.mode === 'active') {
+      const v = panelViews[key];
+      if (v && !v.webContents.isDestroyed()) {
+        v.webContents.loadURL(
+          buildErrorPageUrl("Downloads aren't available on this computer.", url)
+        ).catch(() => {});
+      }
+    }
+  });
 }
 
 // ---- Programmatic move/resize helpers ---------------------------------------
@@ -2442,6 +2490,7 @@ async function pickRandomResult(key) {
   const total = domHrefs.length;
   let afterPolicy   = 0;
   let badDomainSkips = 0;
+  let fileSkips      = 0;
 
   // 'allowlist-preferred': two tiers — prefer ALLOWED_DOMAINS, fall back to isPassesPolicy.
   const allowlistCandidates   = [];
@@ -2460,6 +2509,9 @@ async function pickRandomResult(key) {
     let proto = '';
     try { proto = new URL(target).protocol; } catch {}
     if (proto !== 'http:' && proto !== 'https:') continue;
+
+    // Skip document/binary file links and previously-blocked download URLs.
+    if (isNonPageUrl(target) || blockedDownloadUrls.has(target)) { fileSkips += 1; continue; }
 
     // Skip recently visited pages (collect for pause-mode Fallback 3).
     if (recentUrls.includes(target)) {
@@ -2626,7 +2678,7 @@ async function pickRandomResult(key) {
     ps.resultsVisited = 0;
   }
 
-  kioskLog(`[kiosk-auto] ${key} result host=${hostnameOf(pick.target)} (filtered: ${sameUrlCount} same-url, ${sameSiteCount} same-site, ${sharedRecentCount} shared-recent, fallback=${fallbackUsed})`);
+  kioskLog(`[kiosk-auto] ${key} result host=${hostnameOf(pick.target)} (filtered: ${sameUrlCount} same-url, ${sameSiteCount} same-site, ${sharedRecentCount} shared-recent, ${fileSkips} file-links, fallback=${fallbackUsed})`);
 
   return pick;
 }
@@ -3044,6 +3096,8 @@ function filterCachedUrls(key, urls, opts = {}) {
   return urls.filter(url => {
     if (isBadDomain(url))                                                              return false;
     if (!isDomainAllowed(url))                                                         return false;
+    if (isNonPageUrl(url))                                                             return false;
+    if (blockedDownloadUrls.has(url))                                                  return false;
     if (otherOnScreen.has(url))                                                        return false;
     if (!opts.duringPause && otherOnScreenBDs.has(baseDomain(hostnameOf(url))))        return false;
     if (!opts.duringPause && sharedRecentSet.has(url))                                 return false;
@@ -3318,8 +3372,8 @@ function startDdgSummaryTimer() {
     const now     = Date.now();
     const minutes = (now - ddgStats.windowStart) / 60000;
     const rate    = minutes > 0 ? (ddgStats.searches / minutes).toFixed(2) : '0';
-    kioskLog(`[ddg] 10-min summary: searches=${ddgStats.searches} cache=${ddgStats.cacheHits} saved-serp=${ddgStats.savedSerpShows} results=${ddgStats.resultsVisited} bot-checks=${ddgStats.botChecks} no-eligible=${ddgStats.noEligibleMisses} rate=${rate}/min`);
-    ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, windowStart: now };
+    kioskLog(`[ddg] 10-min summary: searches=${ddgStats.searches} cache=${ddgStats.cacheHits} saved-serp=${ddgStats.savedSerpShows} results=${ddgStats.resultsVisited} bot-checks=${ddgStats.botChecks} no-eligible=${ddgStats.noEligibleMisses} downloads-blocked=${ddgStats.downloadsBlocked} rate=${rate}/min`);
+    ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, downloadsBlocked: 0, windowStart: now };
   }, 10 * 60 * 1000);
 }
 
@@ -3857,6 +3911,7 @@ function createKioskWindow() {
     kioskLog('ad/tracker blocking disabled (AD_BLOCKING_ENABLED = false)');
   }
   installAutoErrorBlock(); // no-op when AUTO_ERROR_BLOCK_ENABLED = false
+  installDownloadBlock();
 
   const allDisplays  = screen.getAllDisplays();
   const envIndex     = parseInt(process.env.KIOSK_DISPLAY, 10);
