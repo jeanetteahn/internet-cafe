@@ -305,8 +305,9 @@ const RESULTS_PER_SEARCH_MIN    = 2;             // minimum result pages to visi
 const RESULTS_PER_SEARCH_MAX    = 3;             // maximum result pages to visit per SERP
 const SERP_CACHE_TTL_MS         = 60 * 60 * 1000; // cache SERP result URLs per term for 1 hour
 const SHOW_SERP_EVERY_N         = 3;             // show a real DDG SERP every Nth cached use; others skip DDG entirely
-const DDG_PAUSE_BASE_MS         =  2 * 60 * 1000; // first bot-check all-panel pause: 2 min, doubles each strike
-const DDG_PAUSE_MAX_MS          = 15 * 60 * 1000; // pause ceiling regardless of strike count
+const DDG_PAUSE_BASE_MS         =  1 * 60 * 1000; // first bot-check all-panel pause: 1 min, doubles each strike
+const DDG_PAUSE_MAX_MS          =  5 * 60 * 1000; // pause ceiling regardless of strike count
+const SERP_RETURN_MAX_MS        = 15 * 1000;       // scroll cap on a return visit to the same results page
 const DDG_STRIKE_RESET_MS       = 30 * 60 * 1000; // reset strike count after 30 min with no bot-checks
 const DDG_MIN_STRIKE_GAP_MS     = 60 * 1000;      // ignore a new strike if one was counted within this window
 // Approved pages shown on all panels during a DDG pause; must pass isDomainAllowed.
@@ -2327,10 +2328,20 @@ function onSearchPageReady(key) {
   const url = panelViews[key]?.webContents.getURL() || '';
   console.log(`[kiosk-auto] ${key} search page ready: ${url}`);
 
+  // Track the SERP source so nextAutoStep can return to it between results.
+  ps.lastSerpFile = url.startsWith('file://') ? url.slice('file://'.length) : null;
+  // Reset the per-SERP-load bottom guard so onSearchBottom runs once per load.
+  ps.serpBottomHandled = false;
+
   startScrolling(key); // sets ps.scrollPxS
 
-  const searchCapMs = randBetween(SEARCH_INTERVAL_MIN_MS, SEARCH_INTERVAL_MAX_MS);
-  kioskLog(`[kiosk-auto] ${key} speed=${Math.round(ps.scrollPxS)}px/s cap=${Math.round(searchCapMs / 1000)}s`);
+  // Return visits (pendingQueuedPick is set) use a shorter cap so the second
+  // scroll through the same SERP page is noticeably faster.
+  const isReturnVisit = !!ps.pendingQueuedPick;
+  const searchCapMs   = isReturnVisit
+    ? SERP_RETURN_MAX_MS
+    : randBetween(SEARCH_INTERVAL_MIN_MS, SEARCH_INTERVAL_MAX_MS);
+  kioskLog(`[kiosk-auto] ${key} speed=${Math.round(ps.scrollPxS)}px/s cap=${Math.round(searchCapMs / 1000)}s${isReturnVisit ? ' (return visit)' : ''}`);
 
   clearTimeout(ps.dwellTimer);
   ps.dwellTimer = setTimeout(() => {
@@ -2548,17 +2559,28 @@ async function pickRandomResult(key) {
   // so future draws can skip the DDG page; filterCachedUrls() re-applies
   // cross-panel rules at use time.
   if (ps && ps.currentTerm) {
-    const cachedUrls = pool.map(c => c.target);
-    const prevEntry  = serpCache.get(ps.currentTerm);
-    // Preserve filePath from the previous entry so a saved SERP file isn't lost
-    // when pickRandomResult processes the file:// page on a cache hit.
+    const cachedUrls  = pool.map(c => c.target);
+    const prevEntry   = serpCache.get(ps.currentTerm);
+    const isRealDdg   = currentUrl.startsWith('https://html.duckduckgo.com/') ||
+                        currentUrl.startsWith('https://duckduckgo.com/');
+    // Resolve filePath: keep the previous one; if none, check the deterministic path.
+    let filePath = prevEntry ? prevEntry.filePath : undefined;
+    if (!filePath) {
+      const computedPath = path.join(serpDir, termToSlug(ps.currentTerm) + '.html');
+      try { fs.accessSync(computedPath); filePath = computedPath; } catch {}
+    }
     serpCache.set(ps.currentTerm, {
       urls:      cachedUrls,
-      fetchedAt: Date.now(),
-      filePath:  prevEntry ? prevEntry.filePath : undefined,
+      // For saved-file pages, don't reset fetchedAt so the TTL isn't extended
+      // on every return visit and the "real refresh every SHOW_SERP_EVERY_N uses"
+      // counter stays meaningful.
+      fetchedAt: isRealDdg ? Date.now() : (prevEntry ? prevEntry.fetchedAt : Date.now()),
+      filePath,
     });
-    serpCacheUseCount.set(ps.currentTerm, 0);
-    kioskLog(`[ddg] cache: stored "${ps.currentTerm}" ${cachedUrls.length} URLs`);
+    if (isRealDdg) {
+      serpCacheUseCount.set(ps.currentTerm, 0);
+      kioskLog(`[ddg] cache: stored "${ps.currentTerm}" ${cachedUrls.length} URLs`);
+    }
   }
 
   // Shuffle candidates, then sort so different-hostname entries come first
@@ -2669,11 +2691,18 @@ async function onSearchBottom(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
 
-  // Occasionally skip result-following to mix in pure search-only cycles.
-  if (Math.random() > FOLLOW_RESULT_PROBABILITY) {
+  // Guard: run at most once per SERP page load.  The slow re-scroll in the
+  // no-eligible path must not re-trigger this handler.
+  if (ps.serpBottomHandled) return;
+  ps.serpBottomHandled = true;
+
+  // Occasionally skip result-following to mix in pure search-only cycles
+  // (but always honour a pending queued pick from nextAutoStep).
+  if (!ps.pendingQueuedPick && Math.random() > FOLLOW_RESULT_PROBABILITY) {
     const sinceLastSearch = Date.now() - ps.lastSearchTime;
     const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
     console.log(`[kiosk-auto] ${key} skipping result (probability), next search in ${holdMs} ms`);
+    clearTimeout(ps.dwellTimer);
     ps.dwellTimer = setTimeout(() => {
       ps.dwellTimer = null;
       if (ps.mode === 'auto') doSearch(key);
@@ -2681,7 +2710,29 @@ async function onSearchBottom(key) {
     return;
   }
 
-  const result = await pickRandomResult(key);
+  // If nextAutoStep sent us back to the SERP with a pre-picked result, use it;
+  // otherwise fall through to pickRandomResult.
+  let result;
+  const isReturnVisit = !!ps.pendingQueuedPick;
+  if (ps.pendingQueuedPick) {
+    const pre = ps.pendingQueuedPick;
+    ps.pendingQueuedPick = null;
+    // Re-validate the pre-pick before using it.
+    if (!isDomainAllowed(pre.target) || isBadDomain(pre.target)) {
+      kioskLog(`[kiosk-auto] ${key} pendingQueuedPick failed policy re-check — fresh pick`);
+      result = await pickRandomResult(key);
+    } else {
+      const otherUrls = new Set([...sharedOnScreenUrls.values()].filter(Boolean));
+      if (otherUrls.has(pre.target)) {
+        kioskLog(`[kiosk-auto] ${key} pendingQueuedPick now on another panel — fresh pick`);
+        result = await pickRandomResult(key);
+      } else {
+        result = pre;
+      }
+    }
+  } else {
+    result = await pickRandomResult(key);
+  }
 
   // Re-check mode after async operation.
   if (ps.mode !== 'auto') {
@@ -2697,6 +2748,7 @@ async function onSearchBottom(key) {
 
   if (!result) {
     // Track consecutive misses for this term and auto-skip if the limit is hit.
+    // serpBottomHandled guarantees we only count once per SERP load.
     const term = ps.currentTerm;
     if (term) {
       const count = (termMissCounts.get(term) || 0) + 1;
@@ -2743,6 +2795,7 @@ async function onSearchBottom(key) {
     // the panel looks active while waiting.
     const sinceLastSearch = Date.now() - ps.lastSearchTime;
     const holdMs = Math.max(BOTTOM_HOLD_MS, MIN_SEARCH_INTERVAL_MS - sinceLastSearch);
+    clearTimeout(ps.dwellTimer);
     ps.dwellTimer = setTimeout(() => {
       ps.dwellTimer = null;
       if (ps.mode === 'auto') doSearch(key);
@@ -2755,27 +2808,45 @@ async function onSearchBottom(key) {
   // Successful result pick — reset the miss counter for this term.
   if (ps.currentTerm) termMissCounts.set(ps.currentTerm, 0);
 
-  console.log(`[kiosk-auto] ${key} following result (${result.tier}): ${result.target}`);
+  const pickN = (ps.resultsVisited || 0) + 1;
+  const pickM = ps.resultsGoal || 1;
+  kioskLog(`[kiosk-auto] ${key} following result (${result.tier}, pick ${pickN}/${pickM}, ${isReturnVisit ? 'return' : 'fresh'}): ${result.target}`);
 
   // Highlight the chosen anchor in-page before navigating.
+  // Match by domHref (the page's a.href) OR by unwrapping the uddg= target from
+  // the redirect href, so cached/queued picks with direct URLs still highlight.
   const view = panelViews[key];
   if (!view || view.webContents.isDestroyed()) { doSearch(key); return; }
   try {
     await view.webContents.executeJavaScript(`
-      (function (href) {
+      (function (domHref, target) {
+        function getUddg(href) {
+          try {
+            var u = new URL(href);
+            if ((u.hostname === 'duckduckgo.com' || u.hostname.endsWith('.duckduckgo.com')) && u.pathname === '/l/') {
+              return decodeURIComponent(u.searchParams.get('uddg') || '');
+            }
+          } catch {}
+          return null;
+        }
         var el = Array.from(document.querySelectorAll('a.result__a'))
-          .find(function (a) { return a.href === href; });
+          .find(function (a) {
+            if (a.href === domHref) return true;
+            var uddg = getUddg(a.href);
+            return uddg && uddg === target;
+          });
         if (el) {
           el.style.outline = '3px solid #ea4b00';
           el.scrollIntoView({ block: 'center', behavior: 'smooth' });
         }
-      })(${JSON.stringify(result.domHref)})
+      })(${JSON.stringify(result.domHref)}, ${JSON.stringify(result.target)})
     `, false);
   } catch {}
 
   // Re-check mode after the highlight executeJavaScript.
   if (ps.mode !== 'auto') return;
 
+  clearTimeout(ps.highlightTimer);
   ps.highlightTimer = setTimeout(() => {
     ps.highlightTimer = null;
     if (ps.mode !== 'auto') return;
@@ -2976,6 +3047,37 @@ function nextAutoStep(key) {
         console.log(`[kiosk-auto] ${key} queued result skipped (on another panel): ${next.target}`);
         continue;
       }
+      // Go back to the results page before loading the next result, so the
+      // viewer sees the search step between every two result pages.
+      ps.pendingQueuedPick = next;
+      const v = panelViews[key];
+      if (!v || v.webContents.isDestroyed()) { ps.pendingQueuedPick = null; doSearch(key); return; }
+      const pickN = (ps.resultsVisited || 0) + 1;
+      const pickM = ps.resultsGoal || 1;
+      if (ps.lastSerpFile) {
+        let fileOk = false;
+        try { fs.accessSync(ps.lastSerpFile); fileOk = true; } catch { ps.lastSerpFile = null; }
+        if (fileOk) {
+          kioskLog(`[kiosk-auto] ${key} back to results page (saved-file) for pick ${pickN}/${pickM}`);
+          ps.autoPhase   = 'search';
+          ps.loadingSerp = true;
+          v.webContents.loadURL('file://' + ps.lastSerpFile).catch(() => {
+            ps.loadingSerp = false;
+            ps.pendingQueuedPick = null;
+            kioskLog(`[kiosk-auto] ${key} direct result load (no way back to results page): ${next.target}`);
+            loadResult(key, next);
+          });
+          return;
+        }
+      }
+      if (v.webContents.canGoBack()) {
+        kioskLog(`[kiosk-auto] ${key} back to results page (history) for pick ${pickN}/${pickM}`);
+        ps.autoPhase = 'search';
+        v.webContents.goBack();
+        return;
+      }
+      kioskLog(`[kiosk-auto] ${key} direct result load (no way back to results page): ${next.target}`);
+      ps.pendingQueuedPick = null;
       loadResult(key, next);
       return;
     }
@@ -3004,6 +3106,75 @@ function pickParkUrl(key) {
   return PAUSE_START_URLS[parkUrlIndex] || null;
 }
 
+// Loads a PAUSE_START_URL on this panel.  Called when no saved SERP is available.
+function showParkUrl(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
+  const remaining = Math.max(ddgPausedUntil - Date.now(), 0);
+  const parkUrl   = pickParkUrl(key);
+  const v         = panelViews[key];
+  if (!parkUrl || !v || v.webContents.isDestroyed()) {
+    clearTimeout(ps.pauseResumeTimer);
+    ps.pauseResumeTimer = setTimeout(() => {
+      ps.pauseResumeTimer = null;
+      if (ps.mode === 'auto') doSearch(key);
+    }, remaining + 1000);
+    return;
+  }
+  kioskLog(`[ddg] ${key} parked: ${parkUrl} (pause ${Math.round(remaining / 1000)}s left)`);
+  ps.autoPhase = 'parked';
+  sharedOnScreenUrls.set(key, parkUrl);
+  clearTimeout(ps.pauseResumeTimer);
+  ps.pauseResumeTimer = setTimeout(() => {
+    ps.pauseResumeTimer = null;
+    // Only yank truly idle 'parked' panels; 'result'/'search' panels finish
+    // their current step and naturally reach doSearch on their own.
+    if (ps.mode === 'auto' && ps.autoPhase === 'parked') doSearch(key);
+  }, remaining + 1000);
+  v.webContents.loadURL(parkUrl).catch(() => {});
+}
+
+// During a DDG pause, finds the best saved SERP file to show on a panel.
+// Prefers a term that no other panel is currently browsing.
+// Falls back to showParkUrl when no suitable saved SERP exists.
+function showSavedSerpDuringPause(key) {
+  const ps = panelStates.get(key);
+  if (!ps || ps.mode !== 'auto') return;
+  const v = panelViews[key];
+  if (!v || v.webContents.isDestroyed()) { showParkUrl(key); return; }
+
+  const otherTerms = new Set();
+  for (const [k, ops] of panelStates) {
+    if (k !== key && ops.currentTerm) otherTerms.add(ops.currentTerm);
+  }
+
+  // Two passes: first prefer terms no other panel is currently browsing.
+  for (const preferUnique of [true, false]) {
+    for (const [cachedTerm, entry] of serpCache) {
+      if (Date.now() - entry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
+      if (!entry.filePath) continue;
+      try { fs.accessSync(entry.filePath); } catch { continue; }
+      if (preferUnique && otherTerms.has(cachedTerm)) continue;
+      const eligible = filterCachedUrls(key, entry.urls);
+      if (eligible.length === 0) continue;
+      kioskLog(`[ddg] ${key} pause: showing saved SERP "${cachedTerm}"`);
+      ddgStats.cacheHits++;
+      ddgStats.savedSerpShows++;
+      ps.currentTerm     = cachedTerm;
+      ps.firstSearchDone = true;
+      ps.autoPhase       = 'search';
+      ps.loadingSerp     = true;
+      v.webContents.loadURL('file://' + entry.filePath).catch(() => {
+        ps.loadingSerp = false;
+        showParkUrl(key);
+      });
+      return;
+    }
+  }
+
+  showParkUrl(key);
+}
+
 // Called at the end of a parked-page dwell, on scroll-bottom for 'parked' phase,
 // or when a parked load fails.  Decides what the panel shows next during the pause.
 function parkNextPage(key) {
@@ -3018,71 +3189,20 @@ function parkNextPage(key) {
     return;
   }
 
-  const remaining = ddgPausedUntil - Date.now();
-
-  // Prefer a cached result — richer content and continues the browsing loop.
-  for (const [cachedTerm, entry] of serpCache) {
-    if (Date.now() - entry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
-    const eligible = filterCachedUrls(key, entry.urls);
-    if (eligible.length === 0) continue;
-    kioskLog(`[ddg] ${key} parked: using cached result "${cachedTerm}" (pause ${Math.round(remaining / 1000)}s left)`);
-    ddgStats.cacheHits++;
-    ps.firstSearchDone = true;
-    ps.currentTerm     = cachedTerm;
-    ps.queuedResults   = eligible.slice(1).map(u => ({ target: u, domHref: u, tier: 'cache' }));
-    ps.resultsGoal     = Math.floor(randBetween(RESULTS_PER_SEARCH_MIN, RESULTS_PER_SEARCH_MAX + 1));
-    ps.resultsVisited  = 0;
-    clearTimeout(ps.pauseResumeTimer);
-    ps.pauseResumeTimer = setTimeout(() => {
-      ps.pauseResumeTimer = null;
-      if (ps.mode === 'auto' && (ps.autoPhase === 'parked' || ps.autoPhase === 'result')) doSearch(key);
-    }, remaining + 1000);
-    loadResult(key, { target: eligible[0], domHref: eligible[0], tier: 'cache' });
-    return;
-  }
-
-  // No cached results — park on an approved start URL.
-  const parkUrl = pickParkUrl(key);
-  const v = panelViews[key];
-  if (!parkUrl || !v || v.webContents.isDestroyed()) {
-    clearTimeout(ps.pauseResumeTimer);
-    ps.pauseResumeTimer = setTimeout(() => {
-      ps.pauseResumeTimer = null;
-      if (ps.mode === 'auto') doSearch(key);
-    }, remaining + 1000);
-    return;
-  }
-
-  kioskLog(`[ddg] ${key} parked: ${parkUrl} (pause ${Math.round(remaining / 1000)}s left)`);
-  ps.autoPhase = 'parked';
-  sharedOnScreenUrls.set(key, parkUrl);
-
-  clearTimeout(ps.pauseResumeTimer);
-  ps.pauseResumeTimer = setTimeout(() => {
-    ps.pauseResumeTimer = null;
-    if (ps.mode === 'auto' && ps.autoPhase === 'parked') doSearch(key);
-  }, remaining + 1000);
-
-  v.webContents.loadURL(parkUrl).catch(() => {});
+  showSavedSerpDuringPause(key);
 }
 
 // Navigates a panel off a bot-check (or any unwanted) page during a DDG pause.
-// Prefers a queued SERP result; falls back to parkNextPage().
+// Shows a saved SERP file; falls back to a PAUSE_START_URL parked page.
 function navigateToParkedPage(key) {
   const ps = panelStates.get(key);
   if (!ps || ps.mode !== 'auto') return;
   stopBrowsingLoop(key);
-  ps.mode = 'auto';
-
-  while (ps.queuedResults && ps.queuedResults.length > 0) {
-    const next = ps.queuedResults.shift();
-    if (!isBadDomain(next.target)) {
-      loadResult(key, next);
-      return;
-    }
-  }
-
-  parkNextPage(key);
+  ps.mode          = 'auto';
+  ps.queuedResults = [];
+  ps.resultsGoal   = 0;
+  ps.resultsVisited = 0;
+  showSavedSerpDuringPause(key);
 }
 
 // Scrolls a parked page and arms a random dwell before calling parkNextPage.
@@ -3164,51 +3284,13 @@ function doSearch(key) {
   ps.resultsGoal   = 0;
   ps.resultsVisited = 0;
 
-  // ---- Part 1: DDG global pause (bot-check backoff) --------------------------
-  // During a pause, try to serve the panel from the SERP cache without hitting
-  // DDG.  If no fresh cached term is available, hold the current page.
+  // ---- DDG global pause (bot-check backoff) ----------------------------------
+  // During a pause never make a real DDG request.  Show a saved SERP file so
+  // the panel continues the normal search → result browsing loop.
   const pauseMs = ddgPausedUntil - Date.now();
   if (pauseMs > 0) {
     sharedOnScreenUrls.delete(key);
-    for (const [cachedTerm, entry] of serpCache) {
-      if (Date.now() - entry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
-      const eligible = filterCachedUrls(key, entry.urls);
-      if (eligible.length === 0) continue;
-      kioskLog(`[ddg] ${key} search="${cachedTerm}" type=saved-serp (DDG paused ${Math.round(pauseMs / 1000)}s)`);
-      ddgStats.cacheHits++;
-      ps.currentTerm     = cachedTerm;
-      ps.firstSearchDone = true;
-      // If a saved SERP file exists, show it so the panel displays the search step.
-      if (entry.filePath) {
-        let fileOk = false;
-        try { fs.accessSync(entry.filePath); fileOk = true; } catch {}
-        if (fileOk) {
-          ddgStats.savedSerpShows++;
-          ps.autoPhase   = 'search';
-          ps.loadingSerp = true;
-          clearTimeout(ps.pauseResumeTimer);
-          ps.pauseResumeTimer = setTimeout(() => {
-            ps.pauseResumeTimer = null;
-            if (ps.mode === 'auto' && (ps.autoPhase === 'parked' || ps.autoPhase === 'result' || ps.autoPhase === 'search')) doSearch(key);
-          }, pauseMs + 1000);
-          const v = panelViews[key];
-          if (!v || v.webContents.isDestroyed()) return;
-          v.webContents.loadURL('file://' + entry.filePath).catch(() => {
-            ps.loadingSerp = false;
-            parkNextPage(key);
-          });
-          return;
-        }
-      }
-      // No file — fall back to jumping straight to a result page.
-      ps.queuedResults = eligible.slice(1).map(u => ({ target: u, domHref: u, tier: 'cache' }));
-      ps.resultsGoal   = Math.floor(randBetween(RESULTS_PER_SEARCH_MIN, RESULTS_PER_SEARCH_MAX + 1));
-      loadResult(key, { target: eligible[0], domHref: eligible[0], tier: 'cache' });
-      return;
-    }
-    // No cache — park on an approved start URL to keep the panel moving.
-    kioskLog(`[ddg] ${key} holding: DDG paused ${Math.round(pauseMs / 1000)}s, no fresh cache — parking`);
-    parkNextPage(key);
+    showSavedSerpDuringPause(key);
     return;
   }
 
@@ -3370,6 +3452,8 @@ function stopBrowsingLoop(key) {
   ps.highlightTimer     = null;
   ps.resultDwellTimer   = null;
   ps.pauseResumeTimer   = null;
+  ps.pendingQueuedPick  = null; // discard any pending queued pick on customer takeover
+  ps.serpBottomHandled  = false;
 }
 
 // ---- Forkknife window -------------------------------------------------------
@@ -4354,6 +4438,9 @@ function startAllIdleRotation() {
       lastNavStatus:      0,     // HTTP response code from did-navigate; carried into did-finish-load log
       autoPhase:          'search', // 'search' | 'result' | 'parked' — current phase of the auto loop
       loadingSerp:        false,    // true while a saved SERP file:// URL is loading (did-finish-load guard)
+      lastSerpFile:       null,     // file:// path of the last SERP shown (null for real DDG pages)
+      serpBottomHandled:  false,    // true once onSearchBottom has run for this SERP load; reset by onSearchPageReady
+      pendingQueuedPick:  null,     // { target, domHref, tier } set by nextAutoStep when going back to SERP
       recentResultUrls:   [],       // recently visited result URLs (max ~20); prevents re-visiting the same page
       queuedResults:      [],       // remaining result pages to visit from the current SERP
       resultsGoal:        0,        // how many results to visit from the current SERP (randomised per SERP)
