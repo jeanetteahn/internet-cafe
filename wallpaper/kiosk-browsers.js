@@ -150,12 +150,46 @@ const SEARCH_TERM_GROUPS = [
 ];
 
 // Flat term list for the shuffle-bag deck — derived from groups above.
-const SEARCH_TERMS = SEARCH_TERM_GROUPS.flatMap(g => g.terms);
+// Declared with let so rebuildTopics() can extend it with local terms.
+let SEARCH_TERMS = SEARCH_TERM_GROUPS.flatMap(g => g.terms);
 
 // Map from every term to its group's approved domain list (built once at startup).
-const TERM_GROUP_DOMAINS = new Map(
+// Also declared with let so rebuildTopics() can add local-term entries.
+let TERM_GROUP_DOMAINS = new Map(
   SEARCH_TERM_GROUPS.flatMap(g => g.terms.map(t => [t, g.domains]))
 );
+
+// ---- Local-topic constants --------------------------------------------------
+// Template terms filled with the kiosk's geolocation city/region at startup.
+// Kid-safe: nothing that pulls news, crime, nightlife, or sports schedules.
+const LOCAL_TERM_TEMPLATES = [
+  // Places and things to do
+  '{city} weather', 'things to do in {city}', '{city} parks', '{city} museums',
+  '{city} landmarks', '{city} zoo', '{city} public library', '{city} nature trails',
+  '{city} {region} travel guide',
+  // Food
+  'family restaurants in {city}', 'places to eat in {city}', 'foods {city} is known for',
+  // History and culture
+  '{city} history', 'how {city} got its name', '{city} architecture',
+  '{region} state symbols',
+  // Nature and science
+  'birds of {region}', '{region} wildlife', '{region} state parks',
+  '{city} rivers and lakes', '{city} climate', '{city} science center',
+];
+// Approved source domains for local search terms (site: filters for DDG queries).
+// nps.gov, weather.gov, kiddle.co, britannica.com, allaboutbirds.org, si.edu are
+// already in ALLOWED_DOMAINS; en.wikivoyage.org and en.wikipedia.org are not.
+const LOCAL_GROUP_DOMAINS = [
+  'en.wikivoyage.org', 'en.wikipedia.org', 'nps.gov',
+  'weather.gov', 'kiddle.co', 'britannica.com', 'allaboutbirds.org', 'si.edu',
+];
+// Extra allowed domains for auto-link following when a panel's current term is
+// local.  NOT added to the global ALLOWED_DOMAINS — scoped to local panels only.
+const LOCAL_EXTRA_DOMAINS = ['en.wikivoyage.org', 'en.wikipedia.org'];
+// Probability of drawing a local term on each drawNextTerm call.
+const LOCAL_TERM_RATIO = 1 / 8;
+// How long to cache the kiosk's geolocation result before refreshing.
+const LOCATION_REFRESH_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 // ---- Content-safety lists ---------------------------------------------------
 // BROWSING_POLICY controls what customers can navigate to while a panel is in
@@ -656,11 +690,21 @@ const serpCache         = new Map(); // term -> { urls: [...], fetchedAt: timest
 const serpCacheUseCount = new Map(); // term -> consecutive cached uses since last real SERP fetch
 
 // ---- DDG rate stats (10-min rolling window) ---------------------------------
-let ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, downloadsBlocked: 0, windowStart: 0 };
+let ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, downloadsBlocked: 0, local: 0, windowStart: 0 };
 let ddgSummaryTimer = null; // module-level so V8 keeps it alive
 let ddgLastStrikeAt = 0;   // Date.now() of the last counted bot-check strike (60 s guard)
 let parkUrlIndex    = 0;   // round-robin index into PAUSE_START_URLS
 const blockedDownloadUrls = new Set(); // URLs that triggered a download this session; never picked again
+
+// ---- Location state (local topics) -----------------------------------------
+// Set by startLocationWatch() and updated by refreshLocationInBackground().
+// Null means no location is known; panels run static topics only.
+let kioskLocation       = null;  // { city, regionName, country, countryCode, lat, lon }
+let LOCAL_TERMS         = new Set(); // filled-in local search terms (rebuilt by rebuildTopics)
+let localWeatherTerm    = null;      // the "{city} weather" term for the current location
+let localSearchDeck     = [];        // separate shuffle bag for local terms
+let _locationRefreshTimer = null;    // setInterval id for LOCATION_REFRESH_MS periodic refresh
+const LOCATION_CACHE_FILE = path.join(app.getPath('userData'), 'kiosk-location.json');
 
 // Delete per-term SERP HTML files older than the in-memory TTL at startup.
 try {
@@ -1080,10 +1124,17 @@ function buildSearchUrl(term, sites) {
   return `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kp=1`;
 }
 
-function isDomainAllowed(url) {
+// opts.local: when true, also allow LOCAL_EXTRA_DOMAINS and any .gov hostname.
+// These extras apply only while a panel's currentTerm is in LOCAL_TERMS.
+function isDomainAllowed(url, opts = {}) {
   try {
     const { hostname } = new URL(url);
-    return ALLOWED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d));
+    if (ALLOWED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d))) return true;
+    if (opts.local) {
+      if (LOCAL_EXTRA_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d))) return true;
+      if (hostname.endsWith('.gov')) return true; // any .gov domain (city, state, federal)
+    }
+    return false;
   } catch {
     return false;
   }
@@ -2036,7 +2087,8 @@ function setupViewEventHandlers(key, win, view) {
       } else if (ps.autoPhase === 'result') {
         // Result page: allow page-initiated redirects (http→https, meta-refresh)
         // that pass AUTO_LINK_POLICY; block everything else.
-        const _allowed = (AUTO_LINK_POLICY === 'allowlist') ? isDomainAllowed(url) : isPassesPolicy(url);
+        const isLocal = LOCAL_TERMS.has(ps.currentTerm);
+        const _allowed = (AUTO_LINK_POLICY === 'allowlist') ? isDomainAllowed(url, { local: isLocal }) : isPassesPolicy(url);
         if (_allowed) {
           console.log(`[kiosk-auto] ${key} allowed result-phase navigation: ${url}`);
         } else {
@@ -2486,6 +2538,7 @@ async function pickRandomResult(key) {
   }
 
   const ps = panelStates.get(key);
+  const isLocal    = LOCAL_TERMS.has(ps ? ps.currentTerm : null);
   const recentUrls = ps ? ps.recentResultUrls : [];
   const total = domHrefs.length;
   let afterPolicy   = 0;
@@ -2516,13 +2569,13 @@ async function pickRandomResult(key) {
     // Skip recently visited pages (collect for pause-mode Fallback 3).
     if (recentUrls.includes(target)) {
       if (!isBadDomain(target)) {
-        if (AUTO_LINK_POLICY === 'allowlist' && isDomainAllowed(target))
+        if (AUTO_LINK_POLICY === 'allowlist' && isDomainAllowed(target, { local: isLocal }))
           panelRecentCandidates.push({ domHref, target, tier: 'allowlist' });
         else if (AUTO_LINK_POLICY === 'browsing' && isPassesPolicy(target))
           panelRecentCandidates.push({ domHref, target, tier: 'browsing' });
         else if (AUTO_LINK_POLICY !== 'allowlist' && AUTO_LINK_POLICY !== 'browsing') {
-          if (isDomainAllowed(target))        panelRecentCandidates.push({ domHref, target, tier: 'allowlist' });
-          else if (isPassesPolicy(target))    panelRecentCandidates.push({ domHref, target, tier: 'fallback' });
+          if (isDomainAllowed(target, { local: isLocal })) panelRecentCandidates.push({ domHref, target, tier: 'allowlist' });
+          else if (isPassesPolicy(target))                 panelRecentCandidates.push({ domHref, target, tier: 'fallback' });
         }
       }
       continue;
@@ -2532,7 +2585,7 @@ async function pickRandomResult(key) {
     if (isBadDomain(target)) { badDomainSkips += 1; continue; }
 
     if (AUTO_LINK_POLICY === 'allowlist') {
-      if (!isDomainAllowed(target)) continue;
+      if (!isDomainAllowed(target, { local: isLocal })) continue;
       afterPolicy += 1;
       allowlistCandidates.push({ domHref, target, tier: 'allowlist' });
     } else if (AUTO_LINK_POLICY === 'browsing') {
@@ -2541,7 +2594,7 @@ async function pickRandomResult(key) {
       allowlistCandidates.push({ domHref, target, tier: 'browsing' });
     } else {
       // 'allowlist-preferred': allowlist wins; any policy-passing URL is fallback.
-      if (isDomainAllowed(target)) {
+      if (isDomainAllowed(target, { local: isLocal })) {
         afterPolicy += 1;
         allowlistCandidates.push({ domHref, target, tier: 'allowlist' });
       } else if (isPassesPolicy(target)) {
@@ -3035,6 +3088,45 @@ async function onResultPageReady(key) {
 
 // ---- Search deck (shuffle-bag) -----------------------------------------------
 
+// Rebuilds SEARCH_TERMS, TERM_GROUP_DOMAINS, and LOCAL_TERMS from the static
+// SEARCH_TERM_GROUPS plus, if a location is provided, the filled-in local
+// templates.  Clears both shuffle bags so the next drawNextTerm reshuffles
+// with the updated term set.
+function rebuildTopics(location) {
+  const prevHadLocal = LOCAL_TERMS.size > 0;
+  SEARCH_TERMS       = SEARCH_TERM_GROUPS.flatMap(g => g.terms);
+  TERM_GROUP_DOMAINS = new Map(SEARCH_TERM_GROUPS.flatMap(g => g.terms.map(t => [t, g.domains])));
+  LOCAL_TERMS        = new Set();
+  localWeatherTerm   = null;
+
+  if (!location || !location.city) {
+    kioskLog('[kiosk-local] skipped: no location');
+    searchDeck      = [];
+    localSearchDeck = [];
+    return;
+  }
+
+  const city   = location.city;
+  const region = location.regionName || city;
+
+  for (const tmpl of LOCAL_TERM_TEMPLATES) {
+    const term = tmpl.replace(/{city}/g, city).replace(/{region}/g, region);
+    SEARCH_TERMS.push(term);
+    TERM_GROUP_DOMAINS.set(term, LOCAL_GROUP_DOMAINS);
+    LOCAL_TERMS.add(term);
+  }
+  localWeatherTerm = `${city} weather`;
+
+  searchDeck      = [];
+  localSearchDeck = [];
+
+  if (prevHadLocal) {
+    kioskLog(`[kiosk-local] rebuilt for ${city}`);
+  } else {
+    kioskLog(`[kiosk-local] added ${LOCAL_TERMS.size} local terms`);
+  }
+}
+
 // Fisher-Yates shuffle of all non-skipped terms, with currently-active terms
 // pushed to the end so a reshuffle doesn't immediately repeat on-screen topics.
 function reshuffleDeck(activeTerms) {
@@ -3049,13 +3141,40 @@ function reshuffleDeck(activeTerms) {
   kioskLog(`[kiosk-deck] reshuffled: ${searchDeck.length} terms (${skippedTerms.size} skipped${skippedTerms.size ? ': ' + [...skippedTerms].join(', ') : ''})`);
 }
 
+// Shuffle of LOCAL_TERMS not in skippedTerms, active terms at the end.
+function reshuffleLocalDeck(activeTerms) {
+  const eligible = [...LOCAL_TERMS].filter(t => !skippedTerms.has(t));
+  for (let i = eligible.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [eligible[i], eligible[j]] = [eligible[j], eligible[i]];
+  }
+  const front = eligible.filter(t => !activeTerms.has(t));
+  const back  = eligible.filter(t =>  activeTerms.has(t));
+  localSearchDeck = [...front, ...back];
+}
+
 // Draws the next term from the deck for panel `key`, skipping terms that other
 // panels are currently searching or browsing.  Reshuffles automatically when
-// the deck runs dry.
+// the deck runs dry.  With probability LOCAL_TERM_RATIO, tries the local deck
+// first (separate bag so local terms don't repeat back-to-back; only one panel
+// shows a local term at a time — enforced by the otherTerms skip).
 function drawNextTerm(key) {
   const otherTerms = new Set();
   for (const [k, ops] of panelStates) {
     if (k !== key && ops.currentTerm) otherTerms.add(ops.currentTerm);
+  }
+
+  // Try a local term with probability LOCAL_TERM_RATIO.
+  if (LOCAL_TERMS.size > 0 && Math.random() < LOCAL_TERM_RATIO) {
+    if (localSearchDeck.length === 0) reshuffleLocalDeck(otherTerms);
+    for (let i = 0; i < localSearchDeck.length; i++) {
+      if (!otherTerms.has(localSearchDeck[i])) {
+        const [term] = localSearchDeck.splice(i, 1);
+        ddgStats.local++;
+        return term;
+      }
+    }
+    // All local terms currently on another panel — fall through to main deck.
   }
 
   // Scan the deck for the first term that isn't currently active on another panel.
@@ -3075,13 +3194,14 @@ function drawNextTerm(key) {
     }
   }
 
-  // Edge case: more panels searching than terms (shouldn't happen with 138 terms).
+  // Edge case: more panels searching than terms (shouldn't happen with 150+ terms).
   return searchDeck.length > 0 ? searchDeck.shift() : SEARCH_TERMS[0];
 }
 
 // Returns cached URLs for `term` that still pass current shared-state filters.
 function filterCachedUrls(key, urls, opts = {}) {
   const ps = panelStates.get(key);
+  const isLocal = LOCAL_TERMS.has(ps ? ps.currentTerm : null);
   const otherOnScreen    = new Set();
   const otherOnScreenBDs = new Set();
   for (const [k, url] of sharedOnScreenUrls) {
@@ -3095,7 +3215,7 @@ function filterCachedUrls(key, urls, opts = {}) {
   const panelRecentSet  = new Set(ps ? ps.recentResultUrls : []);
   return urls.filter(url => {
     if (isBadDomain(url))                                                              return false;
-    if (!isDomainAllowed(url))                                                         return false;
+    if (!isDomainAllowed(url, { local: isLocal }))                                     return false;
     if (isNonPageUrl(url))                                                             return false;
     if (blockedDownloadUrls.has(url))                                                  return false;
     if (otherOnScreen.has(url))                                                        return false;
@@ -3372,8 +3492,8 @@ function startDdgSummaryTimer() {
     const now     = Date.now();
     const minutes = (now - ddgStats.windowStart) / 60000;
     const rate    = minutes > 0 ? (ddgStats.searches / minutes).toFixed(2) : '0';
-    kioskLog(`[ddg] 10-min summary: searches=${ddgStats.searches} cache=${ddgStats.cacheHits} saved-serp=${ddgStats.savedSerpShows} results=${ddgStats.resultsVisited} bot-checks=${ddgStats.botChecks} no-eligible=${ddgStats.noEligibleMisses} downloads-blocked=${ddgStats.downloadsBlocked} rate=${rate}/min`);
-    ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, downloadsBlocked: 0, windowStart: now };
+    kioskLog(`[ddg] 10-min summary: searches=${ddgStats.searches} cache=${ddgStats.cacheHits} saved-serp=${ddgStats.savedSerpShows} results=${ddgStats.resultsVisited} bot-checks=${ddgStats.botChecks} no-eligible=${ddgStats.noEligibleMisses} downloads-blocked=${ddgStats.downloadsBlocked} local=${ddgStats.local} rate=${rate}/min`);
+    ddgStats = { searches: 0, cacheHits: 0, savedSerpShows: 0, resultsVisited: 0, botChecks: 0, noEligibleMisses: 0, downloadsBlocked: 0, local: 0, windowStart: now };
   }, 10 * 60 * 1000);
 }
 
@@ -3427,6 +3547,22 @@ function doSearch(key) {
   }
   const totalEligible = SEARCH_TERMS.length - skippedTerms.size;
   kioskLog(`[kiosk-deck] ${key} term='${term}' deck=${searchDeck.length}/${totalEligible}${otherTermStrs.length ? ` (others: ${otherTermStrs.join(', ')})` : ''}`);
+
+  // ---- Part 5: weather direct page (US only) ---------------------------------
+  // When the drawn term is the "{city} weather" local term and the kiosk is in
+  // the US, skip DuckDuckGo and load forecast.weather.gov directly.
+  if (term === localWeatherTerm && kioskLocation && kioskLocation.countryCode === 'US') {
+    const lat        = kioskLocation.lat.toFixed(4);
+    const lon        = kioskLocation.lon.toFixed(4);
+    const weatherUrl = `https://forecast.weather.gov/MapClick.php?lat=${lat}&lon=${lon}`;
+    kioskLog(`[kiosk-local] ${key} weather direct: ${weatherUrl}`);
+    ps.lastSearchTime = now;
+    ps.resultsGoal    = 1;
+    ps.queuedResults  = [];
+    ps.resultsVisited = 0;
+    loadResult(key, { target: weatherUrl, domHref: weatherUrl, tier: 'local-weather' });
+    return;
+  }
 
   // ---- Part 3: SERP cache check (skip DDG if we have fresh results) ----------
   const serpEntry = serpCache.get(term);
@@ -3888,6 +4024,106 @@ function createCarbonWindow(workArea) {
   });
 }
 
+// ---- Location lookup and local-topic wiring ---------------------------------
+
+// Calls back with { city, regionName, country, countryCode, lat, lon } or null.
+// Uses ip-api.com via plain http:// — the free tier has no HTTPS; see the
+// identical comment in renderer.js and fetchClockTimezone().
+function getKioskLocation(callback) {
+  http.get(
+    'http://ip-api.com/json/?fields=status,city,regionName,country,countryCode,lat,lon',
+    (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.status !== 'success' || !parsed.city) { callback(null); return; }
+          callback({
+            city:        parsed.city,
+            regionName:  parsed.regionName  || '',
+            country:     parsed.country     || '',
+            countryCode: parsed.countryCode || '',
+            lat:         parsed.lat || 0,
+            lon:         parsed.lon || 0,
+          });
+        } catch (_) { callback(null); }
+      });
+    }
+  ).on('error', () => callback(null));
+}
+
+function saveLocationCache(loc) {
+  try {
+    fs.writeFileSync(LOCATION_CACHE_FILE, JSON.stringify({ ...loc, savedAt: Date.now() }));
+  } catch (e) {
+    console.error('[kiosk-local] failed to save location cache:', e.message);
+  }
+}
+
+function loadLocationCache() {
+  try {
+    const data = JSON.parse(fs.readFileSync(LOCATION_CACHE_FILE, 'utf8'));
+    if (data && data.city) return data;
+  } catch (_) {}
+  return null;
+}
+
+// Fetches a fresh location in the background; rebuilds local topics if the city changed.
+function refreshLocationInBackground() {
+  getKioskLocation(loc => {
+    if (!loc) return; // network error; keep existing state
+    saveLocationCache(loc);
+    const prevCity = kioskLocation ? kioskLocation.city : null;
+    kioskLocation  = loc;
+    if (!prevCity || prevCity !== loc.city) {
+      kioskLog(`[kiosk-local] location: ${loc.city}, ${loc.regionName}, ${loc.countryCode} (live)`);
+      rebuildTopics(loc); // logs "added N local terms" or "rebuilt for <city>"
+    }
+  });
+}
+
+// Called once from createKioskWindow before panels start browsing.  Loads any
+// cached location synchronously so the full topic deck is ready before the first
+// drawNextTerm call, then kicks off a background refresh and a periodic 6-hour
+// refresh interval.  Never blocks panel startup — if neither cache nor live
+// lookup succeeds, panels run with static topics only (identical to before this
+// feature was added).
+function startLocationWatch() {
+  // Testing override: KIOSK_FAKE_LOCATION="City|Region|CC|lat|lon"
+  const fake = process.env.KIOSK_FAKE_LOCATION;
+  if (fake) {
+    const p = fake.split('|');
+    if (p.length === 5) {
+      const loc = {
+        city: p[0], regionName: p[1], country: p[2], countryCode: p[2],
+        lat: parseFloat(p[3]), lon: parseFloat(p[4]),
+      };
+      kioskLog(`[kiosk-local] location: ${loc.city}, ${loc.regionName}, ${loc.countryCode} (fake)`);
+      kioskLocation = loc;
+      rebuildTopics(loc);
+    } else {
+      rebuildTopics(null);
+    }
+    return; // skip ip-api and the refresh timer when using a fake location
+  }
+
+  const cached = loadLocationCache();
+  if (cached && cached.city) {
+    kioskLog(`[kiosk-local] location: ${cached.city}, ${cached.regionName}, ${cached.countryCode} (cache)`);
+    kioskLocation = cached;
+    rebuildTopics(cached);
+  } else {
+    rebuildTopics(null); // logs "skipped: no location"
+  }
+
+  // Kick off an immediate background refresh, then repeat every LOCATION_REFRESH_MS.
+  refreshLocationInBackground();
+  if (!_locationRefreshTimer) {
+    _locationRefreshTimer = setInterval(refreshLocationInBackground, LOCATION_REFRESH_MS);
+  }
+}
+
 // ---- Window creation --------------------------------------------------------
 
 /**
@@ -4081,6 +4317,7 @@ function createKioskWindow() {
   if (hubWin && !hubWin.isDestroyed()) hubWin.moveTop();
   restackOverlays();
 
+  startLocationWatch(); // load location from cache; refresh in background
   attachActivityHandling();
   startAllIdleRotation();
 

@@ -493,6 +493,72 @@ Other things worth knowing:
   Toggle with `COOKIE_AUTO_ACCEPT_ENABLED` in `kiosk-browsers.js`.  To add a
   missed site, append an entry to the `CMPS` array in `kiosk-cookie-consent.js`.
 
+## Local topics
+
+Each panel's shuffle bag automatically includes search terms about the
+kiosk's physical location — its weather, local attractions, parks, food,
+history, and nature.  The same build works at any venue; no per-site
+configuration is needed.
+
+**Where the location comes from:** The kiosk process resolves the location
+via IP geolocation (`ip-api.com`, plain `http://` — the free tier has no
+HTTPS; see the identical comment in `renderer.js` and `fetchClockTimezone`
+in `kiosk-browsers.js`).  Fields requested: `status`, `city`, `regionName`,
+`country`, `countryCode`, `lat`, `lon`.
+
+**Cache file:** `<userData>/kiosk-location.json`.  On Linux the path is
+`~/.config/Electron/kiosk-location.json` (or `~/.config/<AppName>/` after
+packaging).  On startup the cache is loaded synchronously, so the full
+topic deck is ready before the first search.  A live refresh runs in the
+background immediately afterward regardless.  If neither the cache nor the
+live lookup succeeds, panels run with static topics only — identical to
+before this feature was added.
+
+**Refresh interval:** `LOCATION_REFRESH_MS` (6 hours).  If the city changes
+(kiosk physically moved), `rebuildTopics()` is called automatically and the
+deck reshuffles with the new city's terms.
+
+**Local term templates** (`LOCAL_TERM_TEMPLATES`, 22 terms):
+
+```
+{city} weather · things to do in {city} · {city} parks · {city} museums
+{city} landmarks · {city} zoo · {city} public library · {city} nature trails
+{city} {region} travel guide · family restaurants in {city}
+places to eat in {city} · foods {city} is known for · {city} history
+how {city} got its name · {city} architecture · {region} state symbols
+birds of {region} · {region} wildlife · {region} state parks
+{city} rivers and lakes · {city} climate · {city} science center
+```
+
+**Weighting:** `LOCAL_TERM_RATIO = 1/8`.  Local terms are drawn from a
+separate shuffle bag with probability 1-in-8 per `drawNextTerm` call, so
+they appear regularly without crowding out the 130+ static terms.  Only one
+panel shows a local term at a time.
+
+**Weather direct page (US only):** When the drawn term is `{city} weather`
+and `countryCode === 'US'`, the panel skips DuckDuckGo and loads
+`https://forecast.weather.gov/MapClick.php?lat=<lat>&lon=<lon>` directly
+(lat/lon rounded to 4 decimal places).  Outside the US the term falls back
+to a normal DDG search.  The page goes through the same load watchdog,
+dwell, and error handling as any other result page.
+
+**Scoped allowlist:** Auto-link following for local terms additionally
+allows `en.wikipedia.org` and `en.wikivoyage.org` (`LOCAL_EXTRA_DOMAINS`)
+and any hostname in the `.gov` TLD (covers city and state government sites
+such as `detroitmi.gov` and `michigan.gov`).  These extras do **not** apply
+to static terms — `ALLOWED_DOMAINS` is unchanged.
+
+**Testing override:** Set `KIOSK_FAKE_LOCATION="City|Region|CC|lat|lon"`
+in the environment to bypass ip-api and the cache entirely:
+
+```bash
+# Fake a US city (triggers weather.gov direct page):
+KIOSK_FAKE_LOCATION="Chicago|Illinois|US|41.8781|-87.6298" bash linux/relaunch.sh
+
+# Fake a non-US city (weather term falls back to DDG search):
+KIOSK_FAKE_LOCATION="Toronto|Ontario|CA|43.6532|-79.3832" bash linux/relaunch.sh
+```
+
 ## Recommended workflow
 
 1. **Iterate on the Mac first.** `npm start` runs fine on macOS for
