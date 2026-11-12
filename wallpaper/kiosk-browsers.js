@@ -4490,6 +4490,21 @@ function attachActivityHandling() {
     notePanelActivity(key, eventType || 'unknown');
   });
 
+  ipcMain.on('kiosk-sb-diag', (event, info) => {
+    const key  = webContentsIdToKey.get(event.sender.id) || '?';
+    const kind = String(info.kind || '').slice(0, 80);
+    const tag  = String(info.tag  || '').slice(0, 80);
+    const id   = String(info.id   || '').slice(0, 80);
+    const cls  = String(info.cls  || '').slice(0, 80);
+    const w    = Math.round(Number(info.w)  || 0);
+    const h    = Math.round(Number(info.h)  || 0);
+    const sh   = Math.round(Number(info.sh) || 0);
+    const vw   = Math.round(Number(info.vw) || 0);
+    const vh   = Math.round(Number(info.vh) || 0);
+    const host = String(info.host || '').slice(0, 80);
+    kioskLog(`[kiosk-sb] ${key} main=${kind} <${tag}#${id}.${cls}> ${w}x${h} scrollH=${sh} view=${vw}x${vh} host=${host}`);
+  });
+
   ipcMain.on('forkknife-back', (event) => {
     if (!forkKnifeWindow || forkKnifeWindow.isDestroyed()) return;
     if (event.sender !== forkKnifeWindow.webContents) return;

@@ -113,31 +113,109 @@ function createOverlayScrollbar() {
   new MutationObserver(ensureHost).observe(document.documentElement, { childList: true });
 
   // ---- Main doc scrollbars ----
+  // Cache for getMainScroller — { el, kind } or null (needs refresh).
+  var mainScrollerCache = null;
+  function invalidateScrollerCache() { mainScrollerCache = null; }
+
+  // Diagnostic: send one IPC per scroller change, capped at 10 per page.
+  // Top frame only; kind is 'window' | 'body' | 'element' | 'none'.
+  var diagCount = 0;
+  var diagLast  = '';
+  function maybeDiag(el, kind) {
+    if (window.top !== window) return;
+    if (diagCount >= 10) return;
+    var fp = kind + '|' + (el ? el.tagName : '') + '|' + (el ? (el.id || '') : '');
+    if (fp === diagLast) return;
+    diagLast = fp; diagCount++;
+    try {
+      var rect = el.getBoundingClientRect();
+      ipcRenderer.send('kiosk-sb-diag', {
+        kind: kind,
+        tag:  (el.tagName  || '').toLowerCase().slice(0, 80),
+        id:   (el.id       || '').slice(0, 80),
+        cls:  (typeof el.className === 'string' ? el.className.split(/\s+/)[0] : '').slice(0, 80),
+        w:    Math.round(rect.width),
+        h:    Math.round(rect.height),
+        sh:   el.scrollHeight,
+        vw:   window.innerWidth,
+        vh:   window.innerHeight,
+        host: (window.location.host || '').slice(0, 80),
+      });
+    } catch (_) {}
+  }
+
   // Returns the element whose scroll position drives the main bar.
-  // On pages where <html> is overflow:hidden and <body> scrolls independently
-  // (e.g. DuckDuckGo HTML), document.scrollingElement.scrollHeight equals
-  // window.innerHeight (no overflow), so we fall through to body.
+  // Priority: (1) viewport/window scroll, (2) <body> scroll, (3) largest
+  // viewport-covering element with overflow:auto/scroll.  Result is cached
+  // and only re-scanned after a resize, ResizeObserver callback, or when
+  // the cached element is disconnected.
   function getMainScroller() {
+    if (mainScrollerCache && mainScrollerCache.el.isConnected) return mainScrollerCache.el;
+    mainScrollerCache = null;
+
     var se = document.scrollingElement || document.documentElement;
-    if (se.scrollHeight > window.innerHeight + 1) return se;
+
+    // 1. Viewport scrolls normally.
+    if (se.scrollHeight > window.innerHeight + 1) {
+      mainScrollerCache = { el: se, kind: 'window' };
+      maybeDiag(se, 'window');
+      return se;
+    }
+
+    // 2. <body> scrolls (html is overflow:hidden, body has overflow:auto/scroll).
     var body = document.body;
     if (body) {
-      var cs = window.getComputedStyle(body);
-      if (/auto|scroll/.test(cs.overflowY + ' ' + cs.overflow) &&
-          body.scrollHeight > body.clientHeight + 1) return body;
+      var bcs = window.getComputedStyle(body);
+      if (/auto|scroll/.test(bcs.overflowY + ' ' + bcs.overflow) &&
+          body.scrollHeight > body.clientHeight + 1) {
+        mainScrollerCache = { el: body, kind: 'body' };
+        maybeDiag(body, 'body');
+        return body;
+      }
     }
+
+    // 3. Largest viewport-covering element (≥80% of both dimensions).
+    // Handles wide-layout pages (e.g. DDG at ≥1000 px) where a wrapper div
+    // scrolls instead of the window or body.
+    var minW = window.innerWidth  * 0.8;
+    var minH = window.innerHeight * 0.8;
+    var best = null, bestArea = 0;
+    var all = document.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (el === host) continue;
+      var cs = window.getComputedStyle(el);
+      if (!/auto|scroll/.test(cs.overflowY + ' ' + cs.overflow)) continue;
+      if (el.scrollHeight <= el.clientHeight + 1) continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < minW || r.height < minH) continue;
+      var area = r.width * r.height;
+      if (area > bestArea) { bestArea = area; best = el; }
+    }
+    if (best) {
+      mainScrollerCache = { el: best, kind: 'element' };
+      if (ro) ro.observe(best);  // watch for future size changes
+      maybeDiag(best, 'element');
+      return best;
+    }
+
+    // Nothing overflows — page is shorter than the viewport.
+    mainScrollerCache = { el: se, kind: 'none' };
+    maybeDiag(se, 'none');
     return se;
   }
 
   function updateMain() {
     var sc = getMainScroller();
     if (!sc) return;
-    var isBody = sc === document.body;
+    var se = document.scrollingElement || document.documentElement;
+    var isEl = sc !== se;  // element scroller: use el.scrollTop/clientHeight
     var scrollH = sc.scrollHeight, scrollW = sc.scrollWidth;
-    var viewH = isBody ? sc.clientHeight : window.innerHeight;
-    var viewW = isBody ? sc.clientWidth  : window.innerWidth;
-    var scrollY = isBody ? sc.scrollTop  : window.scrollY;
-    var scrollX = isBody ? sc.scrollLeft : window.scrollX;
+    var rect = isEl ? sc.getBoundingClientRect() : null;
+    var viewH = isEl ? sc.clientHeight : window.innerHeight;
+    var viewW = isEl ? sc.clientWidth  : window.innerWidth;
+    var scrollY = isEl ? sc.scrollTop  : window.scrollY;
+    var scrollX = isEl ? sc.scrollLeft : window.scrollX;
     var hasV = scrollH > viewH + 1;
     var hasH = scrollW > viewW + 1;
 
@@ -146,6 +224,10 @@ function createOverlayScrollbar() {
       var thumbH = Math.max(40, (viewH / scrollH) * trackH);
       var maxST = scrollH - viewH;
       var thumbT = maxST > 0 ? (scrollY / maxST) * (trackH - thumbH) : 0;
+      // Position bar at the element's right edge, or at the viewport right edge.
+      KV.bar.style.right  = isEl ? (window.innerWidth  - rect.right)  + 'px' : '0';
+      KV.bar.style.top    = isEl ? rect.top    + 'px' : '0';
+      KV.bar.style.bottom = isEl ? (window.innerHeight - rect.bottom) + 'px' : '0';
       KV.bar.style.display = 'block';
       KV.thumb.style.height = thumbH + 'px';
       KV.thumb.style.top = Math.round(thumbT) + 'px';
@@ -158,6 +240,9 @@ function createOverlayScrollbar() {
       var thumbW = Math.max(40, (viewW / scrollW) * trackW);
       var maxSL = scrollW - viewW;
       var thumbL = maxSL > 0 ? (scrollX / maxSL) * (trackW - thumbW) : 0;
+      KH.bar.style.bottom = isEl ? (window.innerHeight - rect.bottom) + 'px' : '0';
+      KH.bar.style.left   = isEl ? rect.left   + 'px' : '0';
+      KH.bar.style.right  = isEl ? (window.innerWidth  - rect.right)  + 'px' : '0';
       KH.bar.style.display = 'block';
       KH.thumb.style.width = thumbW + 'px';
       KH.thumb.style.left = Math.round(thumbL) + 'px';
@@ -165,6 +250,8 @@ function createOverlayScrollbar() {
       KH.bar.style.display = 'none';
     }
 
+    corner.style.right  = isEl ? (window.innerWidth  - rect.right)  + 'px' : '0';
+    corner.style.bottom = isEl ? (window.innerHeight - rect.bottom) + 'px' : '0';
     corner.style.display = (hasV && hasH) ? 'block' : 'none';
   }
 
@@ -175,20 +262,20 @@ function createOverlayScrollbar() {
     KV.thumb.setPointerCapture(e.pointerId);
     var sc0 = getMainScroller();
     kvActive = true; kvStartY = e.clientY;
-    kvStartST = sc0 === document.body ? sc0.scrollTop : window.scrollY;
+    kvStartST = sc0 !== (document.scrollingElement || document.documentElement) ? sc0.scrollTop : window.scrollY;
   });
   KV.thumb.addEventListener('pointermove', function(e) {
     if (!kvActive) return;
     var sc = getMainScroller();
-    var isBody = sc === document.body;
-    var viewH = isBody ? sc.clientHeight : window.innerHeight;
-    var viewW = isBody ? sc.clientWidth  : window.innerWidth;
+    var isEl = sc !== (document.scrollingElement || document.documentElement);
+    var viewH = isEl ? sc.clientHeight : window.innerHeight;
+    var viewW = isEl ? sc.clientWidth  : window.innerWidth;
     var hasH = sc.scrollWidth > viewW + 1;
     var trackH = viewH - (hasH ? 12 : 0);
     var thumbH = Math.max(40, (viewH / sc.scrollHeight) * trackH);
     var ratio = (sc.scrollHeight - viewH) / Math.max(1, trackH - thumbH);
     var newY = kvStartST + (e.clientY - kvStartY) * ratio;
-    if (isBody) sc.scrollTop = newY; else window.scrollTo(window.scrollX, newY);
+    if (isEl) sc.scrollTop = newY; else window.scrollTo(window.scrollX, newY);
     updateMain();
   });
   KV.thumb.addEventListener('pointerup',     function() { kvActive = false; });
@@ -197,11 +284,11 @@ function createOverlayScrollbar() {
   KV.bar.addEventListener('click', function(e) {
     if (e.composedPath()[0] === KV.thumb) return;
     var sc = getMainScroller();
-    var isBody = sc === document.body;
-    var viewH = isBody ? sc.clientHeight : window.innerHeight;
+    var isEl = sc !== (document.scrollingElement || document.documentElement);
+    var viewH = isEl ? sc.clientHeight : window.innerHeight;
     var rect = KV.bar.getBoundingClientRect();
     var newY = ((e.clientY - rect.top) / rect.height) * (sc.scrollHeight - viewH);
-    if (isBody) sc.scrollTop = newY; else window.scrollTo(window.scrollX, newY);
+    if (isEl) sc.scrollTop = newY; else window.scrollTo(window.scrollX, newY);
     updateMain();
   });
 
@@ -212,20 +299,20 @@ function createOverlayScrollbar() {
     KH.thumb.setPointerCapture(e.pointerId);
     var sc0 = getMainScroller();
     khActive = true; khStartX = e.clientX;
-    khStartSL = sc0 === document.body ? sc0.scrollLeft : window.scrollX;
+    khStartSL = sc0 !== (document.scrollingElement || document.documentElement) ? sc0.scrollLeft : window.scrollX;
   });
   KH.thumb.addEventListener('pointermove', function(e) {
     if (!khActive) return;
     var sc = getMainScroller();
-    var isBody = sc === document.body;
-    var viewH = isBody ? sc.clientHeight : window.innerHeight;
-    var viewW = isBody ? sc.clientWidth  : window.innerWidth;
+    var isEl = sc !== (document.scrollingElement || document.documentElement);
+    var viewH = isEl ? sc.clientHeight : window.innerHeight;
+    var viewW = isEl ? sc.clientWidth  : window.innerWidth;
     var hasV = sc.scrollHeight > viewH + 1;
     var trackW = viewW - (hasV ? 12 : 0);
     var thumbW = Math.max(40, (viewW / sc.scrollWidth) * trackW);
     var ratio = (sc.scrollWidth - viewW) / Math.max(1, trackW - thumbW);
     var newX = khStartSL + (e.clientX - khStartX) * ratio;
-    if (isBody) sc.scrollLeft = newX; else window.scrollTo(newX, window.scrollY);
+    if (isEl) sc.scrollLeft = newX; else window.scrollTo(newX, window.scrollY);
     updateMain();
   });
   KH.thumb.addEventListener('pointerup',     function() { khActive = false; });
@@ -234,11 +321,11 @@ function createOverlayScrollbar() {
   KH.bar.addEventListener('click', function(e) {
     if (e.composedPath()[0] === KH.thumb) return;
     var sc = getMainScroller();
-    var isBody = sc === document.body;
-    var viewW = isBody ? sc.clientWidth : window.innerWidth;
+    var isEl = sc !== (document.scrollingElement || document.documentElement);
+    var viewW = isEl ? sc.clientWidth : window.innerWidth;
     var rect = KH.bar.getBoundingClientRect();
     var newX = ((e.clientX - rect.left) / rect.width) * (sc.scrollWidth - viewW);
-    if (isBody) sc.scrollLeft = newX; else window.scrollTo(newX, window.scrollY);
+    if (isEl) sc.scrollLeft = newX; else window.scrollTo(newX, window.scrollY);
     updateMain();
   });
 
@@ -248,7 +335,7 @@ function createOverlayScrollbar() {
   function findScrollable(el) {
     var mainSc = getMainScroller();
     while (el && el.nodeType === 1 && el !== document.documentElement) {
-      if (el === document.body && el === mainSc) return null;
+      if (el === mainSc) return null;
       var cs = window.getComputedStyle(el);
       if (/auto|scroll/.test(cs.overflow + ' ' + cs.overflowY + ' ' + cs.overflowX)) {
         if (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1) return el;
@@ -398,14 +485,22 @@ function createOverlayScrollbar() {
     if (mainRaf) return;
     mainRaf = requestAnimationFrame(function() { mainRaf = 0; updateMain(); });
   }, { capture: true, passive: true });
-  window.addEventListener('resize', function() { updateMain(); if (innerEl) updateInner(); }, { passive: true });
-  window.addEventListener('load',   updateMain,                                                { passive: true });
+  window.addEventListener('resize', function() {
+    invalidateScrollerCache();
+    updateMain(); if (innerEl) updateInner();
+  }, { passive: true });
+  window.addEventListener('load', updateMain, { passive: true });
 
   // Re-check when content grows after load (lazy images, JS-rendered sections).
+  // Also invalidates the scroller cache so getMainScroller() re-scans if needed.
   var resizeRaf = 0;
   var ro = new ResizeObserver(function() {
     if (resizeRaf) return;
-    resizeRaf = requestAnimationFrame(function() { resizeRaf = 0; updateMain(); });
+    resizeRaf = requestAnimationFrame(function() {
+      resizeRaf = 0;
+      invalidateScrollerCache();
+      updateMain();
+    });
   });
   ro.observe(document.documentElement);
   if (document.body) ro.observe(document.body);
