@@ -1831,6 +1831,7 @@ function clearBusyCursor(key, reason) {
 // ---- View event handler setup -----------------------------------------------
 
 function setupViewEventHandlers(key, win, view) {
+  let _hubSbWinLogged = false; // DIAG (remove after scrollbar fix)
   view.webContents.on('page-title-updated', (_e, title) => {
     if (panelViews[key] !== view) return;
     if (!win.isDestroyed()) win.webContents.send('panel-title', title);
@@ -1880,6 +1881,14 @@ function setupViewEventHandlers(key, win, view) {
 
     // Placeholder and blank pages are never real content.
     if (url.startsWith('data:') || url === 'about:blank') return;
+    // DIAG (remove after scrollbar fix)
+    if (key === 'hub' && !_hubSbWinLogged) {
+      _hubSbWinLogged = true;
+      if (!win.isDestroyed()) {
+        const v = panelViews.hub;
+        kioskLog(`[kiosk-sb-win] hub win=${JSON.stringify(win.getBounds())} content=${JSON.stringify(win.getContentSize())} view=${JSON.stringify((v && !v.webContents.isDestroyed()) ? v.getBounds() : {})} zoom=${(v && !v.webContents.isDestroyed()) ? v.webContents.getZoomFactor().toFixed(3) : 'n/a'}`);
+      }
+    } // end DIAG
     // Cached file — start the scroll+dwell loop immediately but don't treat it
     // as a completed DDG search (watchdog, retryCount, and timing logs stay
     // untouched).  We still go through onSearchPageReady so the follow-a-result
@@ -4288,11 +4297,21 @@ function createKioskWindow() {
 
     // The handle page re-renders its border/hinges from its own window
     // 'resize' listener, so no panel-hardware IPC is needed here.
+    let _hubSbWinTimer = null; // DIAG (remove after scrollbar fix)
     win.on('resize', () => {
       positionGrip(key);
       updateWindowShape(key);
       if (key === 'hub') repositionAddressBar();
       if (key === 'hub') repositionCarbon();
+      // DIAG (remove after scrollbar fix)
+      if (key === 'hub') {
+        clearTimeout(_hubSbWinTimer);
+        _hubSbWinTimer = setTimeout(() => {
+          const v = panelViews.hub;
+          if (!v || v.webContents.isDestroyed()) return;
+          kioskLog(`[kiosk-sb-win] hub win=${JSON.stringify(win.getBounds())} content=${JSON.stringify(win.getContentSize())} view=${JSON.stringify(v.getBounds())} zoom=${v.webContents.getZoomFactor().toFixed(3)}`);
+        }, 500);
+      }
     });
 
     let moveDebounce = null;
@@ -4493,6 +4512,32 @@ function attachActivityHandling() {
   ipcMain.on('kiosk-sb-diag', (event, info) => {
     const key  = webContentsIdToKey.get(event.sender.id) || '?';
     const kind = String(info.kind || '').slice(0, 80);
+    // DIAG (remove after scrollbar fix)
+    if (kind === 'bar') {
+      const br      = info.bar   || {};
+      const tr      = info.thumb || {};
+      const vvScale = info.vvScale != null ? Number(info.vvScale).toFixed(3) : 'n/a';
+      const vvW     = info.vvW    != null ? Math.round(Number(info.vvW))     : 'n/a';
+      kioskLog(
+        `[kiosk-sb-bar] ${key}` +
+        ` reason=${String(info.reason  || '').slice(0, 40)}` +
+        ` display=${String(info.display || '').slice(0, 20)}` +
+        ` bar=${Math.round(br.left||0)}x${Math.round(br.top||0)}` +
+        ` ${Math.round(br.width||0)}x${Math.round(br.height||0)}` +
+        ` thumb=${Math.round(tr.top||0)}/${Math.round(tr.height||0)}` +
+        ` view=${Math.round(Number(info.innerWidth)||0)}x${Math.round(Number(info.innerHeight)||0)}` +
+        ` scrollY=${Math.round(Number(info.scrollY)||0)}` +
+        ` scrollH=${Math.round(Number(info.scrollH)||0)}` +
+        ` dpr=${Number(info.dpr||1).toFixed(2)}` +
+        ` vvScale=${vvScale} vvW=${vvW}` +
+        ` connected=${!!info.connected}` +
+        ` raf=${Number(info.mainRaf)||0}/${Number(info.resizeRaf)||0}` +
+        ` sinceUpdate=${Math.round(Number(info.sinceUpdate)||0)}ms` +
+        ` at-mid=${String(info.atMid||'').slice(0, 80)}` +
+        ` at-top=${String(info.atTop||'').slice(0, 80)}`
+      );
+      return;
+    } // end DIAG
     const tag  = String(info.tag  || '').slice(0, 80);
     const id   = String(info.id   || '').slice(0, 80);
     const cls  = String(info.cls  || '').slice(0, 80);
@@ -5183,11 +5228,21 @@ function rebuildPanelWindow(key) {
     }, 500);
   });
 
+  let _hubSbWinTimer2 = null; // DIAG (remove after scrollbar fix)
   win.on('resize', () => {
     positionGrip(key);
     updateWindowShape(key);
     if (key === 'hub') repositionAddressBar();
     if (key === 'hub') repositionCarbon();
+    // DIAG (remove after scrollbar fix)
+    if (key === 'hub') {
+      clearTimeout(_hubSbWinTimer2);
+      _hubSbWinTimer2 = setTimeout(() => {
+        const v = panelViews.hub;
+        if (!v || v.webContents.isDestroyed()) return;
+        kioskLog(`[kiosk-sb-win] hub win=${JSON.stringify(win.getBounds())} content=${JSON.stringify(win.getContentSize())} view=${JSON.stringify(v.getBounds())} zoom=${v.webContents.getZoomFactor().toFixed(3)}`);
+      }, 500);
+    }
   });
 
   let moveDebounce = null;
