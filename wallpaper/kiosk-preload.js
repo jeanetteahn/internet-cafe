@@ -76,35 +76,27 @@ function createOverlayScrollbar() {
     return;
   }
 
-  var sty = document.createElement('style');
-  sty.textContent =
-    '.kv{position:fixed;right:0;top:0;width:12px;bottom:0;background:#fff;pointer-events:auto;}' +
-    '.kh{position:fixed;bottom:0;left:0;right:0;height:12px;background:#fff;pointer-events:auto;}' +
-    '.kc{position:fixed;right:0;bottom:0;width:12px;height:12px;background:#fff;pointer-events:none;}' +
-    '.iv{position:fixed;width:12px;background:#fff;pointer-events:auto;}' +
-    '.ih{position:fixed;height:12px;background:#fff;pointer-events:auto;}' +
-    '.kv .t,.iv .t{position:absolute;left:0;right:0;min-height:40px;' +
-      'background:#ea4b00;border:2px solid #fff;border-radius:6px;}' +
-    '.kh .t,.ih .t{position:absolute;top:0;bottom:0;min-width:40px;' +
-      'background:#ea4b00;border:2px solid #fff;border-radius:6px;}';
-  shadow.appendChild(sty);
-
-  function makeBar(cls) {
-    var bar = document.createElement('div'); bar.className = cls;
-    var thumb = document.createElement('div'); thumb.className = 't';
+  // Styles are applied directly via .style (not a <style> element) so they
+  // work on pages with a strict Content-Security-Policy (e.g. DDG live SERP).
+  function makeBar(barCss, isVertical) {
+    var bar   = document.createElement('div');
+    var thumb = document.createElement('div');
+    bar.style.cssText   = barCss;
+    thumb.style.cssText = isVertical
+      ? 'position:absolute;left:0;right:0;min-height:40px;background:#ea4b00;border:2px solid #fff;border-radius:6px;'
+      : 'position:absolute;top:0;bottom:0;min-width:40px;background:#ea4b00;border:2px solid #fff;border-radius:6px;';
     bar.appendChild(thumb);
     shadow.appendChild(bar);
     return { bar: bar, thumb: thumb };
   }
 
-  var KV = makeBar('kv');
-  var KH = makeBar('kh');
-  var corner = document.createElement('div'); corner.className = 'kc'; shadow.appendChild(corner);
-  var IV = makeBar('iv');
-  var IH = makeBar('ih');
-  IV.bar.style.display = 'none';
-  IH.bar.style.display = 'none';
-  corner.style.display = 'none';
+  var KV = makeBar('position:fixed;right:0;top:0;width:12px;bottom:0;background:#fff;pointer-events:auto;', true);
+  var KH = makeBar('position:fixed;bottom:0;left:0;right:0;height:12px;background:#fff;pointer-events:auto;', false);
+  var corner = document.createElement('div');
+  corner.style.cssText = 'position:fixed;right:0;bottom:0;width:12px;height:12px;background:#fff;pointer-events:none;display:none;';
+  shadow.appendChild(corner);
+  var IV = makeBar('position:fixed;width:12px;background:#fff;pointer-events:auto;display:none;', true);
+  var IH = makeBar('position:fixed;height:12px;background:#fff;pointer-events:auto;display:none;', false);
 
   function ensureHost() {
     if (!host.isConnected) document.documentElement.appendChild(host);
@@ -116,78 +108,6 @@ function createOverlayScrollbar() {
   // Cache for getMainScroller — { el, kind } or null (needs refresh).
   var mainScrollerCache = null;
   function invalidateScrollerCache() { mainScrollerCache = null; }
-
-  // Diagnostic: send one IPC per scroller change, capped at 10 per page.
-  // Top frame only; kind is 'window' | 'body' | 'element' | 'none'.
-  var diagCount = 0;
-  var diagLast  = '';
-  function maybeDiag(el, kind) {
-    if (window.top !== window) return;
-    if (diagCount >= 10) return;
-    var fp = kind + '|' + (el ? el.tagName : '') + '|' + (el ? (el.id || '') : '');
-    if (fp === diagLast) return;
-    diagLast = fp; diagCount++;
-    try {
-      var rect = el.getBoundingClientRect();
-      ipcRenderer.send('kiosk-sb-diag', {
-        kind: kind,
-        tag:  (el.tagName  || '').toLowerCase().slice(0, 80),
-        id:   (el.id       || '').slice(0, 80),
-        cls:  (typeof el.className === 'string' ? el.className.split(/\s+/)[0] : '').slice(0, 80),
-        w:    Math.round(rect.width),
-        h:    Math.round(rect.height),
-        sh:   el.scrollHeight,
-        vw:   window.innerWidth,
-        vh:   window.innerHeight,
-        host: (window.location.host || '').slice(0, 80),
-      });
-    } catch (_) {}
-  }
-
-  // DIAG (remove after scrollbar fix)
-  var lastUpdateAt = 0;
-  var barDiagCount = 0;
-  function elLabel(el) {
-    if (!el) return 'null';
-    var t = el.tagName ? el.tagName.toLowerCase() : '?';
-    var i = el.id ? '#' + el.id : '';
-    var c = el.className && typeof el.className === 'string' && el.className.trim()
-      ? '.' + el.className.trim().split(/\s+/)[0] : '';
-    return (t + i + c).slice(0, 40);
-  }
-  function reportBar(reason) {
-    if (window.top !== window) return;
-    if (barDiagCount >= 8) return;
-    barDiagCount++;
-    try {
-      var br     = KV.bar.getBoundingClientRect();
-      var tr     = KV.thumb.getBoundingClientRect();
-      var se     = document.scrollingElement || document.documentElement;
-      var vv     = window.visualViewport;
-      var atMidEl = document.elementFromPoint(window.innerWidth - 6, Math.round(window.innerHeight / 2));
-      var atTopEl = document.elementFromPoint(window.innerWidth - 6, 20);
-      ipcRenderer.send('kiosk-sb-diag', {
-        kind:        'bar',
-        reason:      String(reason).slice(0, 40),
-        display:     KV.bar.style.display,
-        bar:         { left: Math.round(br.left), top: Math.round(br.top), width: Math.round(br.width), height: Math.round(br.height) },
-        thumb:       { top: Math.round(tr.top), height: Math.round(tr.height) },
-        innerWidth:  window.innerWidth,
-        innerHeight: window.innerHeight,
-        scrollY:     Math.round(window.scrollY),
-        scrollH:     se.scrollHeight,
-        dpr:         window.devicePixelRatio,
-        vvScale:     vv ? vv.scale : null,
-        vvW:         vv ? Math.round(vv.width) : null,
-        connected:   host.isConnected,
-        mainRaf:     mainRaf,
-        resizeRaf:   resizeRaf,
-        sinceUpdate: lastUpdateAt ? Date.now() - lastUpdateAt : -1,
-        atMid:       elLabel(atMidEl),
-        atTop:       elLabel(atTopEl),
-      });
-    } catch (_) {}
-  }
 
   // Returns the element whose scroll position drives the main bar.
   // Priority: (1) viewport/window scroll, (2) <body> scroll, (3) largest
@@ -203,7 +123,6 @@ function createOverlayScrollbar() {
     // 1. Viewport scrolls normally.
     if (se.scrollHeight > window.innerHeight + 1) {
       mainScrollerCache = { el: se, kind: 'window' };
-      maybeDiag(se, 'window');
       return se;
     }
 
@@ -214,7 +133,6 @@ function createOverlayScrollbar() {
       if (/auto|scroll/.test(bcs.overflowY + ' ' + bcs.overflow) &&
           body.scrollHeight > body.clientHeight + 1) {
         mainScrollerCache = { el: body, kind: 'body' };
-        maybeDiag(body, 'body');
         return body;
       }
     }
@@ -240,13 +158,11 @@ function createOverlayScrollbar() {
     if (best) {
       mainScrollerCache = { el: best, kind: 'element' };
       if (ro) ro.observe(best);  // watch for future size changes
-      maybeDiag(best, 'element');
       return best;
     }
 
     // Nothing overflows — page is shorter than the viewport.
     mainScrollerCache = { el: se, kind: 'none' };
-    maybeDiag(se, 'none');
     return se;
   }
 
@@ -298,7 +214,6 @@ function createOverlayScrollbar() {
     corner.style.right  = isEl ? (window.innerWidth  - rect.right)  + 'px' : '0';
     corner.style.bottom = isEl ? (window.innerHeight - rect.bottom) + 'px' : '0';
     corner.style.display = (hasV && hasH) ? 'block' : 'none';
-    lastUpdateAt = Date.now(); // DIAG (remove after scrollbar fix)
   }
 
   // ---- KV drag ----
@@ -536,23 +451,6 @@ function createOverlayScrollbar() {
     updateMain(); if (innerEl) updateInner();
   }, { passive: true });
   window.addEventListener('load', updateMain, { passive: true });
-
-  // DIAG (remove after scrollbar fix)
-  window.addEventListener('load', function() {
-    setTimeout(function() { reportBar('load+1s'); }, 1000);
-  }, { once: true, passive: true });
-  var barResizeTimer = 0;
-  window.addEventListener('resize', function() {
-    clearTimeout(barResizeTimer);
-    barResizeTimer = setTimeout(function() { reportBar('resize'); }, 500);
-  }, { passive: true });
-  var barScrollLast = 0;
-  document.addEventListener('scroll', function() {
-    var now = Date.now();
-    if (now - barScrollLast < 5000) return;
-    barScrollLast = now;
-    reportBar('scroll');
-  }, { capture: true, passive: true });
 
   // Re-check when content grows after load (lazy images, JS-rendered sections).
   // Also invalidates the scroller cache so getMainScroller() re-scans if needed.
