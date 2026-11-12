@@ -12,6 +12,18 @@ try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) {}
 const serpDir = path.join(cacheDir, 'serp');
 try { fs.mkdirSync(serpDir, { recursive: true }); } catch (_) {}
 
+// Returns true only if the saved SERP file starts with <!DOCTYPE (standards mode).
+// Files saved before this fix lack the doctype and must be regenerated.
+function serpFileValid(fp) {
+  try {
+    const buf = Buffer.allocUnsafe(16);
+    const fd  = fs.openSync(fp, 'r');
+    const n   = fs.readSync(fd, buf, 0, 16, 0);
+    fs.closeSync(fd);
+    return buf.slice(0, n).toString('latin1').toLowerCase().startsWith('<!doctype');
+  } catch { return false; }
+}
+
 // ---- Clock / cursor size -----------------------------------------------------
 // Used for clock/carbon window sizes, FK_GRAPHIC_W, and spoon cursor scaling.
 const CLOCK_SIZE = 110; // window width and height (px)
@@ -1921,11 +1933,17 @@ function setupViewEventHandlers(key, win, view) {
             if (isDdgUrl && url.startsWith('https://html.duckduckgo.com/')) {
               const termAtSave = ps.currentTerm;
               view.webContents.executeJavaScript(
-                'document.querySelector("a.result__a") ? document.documentElement.outerHTML : null'
+                `(function(){
+                  if (!document.querySelector('a.result__a')) return null;
+                  var c = document.documentElement.cloneNode(true);
+                  ['#__kiosk_sb','#__kiosk_hinges'].forEach(function(s){var e=c.querySelector(s);if(e)e.remove();});
+                  return '<!DOCTYPE html>\\n' + c.outerHTML;
+                })()`
               )
                 .then(html => {
                   if (!html) return;
                   const withBase = html.replace('<head>', '<head><base href="https://html.duckduckgo.com/">');
+                  kioskLog(`[ddg] ${key} saving cleaned SERP for "${termAtSave || ''}"`);
                   // Per-panel startup placeholder (unchanged).
                   fs.writeFile(path.join(cacheDir, `${key}.html`), withBase, () => {});
                   // Per-term SERP file — lets cache hits show the search step.
@@ -2902,7 +2920,7 @@ async function onSearchBottom(key) {
     for (const [cachedTerm, cEntry] of serpCache) {
       if (Date.now() - cEntry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
       if (!cEntry.filePath) continue;
-      try { fs.accessSync(cEntry.filePath); } catch { continue; }
+      if (!serpFileValid(cEntry.filePath)) continue;
       const cEligible = filterCachedUrls(key, cEntry.urls);
       if (cEligible.length === 0) continue;
       kioskLog(`[ddg] ${key} no eligible results — loading cached SERP for "${cachedTerm}"`);
@@ -3252,8 +3270,8 @@ function nextAutoStep(key) {
       const pickN = (ps.resultsVisited || 0) + 1;
       const pickM = ps.resultsGoal || 1;
       if (ps.lastSerpFile) {
-        let fileOk = false;
-        try { fs.accessSync(ps.lastSerpFile); fileOk = true; } catch { ps.lastSerpFile = null; }
+        const fileOk = serpFileValid(ps.lastSerpFile);
+        if (!fileOk) ps.lastSerpFile = null;
         if (fileOk) {
           kioskLog(`[kiosk-auto] ${key} back to results page (saved-file) for pick ${pickN}/${pickM}`);
           ps.autoPhase   = 'search';
@@ -3356,7 +3374,7 @@ function showSavedSerpDuringPause(key) {
     for (const [cachedTerm, entry] of serpCache) {
       if (Date.now() - entry.fetchedAt >= SERP_CACHE_TTL_MS) continue;
       if (!entry.filePath) continue;
-      try { fs.accessSync(entry.filePath); } catch { continue; }
+      if (!serpFileValid(entry.filePath)) continue;
       if (!passFilter(cachedTerm)) continue;
       const eligible = filterCachedUrls(key, entry.urls, { duringPause: true });
       if (eligible.length === 0) continue;
@@ -3379,7 +3397,7 @@ function showSavedSerpDuringPause(key) {
   // rather than parking; park only when no SERP files exist at all.
   for (const [anyTerm, entry] of serpCache) {
     if (!entry.filePath) continue;
-    try { fs.accessSync(entry.filePath); } catch { continue; }
+    if (!serpFileValid(entry.filePath)) continue;
     kioskLog(`[ddg] ${key} pause: showing saved SERP "${anyTerm}" (relaxed, 0 eligible)`);
     ddgStats.savedSerpShows++;
     ps.currentTerm     = anyTerm;
@@ -3575,21 +3593,17 @@ function doSearch(key) {
         kioskLog(`[ddg] ${key} search="${term}" type=saved-serp use=${useCt}`);
         ddgStats.cacheHits++;
         // Show the saved SERP file so the panel displays the search step.
-        if (serpEntry.filePath) {
-          let fileOk = false;
-          try { fs.accessSync(serpEntry.filePath); fileOk = true; } catch {}
-          if (fileOk) {
-            ddgStats.savedSerpShows++;
-            ps.loadingSerp = true;
-            const v = panelViews[key];
-            if (!v || v.webContents.isDestroyed()) return;
-            v.webContents.loadURL('file://' + serpEntry.filePath).catch(() => {
-              ps.loadingSerp = false;
-              serpCache.delete(term); // force fresh fetch on retry
-              doSearch(key);
-            });
-            return;
-          }
+        if (serpEntry.filePath && serpFileValid(serpEntry.filePath)) {
+          ddgStats.savedSerpShows++;
+          ps.loadingSerp = true;
+          const v = panelViews[key];
+          if (!v || v.webContents.isDestroyed()) return;
+          v.webContents.loadURL('file://' + serpEntry.filePath).catch(() => {
+            ps.loadingSerp = false;
+            serpCache.delete(term); // force fresh fetch on retry
+            doSearch(key);
+          });
+          return;
         }
         // No file yet — fall back to jumping directly to a result page.
         ps.queuedResults = eligible.slice(1).map(u => ({ target: u, domHref: u, tier: 'cache' }));
@@ -4240,9 +4254,13 @@ function createKioskWindow() {
     view.setBounds({ x: M, y: HANDLE_HEIGHT + M, width: panelW, height: panelH });
     view.setAutoResize({ width: true, height: true });
     const cachedPage = path.join(cacheDir, `${key}.html`);
-    if (fs.existsSync(cachedPage)) {
+    if (serpFileValid(cachedPage)) {
       view.webContents.loadFile(cachedPage);
     } else {
+      if (fs.existsSync(cachedPage)) {
+        fs.unlink(cachedPage, () => {});
+        kioskLog(`[ddg] ${key} stale startup cache skipped (no DOCTYPE) — loading placeholder`);
+      }
       view.webContents.loadURL(PLACEHOLDER_URL);
     }
     panelViews[key] = view;
@@ -5115,9 +5133,13 @@ function rebuildPanelWindow(key) {
   view.setBounds({ x: M, y: HANDLE_HEIGHT + M, width: panelW, height: panelH });
   view.setAutoResize({ width: true, height: true });
   const cachedPage = path.join(cacheDir, `${key}.html`);
-  if (fs.existsSync(cachedPage)) {
+  if (serpFileValid(cachedPage)) {
     view.webContents.loadFile(cachedPage);
   } else {
+    if (fs.existsSync(cachedPage)) {
+      fs.unlink(cachedPage, () => {});
+      kioskLog(`[ddg] ${key} stale startup cache skipped (no DOCTYPE) — loading placeholder`);
+    }
     view.webContents.loadURL(PLACEHOLDER_URL);
   }
   panelViews[key] = view;
