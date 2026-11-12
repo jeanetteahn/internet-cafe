@@ -322,8 +322,8 @@ echo "  busySize=${BUSY_SIZE}  busyOuter=${BUSY_OUTER_W}x${BUSY_OUTER_H}  busyHo
 BUSY_GEN_SCRIPT="$TMP_DIR/busy-gen.js"
 cat > "$BUSY_GEN_SCRIPT" << 'BUSYGEN_EOF'
 const fs   = require('fs');
-const json = JSON.parse(process.argv[1]);
-const dir  = process.argv[2];
+const json = JSON.parse(process.argv[2]);
+const dir  = process.argv[3];
 for (let i = 0; i < 24; i++) {
   const angle = i * 15;          // degrees clockwise
   const half  = json.busySize / 2;
