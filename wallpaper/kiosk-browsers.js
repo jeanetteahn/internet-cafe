@@ -4842,13 +4842,19 @@ function _windowOnDisplay(win) {
   );
 }
 
+// Set once the app starts quitting.  Closing windows during shutdown look
+// "destroyed" to the health check, which used to rebuild all 9 windows in the
+// middle of a memory-guard exit.
+let appQuitting = false;
+app.on('before-quit', () => { appQuitting = true; });
+
 // Every 30 s: verify each panel window and overlay window exists and is
 // visible.  Rebuild or re-show anything that fails, then re-assert
 // alwaysOnTop and re-stack.  Uses showInactive() so the health check never
 // steals focus from a customer.
 function startHealthCheck() {
   setInterval(() => {
-    if (!_lastWorkArea) return;
+    if (!_lastWorkArea || appQuitting) return;
     let repairs = 0;
 
     // ---- Check the 5 panel windows -----------------------------------------
@@ -4960,6 +4966,7 @@ function startCacheClearTimer() {
 // Replace the BrowserView for one auto-mode panel to release renderer memory.
 // Never touches active panels or all five at once.
 function recyclePanelView(key) {
+  if (appQuitting) return; // never build new views during shutdown
   const win = panelWindows.get(key);
   if (!win || win.isDestroyed()) return;
   const ps = panelStates.get(key);
@@ -5034,6 +5041,7 @@ function recyclePanelView(key) {
 // Rebuild a destroyed (or missing) panel window at its home bounds.
 // Called by the health check when panelWindows.get(key) is gone.
 function rebuildPanelWindow(key) {
+  if (appQuitting) return; // never build new windows during shutdown
   const bounds = homeBounds.get(key);
   if (!bounds) {
     kioskLog(`health: rebuildPanelWindow ${key}: no home bounds, cannot rebuild`);

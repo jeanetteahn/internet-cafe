@@ -71,10 +71,22 @@ HEIGHT=$(echo "$GEOMETRY" | awk '{print $2}')
 PID_DIR="/tmp/internet-cafe-wallpaper"
 QUIT_FLAG="$PID_DIR/quit-requested"
 LAUNCHER_PID_FILE="$PID_DIR/launcher.pid"
-SUPERVISOR_LOG="$PID_DIR/supervisor.log"
-WALLPAPER_ELECTRON_LOG="$PID_DIR/wallpaper-electron.log"
-KIOSK_ELECTRON_LOG="$PID_DIR/kiosk-electron.log"
 mkdir -p "$PID_DIR"
+
+# Logs live outside /tmp so they survive a reboot: /tmp is wiped on boot, which
+# erased every exit code (SIGSEGV etc.) from earlier sessions.  PID_DIR above
+# stays in /tmp on purpose — its flags must NOT outlive a reboot.
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/internet-cafe"
+mkdir -p "$LOG_DIR"
+SUPERVISOR_LOG="$LOG_DIR/supervisor.log"
+WALLPAPER_ELECTRON_LOG="$LOG_DIR/wallpaper-electron.log"
+KIOSK_ELECTRON_LOG="$LOG_DIR/kiosk-electron.log"
+# Keep each log under ~5 MB: rotate to <name>.1 at launch.
+for _f in "$SUPERVISOR_LOG" "$WALLPAPER_ELECTRON_LOG" "$KIOSK_ELECTRON_LOG"; do
+  if [ -f "$_f" ] && [ "$(stat -c %s "$_f" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    mv -f "$_f" "$_f.1"
+  fi
+done
 
 sup_log() {
   local msg
@@ -131,16 +143,19 @@ xset s off s noblank -dpms 2>/dev/null || true
 # Default nightly restart to 4 AM if not already set in the environment.
 export KIOSK_NIGHTLY_RESTART_HOUR=${KIOSK_NIGHTLY_RESTART_HOUR:-4}
 
-# Resolve the Electron userData log directory (default XDG location on Linux).
-_USER_DATA_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/internet-cafe"
+# Electron userData directories (default XDG location on Linux).  Each
+# process gets its own: kiosk-main.js runs as the default app name "Electron",
+# main.js under the package.json name "weather-wallpaper".
+_KIOSK_DATA_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/Electron"
+_WALLPAPER_DATA_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/weather-wallpaper"
 
 sup_log "starting (pid=$$, electron=$ELECTRON_BIN, geometry=${WIDTH}x${HEIGHT})"
 sup_log "log files:"
 sup_log "  supervisor:         $SUPERVISOR_LOG"
 sup_log "  kiosk-electron:     $KIOSK_ELECTRON_LOG"
 sup_log "  wallpaper-electron: $WALLPAPER_ELECTRON_LOG"
-sup_log "  kiosk-app:          $_USER_DATA_DIR/logs/kiosk.log"
-sup_log "  wallpaper-app:      $_USER_DATA_DIR/logs/wallpaper.log"
+sup_log "  kiosk-app:          $_KIOSK_DATA_DIR/logs/kiosk.log"
+sup_log "  wallpaper-app:      $_WALLPAPER_DATA_DIR/logs/wallpaper.log"
 
 # ---- Wallpaper supervisor loop -----------------------------------------------
 # Restarts xwinwrap + electron (main.js) whenever they exit.

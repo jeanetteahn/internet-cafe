@@ -18,6 +18,19 @@ const { app, globalShortcut, powerMonitor, screen } = require('electron');
 const { createKioskWindow, areAllPanelsAuto } = require('./kiosk-browsers');
 const { registerSelf, killOthers, requestQuit, clearQuitFlag } = require('./process-pair');
 const { kioskLog, LOG_FILE } = require('./kiosk-log');
+const fs = require('fs');
+
+// Memory the system can still hand out, in MB.  On Linux this is MemAvailable
+// from /proc/meminfo (free + reclaimable cache); elsewhere os.freemem().
+function readAvailableMemoryMb() {
+  if (process.platform === 'linux') {
+    try {
+      const m = fs.readFileSync('/proc/meminfo', 'utf8').match(/^MemAvailable:\s+(\d+)\s+kB/m);
+      if (m) return Math.round(parseInt(m[1], 10) / 1024);
+    } catch (_) {}
+  }
+  return Math.round(os.freemem() / 1024 / 1024);
+}
 
 // KIOSK_DISABLE_GPU=1 — call before app.whenReady() so it takes effect.
 // Use this if logs show repeated GPU child-process-gone events.
@@ -124,9 +137,18 @@ app.whenReady().then(() => {
   }
 
   // Memory metrics every 5 minutes so we can spot leaks before a disappearance.
-  // Memory guard: if total working set exceeds KIOSK_MEMORY_LIMIT_MB (default
-  // 60 % of total system RAM) and every panel is in auto mode, exit cleanly so
-  // the supervisor restarts before the Linux OOM killer strikes.
+  // Memory guard: if the machine is running out of memory and every panel is
+  // in auto mode, exit cleanly so the supervisor restarts before the Linux OOM
+  // killer strikes.
+  //
+  // The trigger is the system's *available* memory (MemAvailable), not the
+  // summed working sets: that sum counts memory shared between Chromium
+  // processes once per process, so on the NucBox it read ~5 GB while the
+  // machine had ~4.5 GB free, and the guard restarted the kiosk for nothing.
+  //   KIOSK_MIN_AVAILABLE_MB  restart when available memory drops below this
+  //                           (default 15 % of total RAM)
+  //   KIOSK_MEMORY_LIMIT_MB   optional old-style cap on the summed working
+  //                           sets; only applied when explicitly set
   setInterval(() => {
     try {
       const mem     = process.memoryUsage();
@@ -135,24 +157,34 @@ app.whenReady().then(() => {
       for (const m of metrics) {
         totalWS += (m.memory && m.memory.workingSetSize) ? m.memory.workingSetSize : 0;
       }
-      const totalWSMb = Math.round(totalWS / 1024);
+      const totalWSMb   = Math.round(totalWS / 1024);
+      const totalMb     = Math.round(os.totalmem() / 1024 / 1024);
+      const availableMb = readAvailableMemoryMb();
       kioskLog(
         `memory heap=${Math.round(mem.heapUsed / 1024 / 1024)}MB` +
         ` rss=${Math.round(mem.rss / 1024 / 1024)}MB` +
         ` all-processes-ws=${totalWSMb}MB` +
-        ` processes=${metrics.length}`
+        ` processes=${metrics.length}` +
+        ` system-available=${availableMb}MB/${totalMb}MB`
       );
 
-      const rawLimit = process.env.KIOSK_MEMORY_LIMIT_MB;
-      const limitMb  = rawLimit
-        ? parseInt(rawLimit, 10)
-        : Math.round(os.totalmem() / 1024 / 1024 * 0.6);
-      if (Number.isFinite(limitMb) && limitMb > 0 && totalWSMb > limitMb) {
+      const rawMinAvail = process.env.KIOSK_MIN_AVAILABLE_MB;
+      const minAvailMb  = rawMinAvail ? parseInt(rawMinAvail, 10) : Math.round(totalMb * 0.15);
+      const rawLimit    = process.env.KIOSK_MEMORY_LIMIT_MB;
+      const wsLimitMb   = rawLimit ? parseInt(rawLimit, 10) : NaN;
+
+      let reason = null;
+      if (Number.isFinite(minAvailMb) && minAvailMb > 0 && availableMb < minAvailMb) {
+        reason = `system available ${availableMb}MB below minimum ${minAvailMb}MB`;
+      } else if (Number.isFinite(wsLimitMb) && wsLimitMb > 0 && totalWSMb > wsLimitMb) {
+        reason = `${totalWSMb}MB exceeds KIOSK_MEMORY_LIMIT_MB ${wsLimitMb}MB`;
+      }
+      if (reason) {
         if (kioskWindows && areAllPanelsAuto()) {
-          kioskLog(`memory guard: ${totalWSMb}MB exceeds limit ${limitMb}MB — exiting for supervisor restart`);
+          kioskLog(`memory guard: ${reason} — exiting for supervisor restart`);
           app.quit();
         } else {
-          kioskLog(`memory guard: ${totalWSMb}MB exceeds limit ${limitMb}MB — panel active, skipping restart`);
+          kioskLog(`memory guard: ${reason} — panel active, skipping restart`);
         }
       }
     } catch (e) {
