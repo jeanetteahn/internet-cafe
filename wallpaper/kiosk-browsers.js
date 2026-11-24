@@ -211,6 +211,34 @@ const LOCATION_REFRESH_MS = 6 * 60 * 60 * 1000; // 6 hours
 // Non-http(s) schemes (file:, javascript:, chrome:, etc.) are always blocked.
 const BROWSING_POLICY = 'open';
 
+// UNSAFE_HOSTS: hostnames under an allowlisted domain that are NOT the real
+// site — spam or hijacked subdomains that search results surface.  Never
+// auto-followed, and blocked in active mode too.
+//   media.v2.nationalgeographic.com — redirects to a scam site; it also
+//     crashed the kiosk (exit 139) within ~12 s on 3 of 4 visits (2026-11-19).
+//   wwww.nationalgeographic.com     — typo-squat host, plain http.
+const UNSAFE_HOSTS = [
+  'media.v2.nationalgeographic.com',
+  'wwww.nationalgeographic.com',
+];
+
+// Server-alias / typo subdomains (mail.ducksters.com, ftp.sciencekids.co.nz,
+// wwww.…) answer with a copy of the real site because of wildcard DNS, which
+// is exactly what spam and hijack pages hide behind.  A subdomain whose first
+// label matches this is never treated as part of an allowlisted domain.
+const SUSPICIOUS_FIRST_LABEL = /^(?:ww|w{4,}|ww\d+|www\d+|mail|webmail|email|smtp|pop|imap|ftp|cpanel|webdisk|whm|autodiscover|autoconfig|ns\d*|mx\d*|v\d+)$/i;
+
+function isUnsafeHost(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  if (UNSAFE_HOSTS.some(d => h === d || h.endsWith('.' + d))) return true;
+  // Any label of the form v1 / v2 / … inside the host (media.v2.…) is a
+  // versioned-infrastructure name, not a page kids should land on.
+  const labels = h.split('.');
+  if (labels.length > 2 && SUSPICIOUS_FIRST_LABEL.test(labels[0])) return true;
+  if (labels.slice(0, -2).some(l => /^v\d+$/.test(l))) return true;
+  return false;
+}
+
 // BLOCKED_DOMAINS: hosts whose navigations are cancelled in active 'open' mode.
 // Matching is exact hostname or any subdomain.
 const BLOCKED_DOMAINS = [
@@ -222,6 +250,7 @@ const BLOCKED_DOMAINS = [
   '4chan.org',
   'instagram.com',
   'onlyfans.com',
+  ...UNSAFE_HOSTS,
 ];
 
 // ALLOWED_DOMAINS is used in two places: (1) AUTO_LINK_POLICY='allowlist' controls
@@ -1141,6 +1170,7 @@ function buildSearchUrl(term, sites) {
 function isDomainAllowed(url, opts = {}) {
   try {
     const { hostname } = new URL(url);
+    if (isUnsafeHost(hostname)) return false;
     if (ALLOWED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d))) return true;
     if (opts.local) {
       if (LOCAL_EXTRA_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d))) return true;
@@ -1180,6 +1210,7 @@ function isPassesPolicy(url) {
     if (BROWSING_POLICY === 'allowlist') return isDomainAllowed(url);
     // 'open': block only BLOCKED_DOMAINS.
     const { hostname } = parsed;
+    if (isUnsafeHost(hostname)) return false;
     return !BLOCKED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d));
   } catch { return false; }
 }
@@ -5261,6 +5292,11 @@ function startNightlyRestartTimer() {
   setInterval(() => {
     const now = new Date();
     if (now.getHours() !== hour) return;
+    // lastFiredDay is lost when the process restarts, so without this the
+    // fresh kiosk quit again a minute later — the NucBox restarted ~60 times
+    // between 4:00 and 5:00 every night.  A process younger than an hour has
+    // already had its fresh start.
+    if (process.uptime() < 60 * 60) return;
     if (now.getDate() === lastFiredDay) return;
     const allAuto = Array.from(panelStates.values()).every(s => s.mode === 'auto');
     if (!allAuto) return;
